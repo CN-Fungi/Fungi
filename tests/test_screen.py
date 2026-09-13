@@ -219,6 +219,18 @@ def test_an_input_action_asks_nothing_and_pops_no_notice(monkeypatch):
             screen.Win(42, "demo", "Notepad", (0, 0, 5, 5), 5, "notepad.exe", "normal")
         ],
     )
+    # A window with a readable control: `wake_window` asks `shell_reason` first, and an
+    # unreadable one would send it to the shell path — and a *real* scan there needs
+    # comtypes, which CI does not install (that is exactly how this test failed CI on
+    # 2026-09-13: 480 passed, 1 failed, only in the comtypes-less environment).
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: [
+            (_cand(1, "保存", "Button", (0, 0, 5, 5), ("Invoke",)), object())
+        ],
+    )
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
     monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
 
     first_ok, _note = screen._guarded_input(42)
