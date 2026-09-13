@@ -1382,3 +1382,21 @@ type_text → (11, None)       控件里的文本与期望逐字符相同（含 
 粘贴是那条链路上**唯一被真机验证过**的落字方式；逐字在它们里面能不能落地还没测，所以不做默认——
 要改默认、或先拿微信实测一轮，说一声即可。
 
+## 38. 血缘盘点（2026-09-14）：五个老项目与 Fungi 的真实对应
+
+用户点名把五个老项目写进《详细版》的血缘一节（`docs/README-详细版.docx`），并说「你如果不肯定，可以分别确定一下
+fungi 中的哪部分能力和这些项目有重合，再写文档」。逐一读源码后（五个并行只读调研 + 复核），结论里**有两条是误归因**，
+一并记在这里，免得下次再查一遍：
+
+| 老项目 | 真实关系 | 证据 |
+|---|---|---|
+| **Get It**（日程提醒 App） | **同源** | `assets/ringtones/` 七个 WAV 由 `scripts/make_ringtones.py` 按 `Get It/get_it_pyqt/源文件/ringtone.py` 的配方移植（同振荡器/包络/音符序列）；`fungi/gui/ring.py` 开头就写着「the seven tones the user's Get It app plays」 |
+| **Ophio**（LAN 屏幕共享 + 手机远程操控） | **两部分同源** | ① 按键词汇表——`screen.py` 的 `_KEY_VK` 注释自认「the Ophio key_map's names and aliases」；② 粘滞修饰键/组合键语义（`_MODIFIER_VK` + `_held` + `release_all_keys`）。其余（a11y/OCR/切框/hwnd 身份/动作后校验）Ophio 全树 grep 零命中，是 Fungi 自研；坐标口径相反（Ophio 由手指给归一化坐标） |
+| **Typer**（逐字输入器） | **同源** | §37 就是这件事：`type_text()` 的骨架（一字符一次注入、`char_delay`、末字后不停顿、`\n`→Enter、不碰剪贴板）来自它；Fungi 把 pynput 换成自建 `SendInput` + `KEYEVENTF_UNICODE` |
+| **Huh**（PyQt6 截窗翻译工具） | **误归因**：上一代解法，且被有意换掉 | Huh 走 pygetwindow：标题子串认窗口 + 用户从列表里挑 + pyautogui 区域截图；Fungi 的窗口身份是 hwnd+pid+类名+状态，`screen.py` 里那句「never a title match」正是对它的否决。Fungi 全树/全文档零处提到 Huh |
+| **二值化**（`其他/二值化`） | **误归因**：同名不同物 | 那个项目是 **Floyd–Steinberg 抖动**（固定阈值 128 + 误差扩散），全文 grep `findContours/connected/contour/bbox/morph/Otsu/adaptiveThreshold` **零命中**，没有切框能力。Fungi `_visual_boxes` 的真祖先是探针原型 **`C:/tmp/pcbridge/pcbridge.py`**（cv2.adaptiveThreshold(21,8) / MORPH_CLOSE(9)×2 / findContours，尺寸 8..900、IoU 0.3 —— 与 Fungi 的 `INK_CONTRAST=8`/`INK_CLOSE=9`/`MIN_SIDE,MAX_SIDE`/`_overlaps(iou=0.3)` 逐项对应） |
+
+所以桌面控制这条线的**真正主心骨**（a11y → OCR → 程序侧切框 → 候选编号 → 动作后校验）没有先行项目可认：它是为
+「Agent 用 VLM 看屏」专门写的，`pcbridge.py` 是动手前的一次实测（§35.8 记着它不在仓库里），不是血亲。
+《详细版》里这段就是按这张表写的（含「上一代解法」「同名不同物」两条如实标注）。
+
