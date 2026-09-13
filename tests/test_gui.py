@@ -198,7 +198,7 @@ def test_the_desktop_control_switch_sits_under_experimental_and_disarms_when_off
     monkeypatch.setattr(
         config_page.config_mod, "save_config", lambda cfg: saved.update(pc_control=cfg.pc_control)
     )
-    monkeypatch.setattr(screen, "disarm", lambda reason="": disarmed.append(reason))
+    monkeypatch.setattr(screen, "disarm", lambda: disarmed.append(True))
 
     page = window.cfg_page
     root = page.layout()
@@ -238,7 +238,7 @@ def test_the_desktop_control_switch_sits_under_experimental_and_disarms_when_off
     saved.clear()
     page.pc_switch.setChecked(False)
     assert saved["pc_control"] is False
-    assert disarmed == ["设置页关闭了桌面控制"]
+    assert disarmed == [True]
     assert config_bytes() == before
 
 

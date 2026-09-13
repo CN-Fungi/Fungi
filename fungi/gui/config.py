@@ -175,7 +175,7 @@ class ConfigPage(QWidget):
         pc_row.addStretch(1)
         root.addLayout(pc_row)
         pc_hint = BodyLabel(
-            "让本机 Agent 看屏幕、点控件、粘文本。打开开关即表示你同意它直接动手——不再逐次弹卡片询问；"
+            "让本机 Agent 看屏幕、点控件、粘文本。打开开关即表示你同意它直接动手；\n"
             "关掉开关立刻收回，并释放所有还按着的键。\n"
             "注意：截图会随工具结果发给模型；需要管理员权限的窗口它够不到。"
         )
@@ -397,10 +397,10 @@ class ConfigPage(QWidget):
         if not checked:
             from ..tools import screen  # noqa: PLC0415 (desktop control only)
 
-            screen.disarm("设置页关闭了桌面控制")
+            screen.disarm()
         InfoBar.success(
             "已保存",
-            "桌面控制已开启：下一轮对话里 Agent 能看屏，动手前会先问你"
+            "桌面控制已开启：下一轮对话里 Agent 能看屏并直接动手"
             if checked
             else "桌面控制已关闭：下一轮起工具移除，已授权的动作也一并收回",
             duration=2500,

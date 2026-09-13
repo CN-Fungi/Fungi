@@ -778,7 +778,7 @@ class RoomBase:
         # capability belongs to a room with the user present (spec §35.2/§35.3).
         screen_module = sys.modules.get("fungi.tools.screen")
         if screen_module is not None:
-            screen_module.disarm("room stopped")
+            screen_module.disarm()
 
 
 class StoreSessions:

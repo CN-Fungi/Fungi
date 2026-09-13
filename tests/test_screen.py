@@ -64,7 +64,6 @@ def _clean_session():
     yield
     screen.release_all_keys()
     screen._session.disarm()
-    screen.set_notifier(None)
 
 
 # ── the key table: resolve everything before injecting anything ─────────────
@@ -112,26 +111,21 @@ def test_release_all_keys_clears_whatever_is_still_held(monkeypatch):
 
 
 # ── the armed window (spec §35.2) ──────────────────────────────────────────
-def test_disarm_releases_keys_forgets_frames_and_tells_the_machine(monkeypatch):
+def test_disarm_releases_keys_and_forgets_frames(monkeypatch):
     released = []
-    seen = []
     monkeypatch.setattr(screen, "release_all_keys", lambda: released.append(True) or ["0x11"])
-    screen.set_notifier(lambda title, body: seen.append(title))
-    screen._session.announced = True
     screen._session.labels = {"发送": _cand(0, "发送", "", (1, 2, 3, 4), (), "visual")}
     screen._session.remember(_frame())
-    screen.disarm("room stopped")
-    assert released and not screen._session.announced
+    screen.disarm()
+    assert released
     assert screen._session.labels == {} and len(screen._session.frames) == 0
-    assert seen == ["Fungi 已收回桌面控制"]
 
 
-def test_an_input_action_asks_nothing_and_says_so_once(monkeypatch):
+def test_an_input_action_asks_nothing_and_pops_no_notice(monkeypatch):
     """Consent is the settings switch (user decision 2026-09-13): no card per
-    action. What remains is one visible notice per session, not a block."""
-    hints: list[str] = []
+    action, and no toast either — a notification lands on top of the very screen
+    being driven (spec §35.14)."""
     monkeypatch.setattr(screen, "blocking_ask", lambda *a, **k: pytest.fail("asked the user"))
-    monkeypatch.setattr(screen, "_hint", lambda title, body: hints.append(title))
     monkeypatch.setattr(screen, "ensure_on_screen", lambda hwnd: "normal")
     monkeypatch.setattr(screen, "shell_wake", lambda hwnd: "no shell entry")
     monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
@@ -144,10 +138,12 @@ def test_an_input_action_asks_nothing_and_says_so_once(monkeypatch):
     )
     monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
 
-    first_ok, _note = screen._guarded_input("click", 42)
-    second_ok, _note = screen._guarded_input("click", 42)
+    first_ok, _note = screen._guarded_input(42)
+    second_ok, _note = screen._guarded_input(42)
     assert first_ok and second_ok
-    assert hints == ["Fungi 正在控制桌面"]  # once, and never again this session
+    # The tool has no way to reach a tray any more: nothing can pop over the window
+    # it is about to measure and click.
+    assert not hasattr(screen, "set_notifier")
 
 
 def test_a_window_that_stays_off_screen_is_refused(monkeypatch):
@@ -161,7 +157,7 @@ def test_a_window_that_stays_off_screen_is_refused(monkeypatch):
         ],
     )
     monkeypatch.setattr(screen, "window_state", lambda hwnd: "hidden")
-    ok, note = screen._guarded_input("click", 42)
+    ok, note = screen._guarded_input(42)
     assert ok is False and "cannot be driven" in note
 
 
@@ -701,7 +697,7 @@ def test_a_real_control_outranks_a_label(monkeypatch):
 def test_labels_die_with_the_session():
     screen._session.labels = {"发送": _cand(0, "发送", "", (1, 2, 3, 4), (), "visual")}
     screen._session.labels_hwnd = 42
-    screen.disarm("test")
+    screen.disarm()
     assert screen._session.labels == {} and screen._session.labels_hwnd == 0
 
 
@@ -769,7 +765,7 @@ def test_type_pastes_verifies_and_survives_its_own_side_effect(monkeypatch):
     not fall over *after* the paste already happened: a leftover attribute made the
     tool report an error while the text was already sitting in the chat box
     (2026-09-13, found while sending a real message through QQ)."""
-    monkeypatch.setattr(screen, "_guarded_input", lambda action, hwnd: (True, ""))
+    monkeypatch.setattr(screen, "_guarded_input", lambda hwnd: (True, ""))
     monkeypatch.setattr(screen, "wake_window", lambda hwnd, via="auto": [])
     monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
     monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
@@ -815,7 +811,7 @@ def test_double_click_reports_the_window_it_opened(monkeypatch):
     monkeypatch.setattr(screen, "_focused", lambda: {"name": "", "cls": "Static", "rect": (0,) * 4})
     monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
     monkeypatch.setattr(screen, "capture_problem", lambda hwnd: None)
-    monkeypatch.setattr(screen, "_guarded_input", lambda action, hwnd: (True, ""))
+    monkeypatch.setattr(screen, "_guarded_input", lambda hwnd: (True, ""))
     monkeypatch.setattr(screen, "window_rect", lambda hwnd: (900, 400, 1200, 600))
     monkeypatch.setattr(screen, "_window_text", lambda hwnd: "记事本" if hwnd == 777 else "桌面")
     screen._session.candidates = {1: pairs[0][0]}

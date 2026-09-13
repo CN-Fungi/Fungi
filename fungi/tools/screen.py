@@ -1261,8 +1261,7 @@ class Session:
     # No permission state lives here: the `pc_control` switch is the consent
     # (user decision 2026-09-13 — "the experimental switch means I already
     # allowed it"). What stays is bookkeeping that makes one action trustworthy:
-    # which window is where, what the user was told, and which keys are down.
-    announced: bool = False
+    # which window is where, and which keys are down.
     candidates: dict[int, Target] = field(default_factory=dict)
     candidates_hwnd: int = 0
     candidates_rect: tuple[int, int, int, int] | None = None
@@ -1276,7 +1275,6 @@ class Session:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def disarm(self) -> None:
-        self.announced = False
         self.labels.clear()
         self.labels_hwnd = 0
         self.labels_rect = None
@@ -1287,36 +1285,20 @@ class Session:
 
 
 _session = Session()
-# A one-slot registry rather than a global rebind: the hook is set once per
-# process (tray created) and read from agent threads.
-_notifier: list[Callable[[str, str], None]] = []
 
 
-def set_notifier(fn: Callable[[str, str], None] | None) -> None:
-    """A tray-notification hook (gui) so the machine itself says when the agent
-    has the desktop — the '本机可见提示' half of spec §35.2."""
-    _notifier.clear()
-    if fn is not None:
-        _notifier.append(fn)
-
-
-def _hint(title: str, body: str) -> None:
-    if not _notifier:
-        return
-    with contextlib.suppress(Exception):  # a notification must never break an action
-        _notifier[0](title, body)
-
-
-def disarm(reason: str = "disarmed") -> None:
+def disarm() -> None:
     """End the armed window; releases keys, drops frames, forgets candidates.
     Bound to the room's stop and the process exit, so a crash cannot leave the
-    host's keyboard half-pressed."""
-    released = release_all_keys()
+    host's keyboard half-pressed.
+
+    Nothing is announced: a tray toast pops over the very screen being driven and
+    steals focus from it (user decision 2026-09-13 — spec §35.14)."""
+    release_all_keys()
     _session.disarm()
-    _hint("Fungi 已收回桌面控制", f"{reason}；已释放按键：{', '.join(released) or '无'}")
 
 
-atexit.register(disarm, "process exit")
+atexit.register(disarm)
 
 
 # ── target resolution: the model names one, the program locates it ─────────
@@ -1761,17 +1743,16 @@ def _escalate(sink, key: str, what: str, detail: str, should_abort, on_answer, c
     )
 
 
-def _guarded_input(action: str, hwnd: int) -> tuple[bool, str]:
+def _guarded_input(hwnd: int) -> tuple[bool, str]:
     """The part of every input action that is not the action itself.
 
     Nothing here asks the user for permission: `config.json`'s `pc_control` switch
     *is* the consent (user decision 2026-09-13 — "the experimental switch means I
-    already allowed it"). What remains is what the tool owes the machine: it says
-    once per session that it has the desktop (visible, not blocking), and it wakes
-    a window that is minimized or hiding in the notification area before anything
-    tries to measure or click it.
+    already allowed it"). Nothing is announced either — a toast lands on top of the
+    screen being driven (spec §35.14). What remains is what the tool owes the
+    machine: it wakes a window that is minimized or hiding in the notification area
+    before anything tries to measure or click it.
     """
-    announce_once(action)
     # A minimized window's controls sit at their icon coordinates and a hidden one
     # has no on-screen geometry at all: wake it before anything measures or clicks,
     # through the path that actually wakes its application (see wake_window).
@@ -1815,7 +1796,7 @@ def _click_once(args, sink, should_abort, on_answer, call_id, *, clicks: int) ->
         first = resolve_target(hwnd, args)
         if isinstance(first, str):
             return first
-    ok, note = _guarded_input(gesture, hwnd)
+    ok, note = _guarded_input(hwnd)
     if not ok:
         return note
     # Raise it before measuring: a click has to land in the window the caller
@@ -1889,7 +1870,7 @@ def _action_type(args: dict, sink, should_abort, on_answer, call_id) -> str | Im
         if isinstance(resolved, str):
             return resolved
         target = resolved
-    ok, note = _guarded_input("type", hwnd)
+    ok, note = _guarded_input(hwnd)
     if not ok:
         return note
     set_foreground(hwnd)
@@ -1953,7 +1934,7 @@ def _action_key(args: dict, sink, should_abort, on_answer, call_id) -> str | Ima
     names = [str(k) for k in args.get("keys") or []]
     if not names:
         return 'ERROR: key needs keys=[...] (e.g. ["ctrl","s"] or ["enter"])'
-    ok, note = _guarded_input("key", hwnd)
+    ok, note = _guarded_input(hwnd)
     if not ok:
         return note
     set_foreground(hwnd)
@@ -2017,7 +1998,7 @@ def _action_scroll(args: dict, sink, should_abort, on_answer, call_id) -> str | 
         first = resolve_target(hwnd, args)
         if isinstance(first, str):
             return first
-    ok, note = _guarded_input("scroll", hwnd)
+    ok, note = _guarded_input(hwnd)
     if not ok:
         return note
     set_foreground(hwnd)
@@ -2218,21 +2199,6 @@ def _named_a11y(hwnd: int) -> int:
     return sum(1 for cand, _ in _scan(hwnd, limit=40) if cand.name)
 
 
-def announce_once(action: str) -> None:
-    """Say on this machine that the agent has the desktop — visible, not blocking.
-
-    One notice per session: consent is the settings switch, so there is no card to
-    wait on, but the machine should still be told (spec §35.2).
-    """
-    if _session.announced:
-        return
-    _session.announced = True
-    _hint(
-        "Fungi 正在控制桌面",
-        f"已按设置里的开关直接操作：{action}；可在设置页随时关掉，关掉即立刻收回",
-    )
-
-
 def wake_window(hwnd: int, via: str = "auto") -> list[str]:
     """Get a window on screen, choosing the path the *application* needs.
 
@@ -2289,7 +2255,6 @@ def _action_restore(args: dict) -> str | ImageRead:
     """
     hwnd = int(args["hwnd"])
     via = str(args.get("via") or "auto").strip().lower()
-    announce_once("restore")
     was = window_state(hwnd)
     notes = wake_window(hwnd, via)
     now = window_state(hwnd)
