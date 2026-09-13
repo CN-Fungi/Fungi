@@ -1451,6 +1451,15 @@ def _windows_report(limit: int = 20, include_hidden: bool = False) -> str:
             "targets(hwnd=<it>) lists the tray icons, and a tray-only app usually also has its "
             "own [hidden] or [minimized] row here — targets(hwnd=<that one>) restores it."
         )
+    desktop = _desktop_surface()
+    if desktop and any(win.hwnd == desktop for win in windows):
+        lines.append(
+            f"  the desktop is the 0x{desktop:X} row above: targets(hwnd={desktop}) lists the "
+            "desktop icons (one row per icon), and double_click(hwnd=<it>, name=<icon text>) "
+            "opens that one — this is how an application with no window, no taskbar button and no "
+            "tray icon is started. Icons are covered by whatever window is on top, so that click "
+            "is refused (and told why) until the desktop itself is showing."
+        )
     if not include_hidden:
         lines.append(
             '  (hidden/tray windows are left out; call windows again with include="all" to see '
@@ -1595,12 +1604,31 @@ def _action_targets(args: dict) -> str | ImageRead:
     return ImageRead(f"{summary}\n[numbered frame attached: {dims}, {mime}]", [url])
 
 
+def covering_window(point: tuple[int, int]) -> int:
+    """The top-level window a click at this point would actually reach; 0 if none.
+
+    The tool has two decisions that both rest on this one question — "may I click this
+    rectangle" and "is that desktop icon still reachable" — and a rectangle existing in
+    the a11y tree answers neither: measured 2026-09-14, the desktop's 微信 icon kept its
+    coordinates while a terminal covered it, so a click there would have gone to the
+    terminal.
+    """
+    at = int(_u32.WindowFromPoint(wt.POINT(point[0], point[1])) or 0)
+    return int(_u32.GetAncestor(at, GA_ROOT) or 0) if at else 0
+
+
 def target_problem(hwnd: int, target: Target) -> str | None:
-    """Why this target must not be clicked — both cases are measured ones.
+    """Why this target must not be clicked — all three cases are measured ones.
 
     * Outside the window the caller asked to act on: the click lands on whatever
       is underneath it. A mis-resolved target put a real click on a desktop file
       on 2026-09-13.
+    * Something else covers the point: the click would go to *that* window. Measured
+      2026-09-14: with a terminal in front, the desktop's own 微信 icon still resolves
+      (its rectangle is right there in the a11y tree) while `WindowFromPoint` at its
+      centre returns the terminal — so "the rectangle exists" is not permission to
+      click. The caller raises the window first, so for a normal window this only
+      refuses targets that are genuinely covered.
     * A rectangle that is the whole window surface with no pattern at all: a
       self-drawn UI exposes exactly one such element (WeChat 4.x's
       MMUIRenderSubWindowHW), and its centre is not a control — it is a guess.
@@ -1614,6 +1642,19 @@ def target_problem(hwnd: int, target: Target) -> str | None:
         return (
             f"{target.label} sits outside window 0x{hwnd:X} "
             f"({left},{top},{right},{bottom}) — clicking there would hit whatever is underneath"
+        )
+    at = covering_window((centre_x, centre_y))
+    if not at:
+        return (
+            f"{target.label} is at ({centre_x},{centre_y}), where no window answers at all — "
+            "there is nothing to click there"
+        )
+    if at != hwnd:
+        cover = _window_text(at) or _class_name(at) or f"0x{at:X}"
+        return (
+            f"{target.label} is covered: ({centre_x},{centre_y}) belongs to {cover!r} "
+            f"(0x{at:X}), so the click would go there instead of to 0x{hwnd:X}. Move that "
+            "window out of the way first (or click what you actually want on it)"
         )
     area = (target.rect[2] - target.rect[0]) * (target.rect[3] - target.rect[1])
     window_area = (right - left) * (bottom - top)
@@ -1820,7 +1861,7 @@ def _click_once(args, sink, should_abort, on_answer, call_id, *, clicks: int) ->
     # Raise it before measuring: a click has to land in the window the caller
     # named, and for an unaware process that is also what makes its pixels
     # readable at all.
-    raised = set_foreground(hwnd)
+    raised = True if _is_shell_surface(hwnd) else set_foreground(hwnd)
     target = resolve_target(hwnd, args) if not ready else first
     if isinstance(target, str):
         return target
@@ -2234,15 +2275,14 @@ def _desktop_reachable(point: tuple[int, int]) -> bool:
 
     Anything covering the desktop covers its icons with it, and a blind double-click
     would land on that window — the wrong-click class this tool refuses everywhere
-    else. Measured 2026-09-13: with a browser maximized, `WindowFromPoint` at a desktop
+    else. Measured 2026-09-14: with a browser maximized, `WindowFromPoint` at a desktop
     icon returned the browser's render host; with the desktop showing, it returned the
-    desktop's own SysListView32 (root: Progman).
+    desktop's own SysListView32 (root: Progman). Raising the desktop does not help:
+    `set_foreground(Progman)` makes 'Program Manager' the foreground window and leaves
+    the covering window exactly where it was.
     """
     desktop = _desktop_surface()
-    if not desktop:
-        return False
-    at = int(_u32.WindowFromPoint(wt.POINT(point[0], point[1])) or 0)
-    return bool(at) and int(_u32.GetAncestor(at, GA_ROOT) or 0) == desktop
+    return bool(desktop) and covering_window(point) == desktop
 
 
 def _entry(surface: int, found: Target, where: str, clicks: int, *, raise_first=False) -> Entry:
@@ -2364,6 +2404,18 @@ def shell_reason(hwnd: int, win: Win, *, just_woken: bool = False) -> str | None
         # keeps its renderer asleep even once it is visible again.
         return f"it draws itself ({win.cls}) and was just brought back"
     return None
+
+
+def _is_shell_surface(hwnd: int) -> bool:
+    """The desktop or the taskbar: the two windows that are never raised.
+
+    `set_foreground` there measured 2026-09-14 as pure loss: on the desktop it moved the
+    foreground to 'Program Manager' and uncovered not one icon, so it takes the user's
+    focus and buys nothing. Clicks do not need the help either — the taskbar is topmost,
+    and the desktop's icons are only clicked while `covering_window` already says the
+    desktop is what is there.
+    """
+    return hwnd in (int(_u32.FindWindowW("Shell_TrayWnd", None) or 0), _desktop_surface())
 
 
 def _no_entry_reason(win: Win) -> str:
@@ -2501,8 +2553,9 @@ def wake_window(hwnd: int, via: str = "auto") -> list[str]:
             " normal and still ignore every input (measured on QQ and WeChat, 2026-09-13)"
         )
         time.sleep(SETTLE_S)
-    set_foreground(hwnd)
-    time.sleep(SETTLE_S)
+    if not _is_shell_surface(hwnd):
+        set_foreground(hwnd)
+        time.sleep(SETTLE_S)
     return notes
 
 
@@ -2611,6 +2664,14 @@ SCHEMA = {
             "Minimized or tray-hidden windows: they keep off-screen geometry, so measure "
             'nothing until `restore` has run — `windows include="all"` is how you get their '
             "hwnd, and the taskbar row in that list is where tray icons themselves live. "
+            "The desktop is a window as well (cls=Progman, titled 'Program Manager'): `targets` on "
+            "it lists the desktop icons, and `double_click` on one starts that application — the "
+            "way to open something that is running nowhere at all (no window, no taskbar button, "
+            "no tray icon, so no hwnd to restore). Do not go looking for the exe on disk instead: "
+            "the icons are the app's own entry point. While another window covers the icons that "
+            "click is refused and the refusal names the window on top — bring the desktop up first "
+            "(`key` with ['win','d'] shows it, the same keys bring the windows back), or act on the "
+            "window that is actually covering it. "
             "`restore` opens a window through whatever is at hand (触手可及): the application's "
             "own entry point on screen — its taskbar button, its tray icon, or its desktop icon "
             "(double-clicked, so it goes last: a taskbar click activates the running window "

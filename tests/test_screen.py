@@ -228,6 +228,24 @@ def test_the_report_marks_state_and_names_the_taskbar(monkeypatch):
     text = screen._windows_report(include_hidden=True)
     assert "[hidden]" in text and "Shell_TrayWnd" in text and "← foreground" in text
     assert "targets(hwnd=" in text  # the tray path is stated, not left to be guessed
+    assert "the desktop is the" not in text  # no desktop row in this list: no claim about one
+
+
+def test_the_report_points_at_the_desktop_as_a_place_to_open_things(monkeypatch):
+    """The gap a real turn fell into (2026-09-14): asked to open WeChat, the model saw no
+    WeChat window, found no tray entry, and went off to `start` the exe from disk. The
+    desktop row was right there in the listing — nothing said it was the desktop."""
+    wins = [
+        screen.Win(11, "demo", "Notepad", (0, 0, 400, 300), 5, "notepad.exe", "normal"),
+        screen.Win(65864, "Program Manager", "Progman", (0, 0, 2240, 1400), 5, "explorer.exe"),
+    ]
+    monkeypatch.setattr(screen, "list_windows", lambda include_hidden=False: wins)
+    monkeypatch.setattr(screen, "foreground_hwnd", lambda: 11)
+    monkeypatch.setattr(screen, "_desktop_surface", lambda: 65864)
+    text = screen._windows_report()
+    assert "the desktop is the 0x10148 row" in text
+    assert "targets(hwnd=65864) lists the desktop icons" in text
+    assert "double_click(hwnd=<it>, name=<icon text>)" in text
 
 
 def test_targets_refuses_a_minimized_window_and_points_at_restore(monkeypatch):
@@ -681,6 +699,7 @@ def test_a_self_drawn_window_falls_back_to_ocr_text(monkeypatch):
 
 def test_the_whole_surface_of_a_self_drawn_window_is_not_clickable(monkeypatch):
     monkeypatch.setattr(screen, "window_rect", lambda hwnd: (0, 0, 1200, 800))
+    monkeypatch.setattr(screen, "covering_window", lambda point: 42)  # the target window is on top
     surface = screen.Target(1, "MMUIRenderSubWindow", "", (0, 0, 1200, 800), ())
     problem = screen.target_problem(42, surface)
     assert problem and "whole window surface" in problem and "name=<text>" in problem
@@ -689,6 +708,27 @@ def test_the_whole_surface_of_a_self_drawn_window_is_not_clickable(monkeypatch):
     assert screen.target_problem(42, editor) is None  # a real control, even a big one
     small = screen.Target(3, "搜索", "", (100, 100, 200, 130), ())
     assert screen.target_problem(42, small) is None
+
+
+def test_a_covered_target_is_refused_and_names_what_covers_it(monkeypatch):
+    """Measured 2026-09-14: the desktop's own 微信 icon keeps its rectangle in the a11y
+    tree while a terminal covers it — so a rectangle is not permission to click. The
+    desktop shortcut is the case that made this visible: 'why did it not see it' was
+    really 'it saw it and refused to click the terminal instead'."""
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (0, 0, 2240, 1400))
+    monkeypatch.setattr(screen, "covering_window", lambda point: 0x5A0938)
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "π : Remove GUI popup")
+    problem = screen.target_problem(42, _cand(1, "微信", "", (117, 147, 233, 238), ("Invoke",)))
+    assert problem and "covered" in problem
+    assert "π : Remove GUI popup" in problem and "0x5A0938" in problem
+
+    monkeypatch.setattr(screen, "covering_window", lambda point: 0)  # nothing there at all
+    assert "no window answers" in screen.target_problem(
+        42, _cand(1, "微信", "", (117, 147, 233, 238), ("Invoke",))
+    )
+
+    monkeypatch.setattr(screen, "covering_window", lambda point: 42)  # ours, on top
+    assert screen.target_problem(42, _cand(1, "微信", "", (117, 147, 233, 238), ())) is None
 
 
 def test_a_target_outside_its_window_is_refused(monkeypatch):
@@ -1018,6 +1058,7 @@ def test_three_fruitless_attempts_ask_the_user_instead_of_retrying(monkeypatch):
     monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
     monkeypatch.setattr(screen, "ensure_on_screen", lambda hwnd: "normal")
     monkeypatch.setattr(screen, "window_rect", lambda hwnd: (900, 400, 1200, 600))
+    monkeypatch.setattr(screen, "covering_window", lambda point: 42)  # our window is on top
     screen._session.candidates = {1: pairs[0][0]}
     screen._session.candidates_hwnd = 42
 
@@ -1065,20 +1106,23 @@ def test_double_click_reports_the_window_it_opened(monkeypatch):
         *before,
         screen.Win(777, "记事本", "Notepad", (10, 20, 300, 400), 9, "notepad.exe", "normal"),
     ]
-    calls = []
+    calls: list = []
     gestures: list = []
 
+    def fake_click(*_a, **kwargs):
+        calls.append(1)  # from the injection on: the new window exists
+        gestures.append(kwargs.get("clicks"))
+        return True
+
     def fake_windows(include_hidden=False):
-        calls.append(1)
-        return before if len(calls) == 1 else after
+        return after if calls else before
 
     monkeypatch.setattr(screen, "list_windows", fake_windows)
     monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: pairs)
-    monkeypatch.setattr(
-        screen, "click_at", lambda *a, **k: gestures.append(k.get("clicks")) or True
-    )
+    monkeypatch.setattr(screen, "click_at", fake_click)
     monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((20, 20)))
     monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "covering_window", lambda point: 42)  # the desktop is on top
     monkeypatch.setattr(screen, "_focused", lambda: {"name": "", "cls": "Static", "rect": (0,) * 4})
     monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
     monkeypatch.setattr(screen, "capture_problem", lambda hwnd: None)

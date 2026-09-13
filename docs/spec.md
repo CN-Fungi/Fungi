@@ -1271,4 +1271,44 @@ AttributeError，拿不到 AUMID 这类能对齐 exe 的身份。）
   194x56 的气球宿主）始终是 hidden。所以判定改成"注入前后比可见窗口列表"，与 §35.13 双击同一证据规则：
   `clicked its 托盘图标 'OneDrive - 个人' and it opened 'Activity Center' instead`。
 
+### 35.16 被盖住的矩形不许点；桌面/任务栏永不"抬起"（2026-09-14 用户追问「为啥它没看见桌面的微信快捷方式」）
+
+**先说结论：它看见了，只是拒绝点。** 用户机器桌面上有 `微信` 快捷方式，`at_hand` 对微信窗口（运行中且藏在托盘）一直匹配得到它
+——2026-09-13 那次全窗口实测里有 `'微信' proc=Weixin.exe state=hidden desktop='微信'`。用户看到的是**拒绝**：双击前那一步
+hit-test 发现图标位置现在归别的窗口。
+
+**实测（都在这台机器上）**
+
+- 桌面 a11y 里 `微信` 是第 10 行：`[Invoke+Select+ScrollItem] '微信' rect=(117,147,233,238) centre=(175,192)`——**矩形一直在**。
+- 但同一时刻 `WindowFromPoint(175,192)` 返回 `CASCADIA_HOSTING_WINDOW_CLASS 'π : Remove GUI popup…'`（用户自己的终端窗口）
+  → 双击会打在终端上。**"矩形存在"不等于"可以点"**。
+- **抬起桌面没用**：`set_foreground(Progman)` 返回 True、前台确实变成 `Program Manager`，但终端照样盖着那个图标
+  （`WindowFromPoint` 仍是终端）——它只偷走用户焦点，一个图标都没露出来。
+- 因此 `_is_shell_surface()`（桌面 + 任务栏）**永不 `set_foreground`**：`wake_window(desktop)` 实测返回 `[]` 且前台**不变**
+  （`0x5A0938` 保持），而以前会抢焦点。
+
+**落进代码的两条硬路径**
+
+1. **`target_problem()` 增加"被盖住"拒绝**（`covering_window(point)` = `GetAncestor(WindowFromPoint(p), GA_ROOT)`）：
+   点必须落在调用者指定的那个窗口上。动作路径本来就会先 `set_foreground`，所以普通窗口不受影响；桌面/全屏面则如实报
+   `is covered: (175,192) belongs to 'π : Remove GUI popup…' (0x5A0938), so the click would go there instead of to 0x10148.`
+   ——把"谁盖着它"写进结果，模型可以自己去点那个窗口的最小化按钮。`WindowFromPoint` 返回 0 也拒绝（屏幕上那里没有可点的窗口）。
+2. **`at_hand` 的桌面分支**（§35.15 已有）用同一个 `covering_window` 判定，被盖住时返回 None 并给出同一句话。
+
+**为什么这是对的而不是"再想想办法"**：用户此前已经因为 `win+d` 被搞乱过窗口布局（handoff §4），所以"为了点桌面图标先把所有窗口收起来"
+不作为默认行为。要露桌面得由模型/用户显式决定（例如先点掉盖住它的那个窗口）——工具只负责说清是谁盖的。
+
+**同一天的真实回合并暴露了更大的洞（2026-09-14，用户贴出的一轮「打开微信」）**：微信**根本没在跑**（`windows include="all"`
+里一个 `Weixin.exe` 都没有），于是 `at_hand` 那条路整条不适用——它挂在"手里有一个窗口"上。那一轮模型的做法是：
+`windows` → `dir`/`where` 找 exe → **bash `start` 起 Weixin.exe**。桌面的 `微信` 快捷方式一直在 `windows` 列表里
+（`hwnd=65864 0x10148 explorer.exe 'Program Manager'`），但**没有任何一句话告诉它那是桌面**：列表只解释了任务栏那一行。
+能力其实早就存在——`targets(hwnd=65864)` 实测直接列出 35 个图标（`#2 'PakePlus'` … `#10 '微信'` 带 `Invoke+Select+ScrollItem`），
+`double_click(name="微信")` 就是入口。缺的是**可发现性**，所以补两处（都是给模型看的文字，不是新机制）：
+
+1. `windows` 报告在任务栏那行之后加一句桌面行：`the desktop is the 0x10148 row above: targets(hwnd=65864) lists the
+   desktop icons (one row per icon), and double_click(hwnd=<it>, name=<icon text>) opens that one — this is how an
+   application with no window, no taskbar button and no tray icon is started.`（+ 被盖住会被拒并说明原因）
+2. 工具描述里把"没在跑的应用"写明：**别去磁盘上找 exe**，桌面图标就是它自己的入口；被盖住时先用 `key ['win','d']` 露桌面
+   （再按一次就收回来），或者去处理盖住它的那个窗口。
+
 
