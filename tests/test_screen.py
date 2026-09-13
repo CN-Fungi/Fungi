@@ -764,6 +764,68 @@ def test_three_fruitless_attempts_ask_the_user_instead_of_retrying(monkeypatch):
     assert screen._session.failures == {}  # the counter resets once the user answered
 
 
+def test_type_pastes_verifies_and_survives_its_own_side_effect(monkeypatch):
+    """`type` pastes (never types), verifies by reading the control back, and must
+    not fall over *after* the paste already happened: a leftover attribute made the
+    tool report an error while the text was already sitting in the chat box
+    (2026-09-13, found while sending a real message through QQ)."""
+    monkeypatch.setattr(screen, "_guarded_input", lambda action, hwnd: (True, ""))
+    monkeypatch.setattr(screen, "wake_window", lambda hwnd, via="auto": [])
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((200, 100)))
+    monkeypatch.setattr(screen, "_read_back_settled", lambda hwnd, target: ("你好", "Edit"))
+    monkeypatch.setattr(screen, "snapshot_clipboard", lambda: screen.ClipSnapshot())
+    pasted: list[str] = []
+    monkeypatch.setattr(screen, "set_clipboard_text", lambda text: pasted.append(text) or True)
+    monkeypatch.setattr(screen, "restore_clipboard", lambda snap: None)
+    monkeypatch.setattr(screen, "send_keys", lambda names: (names, None))
+
+    out = str(screen._action_type({"hwnd": 42, "text": "你好"}, None, None, None, None))
+    assert pasted == ["你好"]  # the paste is the side effect
+    assert "verified: read back '你好'" in out
+
+
+def test_double_click_reports_the_window_it_opened(monkeypatch):
+    """The open gesture's visible effect is usually a *new* window, not a repaint of
+    the one that was clicked — double-clicking a desktop icon launches an app, and
+    that is the whole point of having the gesture back (user, 2026-09-13)."""
+    pairs = [(_cand(1, "微信", "", (1000, 500, 1100, 520)), object())]
+    before = [
+        screen.Win(42, "桌面", "SysListView32", (0, 0, 2240, 1400), 5, "explorer.exe", "normal")
+    ]
+    after = [
+        *before,
+        screen.Win(777, "记事本", "Notepad", (10, 20, 300, 400), 9, "notepad.exe", "normal"),
+    ]
+    calls = []
+    gestures: list = []
+
+    def fake_windows(include_hidden=False):
+        calls.append(1)
+        return before if len(calls) == 1 else after
+
+    monkeypatch.setattr(screen, "list_windows", fake_windows)
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: pairs)
+    monkeypatch.setattr(
+        screen, "click_at", lambda *a, **k: gestures.append(k.get("clicks")) or True
+    )
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((20, 20)))
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "_focused", lambda: {"name": "", "cls": "Static", "rect": (0,) * 4})
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "capture_problem", lambda hwnd: None)
+    monkeypatch.setattr(screen, "_guarded_input", lambda action, hwnd: (True, ""))
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (900, 400, 1200, 600))
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "记事本" if hwnd == 777 else "桌面")
+    screen._session.candidates = {1: pairs[0][0]}
+    screen._session.candidates_hwnd = 42
+
+    out = str(screen._action_double_click({"hwnd": 42, "target": 1}, None, None, None, None))
+    assert gestures == [2]  # two press/release pairs reach the mouse, not one
+    assert out.startswith("DOUBLE_CLICK") and "opened '记事本'" in out and "verified" in out
+
+
 # ── the gate: the tool does not exist until the user turns it on ───────────
 def test_the_tool_refuses_everything_until_pc_control_is_on():
     out = screen._run(Config(), None, {"action": "windows"})
@@ -780,7 +842,7 @@ def test_an_unknown_action_says_what_is_available():
 def test_every_input_action_insists_on_a_window_id():
     cfg = Config()
     cfg.pc_control = True
-    for action in ("click", "type", "key", "scroll", "restore"):
+    for action in ("click", "double_click", "type", "key", "scroll", "restore"):
         out = screen._run(cfg, None, {"action": action})
         assert "needs hwnd" in out, action
 
@@ -793,6 +855,7 @@ def test_the_tool_offers_the_actions_the_spec_promises():
         "targets",
         "label",
         "click",
+        "double_click",
         "type",
         "key",
         "scroll",

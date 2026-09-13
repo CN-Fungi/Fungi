@@ -51,6 +51,8 @@ FAILURE_LIMIT = 3  # strikes before the tool asks the user instead of retrying
 MAX_CANDIDATES = 60
 DIFF_THRESHOLD = 0.002  # fraction of changed pixels that counts as an effect
 SETTLE_S = 0.30  # let the app repaint before the verifying frame
+DOUBLE_CLICK_GAP_S = 0.06  # well inside the system's double-click time (default 0.5s)
+LAUNCH_WAIT_S = 3.0  # a gesture that starts a process: its window is not up immediately
 SHOT_MAX_DIM = 1568  # same vision sweet spot as files.IMAGE_MAX_DIM
 
 _u32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -214,12 +216,17 @@ def list_windows(include_hidden: bool = False) -> list[Win]:
         rect = window_rect(hwnd)
         if rect is None:
             return True
+        # A minimized window's GetWindowRect is its icon slot (-48000,-48000 measured
+        # on this box): read the restored geometry *before* the size filter, or every
+        # minimized window is thrown out as icon-sized plumbing — which made the
+        # every-window view lose exactly the windows `restore` exists for, and made
+        # `shell_wake` answer "the window is gone" for them (2026-09-13).
+        if state == "minimized" and (restored := normal_rect(hwnd)) is not None:
+            rect = restored
         # In the every-window view, skip icon-sized plumbing (1x1 bridges, driver
         # status windows): measured 59 rows -> 40 useful ones on this box.
         if include_hidden and (rect[2] - rect[0] < 40 or rect[3] - rect[1] < 40):
             return True
-        if state == "minimized" and (restored := normal_rect(hwnd)) is not None:
-            rect = restored
         pid = wt.DWORD()
         _u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         out.append(
@@ -1053,11 +1060,16 @@ def _mouse_event(x: int, y: int, flags: int) -> int:
     return _send(_INPUT(INPUT_MOUSE, _INPUTUNION(mi=_MOUSEINPUT(x, y, 0, flags, 0, None))))
 
 
-def click_at(x: int, y: int, button: str = "left") -> bool:
-    """Absolute click at physical screen coordinates.
+def click_at(x: int, y: int, button: str = "left", clicks: int = 1) -> bool:
+    """Absolute click(s) at physical screen coordinates.
 
     Normalized against the virtual desktop — SendInput's 0..65535 space covers
     every monitor, not just the primary one.
+
+    `clicks=2` is the double-click: both press/release pairs land inside the
+    system's double-click time, with no pointer movement between them, which is
+    what makes the shell (and an app's own hit-testing) read it as one gesture
+    rather than two clicks.
     """
     _ensure_dpi()
     ox, oy = _virtual_origin()
@@ -1066,12 +1078,15 @@ def click_at(x: int, y: int, button: str = "left") -> bool:
     ny = int((y - oy) * 65535 / max(1, height - 1))
     move = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
     down, up = _BUTTON_FLAGS.get(button, _BUTTON_FLAGS["left"])
-    injected = (
-        _mouse_event(nx, ny, move)
-        + _mouse_event(nx, ny, move | down)
-        + _mouse_event(nx, ny, move | up)
-    )
-    return injected == 3  # a struct-size mistake makes SendInput return 0 silently
+    injected = _mouse_event(nx, ny, move)
+    for index in range(clicks):
+        if index:
+            time.sleep(DOUBLE_CLICK_GAP_S)
+        injected += _mouse_event(nx, ny, move | down)
+        injected += _mouse_event(nx, ny, move | up)
+    # one move plus a press/release pair per click; a struct-size mistake makes
+    # SendInput return 0 silently, which is what this number is here to catch
+    return injected == 1 + 2 * clicks
 
 
 def _key_event(vk: int, *, down: bool) -> int:
@@ -1771,7 +1786,25 @@ def _guarded_input(action: str, hwnd: int) -> tuple[bool, str]:
 
 
 def _action_click(args: dict, sink, should_abort, on_answer, call_id) -> str | ImageRead:
+    return _click_once(args, sink, should_abort, on_answer, call_id, clicks=1)
+
+
+def _action_double_click(args: dict, sink, should_abort, on_answer, call_id) -> str | ImageRead:
+    """Open something with the gesture a person would use.
+
+    Back in the tool face on the user's call (2026-09-13): `shell_open` only covers
+    what we already know the path of, and an icon drawn on the desktop, inside a
+    list, or in an app that lives in neither the taskbar nor the tray can only be
+    opened by being double-clicked. It is also the one "open" that starts a *fresh*
+    process — the single wake path that never yields the "visible but asleep" window
+    (spec §35.13).
+    """
+    return _click_once(args, sink, should_abort, on_answer, call_id, clicks=2)
+
+
+def _click_once(args, sink, should_abort, on_answer, call_id, *, clicks: int) -> str | ImageRead:
     hwnd = int(args["hwnd"])
+    gesture = "double_click" if clicks == 2 else "click"
     # Resolve before asking for permission: a name that does not exist should come
     # back as no_target, not as a card the user answers for nothing. A window that
     # is not on screen cannot be measured first, so that case waits for the wake-up.
@@ -1782,7 +1815,7 @@ def _action_click(args: dict, sink, should_abort, on_answer, call_id) -> str | I
         first = resolve_target(hwnd, args)
         if isinstance(first, str):
             return first
-    ok, note = _guarded_input("click", hwnd)
+    ok, note = _guarded_input(gesture, hwnd)
     if not ok:
         return note
     # Raise it before measuring: a click has to land in the window the caller
@@ -1795,28 +1828,46 @@ def _action_click(args: dict, sink, should_abort, on_answer, call_id) -> str | I
     problem = target_problem(hwnd, target)
     if problem:
         return f"ERROR: {problem}"
+    known_windows = {w.hwnd for w in list_windows()} if clicks == 2 else set()
     before = grab_window(hwnd)
-    injected = click_at(*target.center, button=str(args.get("button") or "left"))
+    injected = click_at(*target.center, button=str(args.get("button") or "left"), clicks=clicks)
     time.sleep(SETTLE_S)
+    # A gesture meant to open something: what it opens is a *new* window, and that
+    # may be the only visible effect — the window the double-click landed in is
+    # allowed to look unchanged (spec §35.13).
+    launched: list = []
+    if clicks == 2:
+        deadline = time.monotonic() + LAUNCH_WAIT_S
+        while True:
+            launched = [w for w in list_windows() if w.hwnd not in known_windows]
+            if launched or time.monotonic() >= deadline:
+                break
+            time.sleep(0.2)
     after = grab_window(hwnd)
     if after is not None:
         _session.remember(after)
     focused = _focused()
     changed = _diff_ratio(before, after) if before is not None and after is not None else 0.0
     focus_hit = bool(focused) and target.name and target.name in focused.get("name", "")
-    verified = injected and (changed > DIFF_THRESHOLD or focus_hit)
-    key = f"click:{hwnd}:{target.label}"
+    verified = injected and (changed > DIFF_THRESHOLD or focus_hit or bool(launched))
+    key = f"{gesture}:{hwnd}:{target.label}"
     if verified:
         _clear_strikes(key)
     elif _strike(key) >= FAILURE_LIMIT:
         detail = f"目标 {target.label}；注入={injected}；画面变化={changed:.3%}；前台={raised}"
         return _escalate(
-            sink, key, f"click {target.label}", detail, should_abort, on_answer, call_id
+            sink, key, f"{gesture} {target.label}", detail, should_abort, on_answer, call_id
         )
+    if focus_hit:
+        effect = "focus matched"
+    elif launched:
+        effect = f"opened {_window_text(launched[0].hwnd)!r}"
+    else:
+        effect = f"frame changed {changed:.2%}"
     lines = [
-        f"CLICK {target.label} at {target.center} in hwnd=0x{hwnd:X} "
+        f"{gesture.upper()} {target.label} at {target.center} in hwnd=0x{hwnd:X} "
         f"({'injected' if injected else 'INJECTION FAILED'}){note}",
-        f"  verify: {'focus matched' if focus_hit else 'frame changed ' + format(changed, '.2%')} "
+        f"  verify: {effect} "
         f"→ {'verified' if verified else 'unverified (no visible effect)'}"
         f"{'' if raised else ' · could not raise the window to the foreground!'}",
         "  control: on (pc_control switch; no prompt for this action)",
@@ -1860,7 +1911,6 @@ def _action_type(args: dict, sink, should_abort, on_answer, call_id) -> str | Im
         return f"ERROR: {error}"
     time.sleep(SETTLE_S)
     after_value, _where = _read_back_settled(hwnd, target)
-    _session.typed_windows.add(hwnd)  # the Enter that sends this will ask again
     after_frame = grab_window(hwnd)
     if after_frame is not None:
         _session.remember(after_frame)
@@ -2018,6 +2068,9 @@ def _action_scroll(args: dict, sink, should_abort, on_answer, call_id) -> str | 
 
 TRAY_OVERFLOW_HINTS = ("显示隐藏的图标", "Show hidden icons", "显示隐藏的图标 ")
 TRAY_FLYOUT_CLASSES = ("TopLevelWindowForOverflowXamlIsland", "NotifyIconOverflowWindow")
+SHELL_WAKE_S = (
+    4.0  # the app's own wake path is asynchronous: a heavy tray app (WeChat) needs seconds
+)
 
 
 def _app_tokens(win: Win) -> list[str]:
@@ -2128,17 +2181,36 @@ def shell_wake(hwnd: int) -> str:
                     for cand, _ in _scan(flyout, limit=80):
                         if _shell_row([cand], win) is not None:
                             click_at(*cand.center)
-                            time.sleep(0.8)
-                            send_keys(["escape"])  # close the flyout again
-                            return f"clicked its tray icon {cand.name.splitlines()[0]!r}"
+                            # The tray click lands on explorer; the *application* then runs
+                            # its own wake path, which is asynchronous and can take
+                            # seconds (WeChat: measured slow enough that judging it after
+                            # 0.8s declared a live app dead — 2026-09-13). Wait for the
+                            # window itself to come up before deciding anything.
+                            woke = _await_state(hwnd, "normal", SHELL_WAKE_S)
+                            if woke:
+                                return f"clicked its tray icon {cand.name.splitlines()[0]!r} and it came up"
+                            send_keys(["escape"])  # nothing opened: close the flyout again
+                            return f"clicked its tray icon {cand.name.splitlines()[0]!r} but it stayed hidden"
                 send_keys(["escape"])
             continue
         if entry is not None:
             set_foreground(surface)
             click_at(*entry.center)
-            time.sleep(0.8)
-            return f"clicked its shell entry {entry.name.splitlines()[0]!r}"
+            woke = _await_state(hwnd, "normal", SHELL_WAKE_S)
+            name = entry.name.splitlines()[0]
+            return f"clicked its shell entry {name!r}" + ("" if woke else " but it stayed hidden")
     return "no taskbar button and no tray icon found for it"
+
+
+def _await_state(hwnd: int, want: str, timeout: float) -> bool:
+    """Poll the window's own state until it matches — the app wakes on its own clock."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if window_state(hwnd) == want:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
 
 
 def _named_a11y(hwnd: int) -> int:
@@ -2181,9 +2253,27 @@ def wake_window(hwnd: int, via: str = "auto") -> list[str]:
             notes.append(f"  shell wake first: {reason}")
         notes.append(f"  shell wake: {shell_wake(hwnd)}")
         time.sleep(SETTLE_S)
+        if window_state(hwnd) != "normal":
+            # One clean retry: the first click can be eaten while the overflow flyout
+            # is still closing.
+            notes.append(f"  shell wake (retry): {shell_wake(hwnd)}")
+            time.sleep(SETTLE_S)
+    if window_state(hwnd) != "normal":
+        restored = ensure_on_screen(hwnd)
+        if restored != "normal" and window_state(hwnd) != "normal":
+            # A window minimized by "show desktop" is held there by the shell, not by
+            # the application: `ShowWindow(SW_RESTORE)` measured 2026-09-13 left five
+            # of them minimized, while the taskbar button — the shell's own path —
+            # brings them back. So the shell gets a turn whenever the API did not work.
+            notes.append(f"  ShowWindow left it {restored}; shell path: {shell_wake(hwnd)}")
+            time.sleep(SETTLE_S)
     if window_state(hwnd) != "normal":
         was = ensure_on_screen(hwnd)
-        notes.append(f"  OS wake (ShowWindow): the shell path left it {was}")
+        notes.append(
+            f"  OS wake (ShowWindow): the shell path left it {was}"
+            " — the application never ran its own wake path, so this window may look"
+            " normal and still ignore every input (measured on QQ and WeChat, 2026-09-13)"
+        )
         time.sleep(SETTLE_S)
     set_foreground(hwnd)
     time.sleep(SETTLE_S)
@@ -2218,6 +2308,7 @@ def _action_restore(args: dict) -> str | ImageRead:
 
 _INPUT_ACTIONS = {
     "click": _action_click,
+    "double_click": _action_double_click,
     "type": _action_type,
     "key": _action_key,
     "scroll": _action_scroll,
@@ -2278,7 +2369,8 @@ SCHEMA = {
             "`windows` (numbered window list, hwnd + title + process), `shot` (a "
             "picture of the whole screen, or of one window with hwnd=), `targets` "
             "(the controls inside one window, numbered, with the same numbers drawn "
-            "on a picture). Input actions: `click`, `type` (pastes text), `key`, "
+            "on a picture). Input actions: `click`, `double_click` (the open "
+            "gesture for an icon that has no path you know), `type` (pastes text), `key`, "
             "`scroll`, plus `restore` (bring a minimized or tray-resident window back on "
             "screen, then picture it) and `label` (give a shape you recognised a name, so the "
             "next listing shows it instead of '(no text)') — every one of them takes hwnd= and names its target as "
@@ -2314,6 +2406,7 @@ SCHEMA = {
                         "targets",
                         "label",
                         "click",
+                        "double_click",
                         "type",
                         "key",
                         "scroll",
@@ -2357,7 +2450,7 @@ SCHEMA = {
                 "button": {
                     "type": "string",
                     "enum": ["left", "right"],
-                    "description": "click only: mouse button (default left)",
+                    "description": "click/double_click: mouse button (default left)",
                 },
                 "label": {
                     "type": "string",
