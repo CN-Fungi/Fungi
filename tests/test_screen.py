@@ -248,6 +248,23 @@ def test_the_report_points_at_the_desktop_as_a_place_to_open_things(monkeypatch)
     assert "double_click(hwnd=<it>, name=<icon text>)" in text
 
 
+def test_a_hint_is_not_written_for_a_row_the_cap_cut_off(monkeypatch):
+    """Both hints name a row "above" — so they may only be written when that row is in
+    the listing. The desktop sorts last (bottom of the z-order), so a crowded screen is
+    exactly where the cap drops it."""
+    wins = [
+        screen.Win(11, "demo", "Notepad", (0, 0, 400, 300), 5, "notepad.exe", "normal"),
+        screen.Win(65864, "Program Manager", "Progman", (0, 0, 2240, 1400), 5, "explorer.exe"),
+        screen.Win(13, "", "Shell_TrayWnd", (0, 0, 2240, 72), 7, "explorer.exe", "untitled"),
+    ]
+    monkeypatch.setattr(screen, "list_windows", lambda include_hidden=False: wins)
+    monkeypatch.setattr(screen, "foreground_hwnd", lambda: 11)
+    monkeypatch.setattr(screen, "_desktop_surface", lambda: 65864)
+    assert "the desktop is the" in screen._windows_report()  # everything printed
+    cut = screen._windows_report(limit=1)  # only the Notepad row fits
+    assert "the desktop is the" not in cut and "Shell_TrayWnd row above" not in cut
+
+
 def test_targets_refuses_a_minimized_window_and_points_at_restore(monkeypatch):
     monkeypatch.setattr(screen, "_u32", _U32())
     monkeypatch.setattr(screen, "window_state", lambda hwnd: "minimized")

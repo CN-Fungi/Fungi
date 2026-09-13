@@ -1436,7 +1436,8 @@ def _windows_report(limit: int = 20, include_hidden: bool = False) -> str:
         )
         + "; hwnd is the identity, titles are not)"
     ]
-    for win in windows[:limit]:
+    printed = windows[:limit]
+    for win in printed:
         mark = " ← foreground" if win.hwnd == front else ""
         note = "" if win.state == "normal" else f" [{win.state}]"
         # An untitled row is a system surface: its class is the only identity the
@@ -1445,14 +1446,18 @@ def _windows_report(limit: int = 20, include_hidden: bool = False) -> str:
         lines.append(
             f"  hwnd={win.hwnd} 0x{win.hwnd:X} {win.size} {win.proc or win.cls} {label}{note}{mark}"
         )
-    if tray:
+    # The hints name a row "above": only say that about a row that is actually in the
+    # listing, because the row cap can cut the taskbar or the desktop off (both sort
+    # last — the desktop is at the bottom of the z-order, the taskbar row is untitled).
+    shown = {win.hwnd for win in printed}
+    if tray and any(win.hwnd in shown for win in tray):
         lines.append(
             "  the taskbar/notification area is the Shell_TrayWnd row above: "
             "targets(hwnd=<it>) lists the tray icons, and a tray-only app usually also has its "
             "own [hidden] or [minimized] row here — targets(hwnd=<that one>) restores it."
         )
     desktop = _desktop_surface()
-    if desktop and any(win.hwnd == desktop for win in windows):
+    if desktop in shown:
         lines.append(
             f"  the desktop is the 0x{desktop:X} row above: targets(hwnd={desktop}) lists the "
             "desktop icons (one row per icon), and double_click(hwnd=<it>, name=<icon text>) "
