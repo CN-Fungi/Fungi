@@ -57,6 +57,9 @@ MAX_CANDIDATES = 60
 DIFF_THRESHOLD = 0.002  # fraction of changed pixels that counts as an effect
 SETTLE_S = 0.30  # let the app repaint before the verifying frame
 DOUBLE_CLICK_GAP_S = 0.06  # well inside the system's double-click time (default 0.5s)
+MOVE_STEPS = 14  # intermediate points on the way to a click target — a glide, not a teleport
+MOVE_DURATION_S = 0.22  # total travel time: a person's flick, and small against SETTLE_S
+MOVE_TOLERANCE_PX = 2  # measured round-trip error of the 0..65535 space: 0px, -1px at a corner
 LAUNCH_WAIT_S = 3.0  # a gesture that starts a process: its window is not up immediately
 SHOT_MAX_DIM = 1568  # same vision sweet spot as files.IMAGE_MAX_DIM
 
@@ -117,6 +120,8 @@ _u32.WindowFromPoint.restype = wt.HWND
 _u32.GetAncestor.argtypes = [wt.HWND, ctypes.c_uint]
 _u32.GetAncestor.restype = wt.HWND
 _u32.GetForegroundWindow.restype = wt.HWND
+_u32.GetCursorPos.argtypes = [ctypes.POINTER(wt.POINT)]
+_u32.GetCursorPos.restype = wt.BOOL
 
 SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
 SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
@@ -1078,33 +1083,95 @@ def _mouse_event(x: int, y: int, flags: int) -> int:
     return _send(_INPUT(INPUT_MOUSE, _INPUTUNION(mi=_MOUSEINPUT(x, y, 0, flags, 0, None))))
 
 
+def _norm_point(x: int, y: int) -> tuple[int, int]:
+    """Physical pixel → SendInput's 0..65535 space over the whole virtual desktop.
+
+    Not just the primary monitor: the virtual desk flags make the same numbers mean
+    the same pixels on every display.
+    """
+    _ensure_dpi()
+    ox, oy = _virtual_origin()
+    width, height = _virtual_size()
+    return (
+        int((x - ox) * 65535 / max(1, width - 1)),
+        int((y - oy) * 65535 / max(1, height - 1)),
+    )
+
+
+def cursor_pos() -> tuple[int, int] | None:
+    """Where the pointer is, in physical pixels (None if the OS will not say)."""
+    point = wt.POINT()
+    return (point.x, point.y) if _u32.GetCursorPos(ctypes.byref(point)) else None
+
+
+def _smoothstep(t: float) -> float:
+    """0→1 with no jerk at either end: what makes a glide read as a hand and not a jerk."""
+    return t * t * (3.0 - 2.0 * t)
+
+
+def move_to(x: int, y: int, *, steps: int = MOVE_STEPS, duration: float = MOVE_DURATION_S) -> int:
+    """Glide the pointer to physical (x, y); return the number of move events injected.
+
+    A single absolute `MOUSEEVENTF_MOVE` teleports: the application sees one jump from
+    wherever the pointer was straight onto the target. That is wrong for anything that
+    tracks the pointer rather than just reading its position — hover states and tooltips
+    never fire, a canvas or drag-style UI gets no intermediate coordinates, and a
+    mis-aimed jump cannot be seen coming. So the travel is a short eased path (`MOVE_STEPS`
+    points over `MOVE_DURATION_S`, smoothstep) whose last point is exactly the target.
+
+    The pointer moves through the same `SendInput` channel as the clicks, never
+    `SetCursorPos`: one injection path for everything this tool does, so an application
+    that watches for injected input sees one continuous gesture.
+    """
+    move = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+    nx, ny = _norm_point(x, y)
+    here = cursor_pos()
+    if here is None or here == (x, y):
+        # Nothing to travel: keep the position pinned with the one event a click needs.
+        _mouse_event(nx, ny, move)
+        return 1
+    hx, hy = _norm_point(*here)
+    sleep = duration / max(1, steps)
+    for step in range(1, steps + 1):
+        eased = _smoothstep(step / steps)
+        # the last step is eased == 1.0, so it lands on (nx, ny) exactly — no extra event
+        _mouse_event(int(hx + (nx - hx) * eased), int(hy + (ny - hy) * eased), move)
+        if step < steps:
+            time.sleep(sleep)
+    return steps
+
+
 def click_at(x: int, y: int, button: str = "left", clicks: int = 1) -> bool:
-    """Absolute click(s) at physical screen coordinates.
+    """Absolute click(s) at physical screen coordinates, after gliding there.
 
     Normalized against the virtual desktop — SendInput's 0..65535 space covers
-    every monitor, not just the primary one.
+    every monitor, not just the primary one. The pointer travels (`move_to`) rather
+    than teleports, so the application sees it arrive.
 
     `clicks=2` is the double-click: both press/release pairs land inside the
     system's double-click time, with no pointer movement between them, which is
     what makes the shell (and an app's own hit-testing) read it as one gesture
     rather than two clicks.
     """
-    _ensure_dpi()
-    ox, oy = _virtual_origin()
-    width, height = _virtual_size()
-    nx = int((x - ox) * 65535 / max(1, width - 1))
-    ny = int((y - oy) * 65535 / max(1, height - 1))
+    nx, ny = _norm_point(x, y)
     move = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
     down, up = _BUTTON_FLAGS.get(button, _BUTTON_FLAGS["left"])
-    injected = _mouse_event(nx, ny, move)
+    moves = move_to(x, y)
+    # Did it actually get there? A coordinate outside the virtual screen gets clamped by
+    # the OS (measured 2026-09-14: x=-185 became 0), and then a press would land on
+    # whatever is at the edge — a wrong click nobody asked for. No arrival, no press.
+    landed = cursor_pos()
+    if landed is None or max(abs(landed[0] - x), abs(landed[1] - y)) > MOVE_TOLERANCE_PX:
+        return False
+    injected = moves
     for index in range(clicks):
         if index:
             time.sleep(DOUBLE_CLICK_GAP_S)
         injected += _mouse_event(nx, ny, move | down)
         injected += _mouse_event(nx, ny, move | up)
-    # one move plus a press/release pair per click; a struct-size mistake makes
+    # the travel plus a press/release pair per click; a struct-size mistake makes
     # SendInput return 0 silently, which is what this number is here to catch
-    return injected == 1 + 2 * clicks
+    return injected == moves + 2 * clicks
 
 
 def _key_event(vk: int, *, down: bool) -> int:

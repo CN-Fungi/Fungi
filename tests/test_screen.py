@@ -110,6 +110,89 @@ def test_release_all_keys_clears_whatever_is_still_held(monkeypatch):
     assert released == ["0x10", "0x11"] and screen._held == set()
 
 
+# ── the pointer travels to a click instead of teleporting ──────────────────
+def test_the_pointer_glides_to_the_target_and_lands_on_it(monkeypatch):
+    """A single absolute move is a teleport: the app sees one jump onto the target, so
+    hover states and anything that tracks the pointer see nothing at all. The path has
+    to be a real sequence, and its last point has to be the target exactly."""
+    moves: list[tuple[int, int, int]] = []
+    monkeypatch.setattr(screen, "_mouse_event", lambda x, y, flags: moves.append((x, y, flags)))
+    monkeypatch.setattr(screen, "cursor_pos", lambda: (0, 0))
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    target = (700, 400)  # physical pixels, inside this box's 2240x1400 virtual screen
+    injected = screen.move_to(*target)
+
+    assert injected == screen.MOVE_STEPS == len(moves)
+    assert len(set(moves)) > 2, "a teleport would be one point"
+    assert moves[-1][:2] == screen._norm_point(*target)  # lands exactly
+    assert all(flags == moves[0][2] for _x, _y, flags in moves)  # pure moves, no buttons
+    # ordered travel: each point closer to the target than the one before it
+    distances = [abs(x - moves[-1][0]) + abs(y - moves[-1][1]) for x, y, _f in moves]
+    assert distances == sorted(distances, reverse=True)
+    # smoothstep: the path starts slower than it ends (eased in), so the first steps are
+    # the shortest and the middle ones the longest
+    hops = [
+        abs(moves[i + 1][0] - moves[i][0]) + abs(moves[i + 1][1] - moves[i][1])
+        for i in range(len(moves) - 1)
+    ]
+    assert hops[0] < hops[len(hops) // 2]
+
+
+def test_a_click_glides_first_and_keeps_its_self_check_honest(monkeypatch):
+    """The injection self-check catches a struct-size mistake through SendInput's silent
+    0; it has to count the travel it now makes as well."""
+    moves: list[tuple[int, int, int]] = []
+    landed = {"at": (10, 10)}
+
+    def fake_move(x, y, flags):
+        moves.append((x, y, flags))
+        landed["at"] = (700, 400)  # the injected moves really do move the pointer
+        return 1
+
+    monkeypatch.setattr(screen, "_mouse_event", fake_move)
+    monkeypatch.setattr(screen, "cursor_pos", lambda: landed["at"])
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    assert screen.click_at(700, 400, clicks=2) is True
+    down = [n for n, (_x, _y, flags) in enumerate(moves) if flags & screen.MOUSEEVENTF_LEFTDOWN]
+    up = [n for n, (_x, _y, flags) in enumerate(moves) if flags & screen.MOUSEEVENTF_LEFTUP]
+    assert len(down) == 2 and len(up) == 2
+    assert min(down) == len(moves) - 4, "the travel happens before the first press"
+    assert moves[-1][:2] == screen._norm_point(700, 400)
+    # nothing moves the pointer between the two presses: that is what makes it one gesture
+    between = moves[down[0] : up[1]]
+    assert len({point[:2] for point in between}) == 1
+
+
+def test_a_pointer_already_at_the_target_does_not_travel(monkeypatch):
+    moves: list[tuple[int, int, int]] = []
+    monkeypatch.setattr(
+        screen, "_mouse_event", lambda x, y, flags: moves.append((x, y, flags)) or 1
+    )
+    monkeypatch.setattr(screen, "cursor_pos", lambda: (700, 400))
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    assert screen.move_to(700, 400) == 1 and len(moves) == 1
+    moves.clear()
+    assert screen.click_at(700, 400) is True and len(moves) == 3  # pin + press + release
+
+
+def test_a_click_is_not_pressed_when_the_pointer_never_arrived(monkeypatch):
+    """Measured 2026-09-14: a coordinate outside the virtual screen is clamped by the OS
+    (x=-185 arrived at 0). Pressing there would be a wrong click on whatever sits at the
+    edge, so no arrival means no press — the caller gets a plain, unexplained False."""
+    moves: list[tuple[int, int, int]] = []
+    monkeypatch.setattr(
+        screen, "_mouse_event", lambda x, y, flags: moves.append((x, y, flags)) or 1
+    )
+    monkeypatch.setattr(screen, "cursor_pos", lambda: (0, 345))  # clamped, as measured
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    assert screen.click_at(-185, 345) is False
+    assert not [f for _x, _y, f in moves if f & screen.MOUSEEVENTF_LEFTDOWN]
+    assert all(f == screen.MOUSEEVENTF_MOVE | screen.MOUSEEVENTF_ABSOLUTE | screen.MOUSEEVENTF_VIRTUALDESK for _x, _y, f in moves)
+
+    monkeypatch.setattr(screen, "cursor_pos", lambda: (700, 400))  # a pixel off is fine
+    assert screen.click_at(701, 399) is True
+
+
 # ── the armed window (spec §35.2) ──────────────────────────────────────────
 def test_disarm_releases_keys_and_forgets_frames(monkeypatch):
     released = []
