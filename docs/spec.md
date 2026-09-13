@@ -1200,4 +1200,54 @@ shell 路。
   分号后换行），InfoBar 里那句"动手前会先问你"也跟着改成"能看屏并直接动手"（旧文案与本段设计矛盾）。
 - 托盘**其它**通知（"Fungi 已启动"、来信铃声/闪动）不受影响：它们不发生在桌控动作的链路上。
 
+### 35.15 「触手可及」：打开窗口走应用自己的门口（2026-09-13 用户裁决 + 真机实测）
+
+用户原话：「需要引入一种『触手可及』的概念：在桌面、任务栏或托盘的话，采用新方法打开」。**触手可及 = 应用自己的
+入口点在屏幕上**——任务栏按钮、托盘图标、桌面图标。有一个就走它（`at_hand`），因为那一下点击落在 explorer 上，
+应用会跑自己的"打开"路径（§35.12 的实测根因）；一个都没有才回落到 `ShowWindow`，并把"这窗口可能不理输入"说出来。
+
+**找入口（surface 发现，全部实测）**
+
+| 表面 | 怎么找到 | 实测 |
+|---|---|---|
+| 任务栏 / 托盘图标条 | `Shell_TrayWnd` | hwnd=65786；按钮名 `<AppDisplayName> - N 个运行窗口`，cls `Taskbar.TaskListButtonAutomationPeer`；托盘图标 cls `SystemTray.*` |
+| 托盘溢出区 | 点「显示隐藏的图标」后出现的 `TopLevelWindowForOverflowXamlIsland` / `NotifyIconOverflowWindow` | 托盘类应用（QQ/微信）的图标多在这里，不在可见条上 |
+| 桌面图标 | `Progman`（或持有 `SHELLDLL_DefView` 的 `WorkerW`）→ `SHELLDLL_DefView` → `SysListView32` | Progman 0x10148；a11y 行 = 每个图标一行（'QQ' (117,5,233,96)、'微信'、'学习'…），最上面一行是容器 `'桌面'` (0,0,2240,1400) |
+
+**顺序（用户裁决）**：任务栏/托盘 → 桌面。前两者点击是**激活已运行的窗口**，桌面图标是双击、**没跑时会启动应用**，
+所以放最后。桌面走 `click_at(clicks=2)`（单击只选中）；双击后若原窗口没醒但冒出了新窗口，结果里报
+`clicked its 桌面图标 'QQ' (double-click) and it opened 'X' instead`（与 §35.13 同一证据规则）。
+
+**四条护栏（都是实测出来的）**
+
+1. **前台窗口不点**：点已在最前的窗口的任务栏按钮会把它**最小化**（Windows 的开关语义）→ 直接返回
+   `it is already on screen and in front — nothing to open`。
+2. **桌面图标先 hit-test**：桌面被任何窗口盖住时图标也一起被盖住，盲双击会打在盖住它的窗口上（本机实测：
+   浏览器最大化时 `WindowFromPoint` 在图标位置返回浏览器渲染宿主，桌面可见时才返回 `SysListView32`）。
+   所以双击前要求 `GetAncestor(WindowFromPoint(中心), GA_ROOT) == 桌面表面`；被盖住时**明说**
+   `its desktop icon 'QQ' is covered by another window`，而不是硬点。
+3. **容器不是入口**：两个表面都把自己的容器列成一行（桌面 `'桌面'` 2240x1400、任务栏整条），点它什么都不开 →
+   入口必须小于所在表面面积的 1/4（`_entry_sized`）。
+4. **固定按钮不是入口**：`已固定`/`Pinned` 形态只在应用**没在跑**时出现，点了是"启动"，不是打开我们手里那个窗口。
+
+**匹配（handoff 第 5 条的缺口在这里补掉）**：行名与窗口名对同一应用的叫法不同，两个方向都要试，且都按**整词**匹配：
+
+- 行 **包含** 窗口标题或进程名 —— 桌面 'QQ'、托盘 ' QQ: 3754901636'、'Python - 1 个运行窗口'（窗口标题 `Fungi`）；
+- 行里的**应用名**被窗口标题包含 —— 修前从来不匹配的 Explorer 情形：按钮叫 `文件资源管理器 - 1 个运行窗口`，
+  窗口叫 `Fungi - 文件资源管理器`（handoff 第 5 条正是这个，现已命中）；
+- **零宽字符要洗掉**：Edge 的标题实测是 `Fungi - 个人 - Microsoft\u200b Edge`（两词之间一个 U+200B），
+  与按钮 `Microsoft Edge - 1 个运行窗口` 没有任何朴素子串关系 → `_norm()` 去掉 U+200B/200C/200D/2060/FEFF 再比；
+- **必须整词**：桌面上一个叫 `OS` 的图标，用朴素子串会命中 `Microsoft Edge`（micros**os**oft）和
+  `Task Host Window`（h**os**t）——给两个毫不相干的应用各找一个假入口；改成词边界后本机 40 个窗口零误配。
+
+**真机验收（2026-09-13）**：最小化的 Explorer 窗口（`Fungi - 文件资源管理器`，handoff 里 `shell_wake` 唯一没命中的那个）
+→ `at_hand` 给出 `任务栏按钮 '文件资源管理器 - 1 个运行窗口'` → `shell_wake` 单击一次 →
+`clicked its 任务栏按钮 '文件资源管理器 - 1 个运行窗口' and it came up`，`window_state` minimized → normal，
+可用控件 27 个（随后已把它最小化还原）。
+
+**已知缺口（如实记录）**：入口名与应用任何窗口标题**完全无公共词**时仍找不到入口 —— 实测 WindowsTerminal：
+按钮 `智能终端 - 2 个运行窗口`，窗口标题 `π : …` / `C:\WINDOWS\py.exe`，`at_hand` 返回 None，回落 `ShowWindow`
+并照旧声明僵尸风险。（任务栏行的 UIA 属性里没有 AutomationId / HelpText 可用：本机 comtypes 代理上逐个读都是
+AttributeError，拿不到 AUMID 这类能对齐 exe 的身份。）
+
 

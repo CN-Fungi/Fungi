@@ -271,6 +271,168 @@ def test_shell_rows_are_matched_by_the_application_s_own_names():
     assert screen._shell_row([_cand(1, "无关的图标", "", (0, 0, 5, 5))], win) is None
 
 
+def test_a_taskbar_row_matches_the_window_whose_title_carries_its_app_name():
+    """Handoff 2026-09-13, item 5: shell_wake never matched 'Fungi - 文件资源管理器',
+    because the button is named after the *application* ('文件资源管理器 - 1 个运行窗口')
+    — so the row's application name has to be looked for inside the window title too."""
+    explorer = screen.Win(
+        1, "Fungi - 文件资源管理器", "CabinetWClass", (0, 0, 10, 10), 5, "explorer.exe", "normal"
+    )
+    row = _cand(
+        1, "文件资源管理器 - 1 个运行窗口", "Taskbar.TaskListButtonAutomationPeer", (0, 0, 5, 5)
+    )
+    assert screen._shell_row([row], explorer) is row
+    assert screen._row_app_name("文件资源管理器 - 1 个运行窗口") == "文件资源管理器"
+    assert screen._row_app_name("QQ") == "QQ"  # a desktop icon carries no suffix
+
+
+# ── 触手可及: the window's own entry point on screen (spec §35.15) ─────────
+class _Shell:
+    """Stand-in for user32 in the at-hand tests: two surfaces, one hit test."""
+
+    def __init__(self, *, tray=900, desktop=800, at=None):
+        self.tray, self.desktop = tray, desktop
+        self.at = desktop if at is None else at
+
+    def FindWindowW(self, cls, _after):  # noqa: N802 (mimics user32)
+        return self.tray if cls == "Shell_TrayWnd" else 0
+
+    def FindWindowExW(self, hwnd, _after, cls, _cls2):  # noqa: N802 (mimics user32)
+        return 7 if cls == "SHELLDLL_DefView" and hwnd == self.desktop else 0
+
+    def WindowFromPoint(self, _point):  # noqa: N802 (mimics user32)
+        return self.at
+
+    def GetAncestor(self, hwnd, _flag):  # noqa: N802 (mimics user32)
+        return hwnd
+
+
+_TASKBAR_BOX = (0, 1328, 2240, 1400)
+_DESKTOP_BOX = (0, 0, 2240, 1400)
+_PROGMAN = screen.Win(800, "Program Manager", "Progman", (0, 0, 2240, 1400), 5, "explorer.exe")
+
+
+def _qq():
+    return screen.Win(1, "QQ", "Chrome_WidgetWin_1", (0, 0, 10, 10), 5, "QQ.exe", "normal")
+
+
+def _shell_env(monkeypatch, surfaces, wins=None):
+    """Wire the shell surfaces: `surfaces` maps hwnd → list of (Target, element)."""
+    monkeypatch.setattr(screen, "_u32", _Shell())
+    monkeypatch.setattr(
+        screen, "list_windows", lambda include_hidden=False: wins or [_PROGMAN, _qq()]
+    )
+    monkeypatch.setattr(
+        screen, "window_rect", lambda hwnd: _TASKBAR_BOX if hwnd == 900 else _DESKTOP_BOX
+    )
+    monkeypatch.setattr(
+        screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: surfaces.get(hwnd, [])
+    )
+
+
+def test_at_hand_prefers_the_running_window_over_the_desktop_icon(monkeypatch):
+    """The entry is looked for on the taskbar and in the tray first: that click
+    *activates* the window that is already running, while a desktop icon is a
+    double-click that may launch another instance (user decision 2026-09-13)."""
+    button = _cand(1, "QQ - 1 个运行窗口", "Taskbar.TaskListButtonAutomationPeer", (1000, 1330, 1060, 1398))
+    icon = _cand(1, "QQ", "", (117, 5, 233, 96))
+    _shell_env(monkeypatch, {900: [(button, object())], 800: [(icon, object())]})
+    entry = screen.at_hand(_qq())
+    assert entry is not None
+    assert entry.where == "任务栏按钮" and entry.clicks == 1 and entry.surface == 900
+    assert entry.raise_first  # the taskbar gets raised first, as the measured path did
+
+
+def test_a_tray_icon_is_named_as_one_however_it_is_drawn(monkeypatch):
+    """The strip's rows carry their own class (SystemTray.*) against the taskbar
+    buttons' (Taskbar.TaskListButton*) — that is what the report calls them by."""
+    tray_icon = _cand(1, " QQ: 3754901636", "SystemTray.NormalButton", (1850, 1330, 1898, 1398))
+    _shell_env(monkeypatch, {900: [(tray_icon, object())]})
+    entry = screen.at_hand(_qq())
+    assert entry is not None and entry.where == "托盘图标" and entry.label.startswith("QQ:")
+
+
+def test_a_desktop_icon_is_double_clicked_and_only_while_it_is_on_top(monkeypatch):
+    """The desktop path is the last resort *and* a guarded one: anything maximized
+    covers the icons with it, and a blind double-click would land on that window
+    (measured on this box: a browser's render host answered WindowFromPoint)."""
+    icon = _cand(1, "QQ", "", (117, 5, 233, 96))
+    _shell_env(monkeypatch, {800: [(icon, object())]})
+    entry = screen.at_hand(_qq())
+    assert entry is not None and entry.where == "桌面图标" and entry.clicks == 2
+
+    monkeypatch.setattr(screen, "_u32", _Shell(at=0x46082E))  # something covers it
+    assert screen.at_hand(_qq()) is None
+
+
+def test_a_container_row_is_not_an_entry(monkeypatch):
+    """Both surfaces expose their own container as a row covering everything (the
+    desktop's '桌面' SysListView32 is 2240x1400): a click there opens nothing."""
+    container = _cand(1, "桌面", "SysListView32", (0, 0, 2240, 1400))
+    icon = _cand(2, "QQ", "", (117, 5, 233, 96))
+    _shell_env(monkeypatch, {800: [(container, object()), (icon, object())]})
+    assert [c.name for c in screen._surface_rows(800)] == ["QQ"]
+
+
+def test_a_pinned_button_is_not_a_way_to_a_window(monkeypatch):
+    """"已固定" is the form Windows shows while the application is *not* running, so
+    clicking it would launch something rather than open the window we hold."""
+    pinned = _cand(1, "Everything 已固定", "Taskbar.TaskListButtonAutomationPeer", (900, 1330, 960, 1398))
+    _shell_env(monkeypatch, {900: [(pinned, object())]})
+    assert screen._surface_rows(900) == []
+    assert screen.at_hand(_qq()) is None
+
+
+def test_the_window_already_in_front_is_never_clicked(monkeypatch):
+    """Clicking the taskbar button of the window that is already in front
+    *minimizes* it — Windows toggles on that click, so there is nothing to open."""
+    monkeypatch.setattr(screen, "list_windows", lambda include_hidden=False: [_qq()])
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "foreground_hwnd", lambda: 1)
+    monkeypatch.setattr(screen, "click_at", lambda *a, **k: pytest.fail("clicked"))
+    assert "in front" in screen.shell_wake(1)
+
+
+def test_shell_wake_says_so_when_nothing_is_at_hand(monkeypatch):
+    """No taskbar button, no tray icon, no desktop icon: the honest report is that
+    there is nothing to click — the OS wake that follows is the likely zombie."""
+    _shell_env(monkeypatch, {})
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "hidden")
+    monkeypatch.setattr(screen, "foreground_hwnd", lambda: 77)
+    monkeypatch.setattr(screen, "click_at", lambda *a, **k: pytest.fail("clicked"))
+    assert "no entry at hand" in screen.shell_wake(1)
+
+
+def test_a_desktop_double_click_that_launches_reports_the_window_it_opened(monkeypatch):
+    """A desktop icon is the door to the *application*: a multi-instance app starts
+    another process, and then the effect is a new window — the same evidence rule
+    the double_click action uses (spec §35.13)."""
+    icon = _cand(1, "QQ", "", (117, 5, 233, 96))
+    _shell_env(monkeypatch, {800: [(icon, object())]})
+    clicked: list[int] = []
+    state = {"clicked": False}
+
+    def _wins(include_hidden=False):
+        rows = [_PROGMAN, _qq()]
+        if state["clicked"]:
+            rows.append(screen.Win(9, "QQ", "Chrome_WidgetWin_1", (0, 0, 9, 9), 5, "QQ.exe"))
+        return rows
+
+    def _click(*_a, **kwargs):
+        state["clicked"] = True
+        clicked.append(kwargs.get("clicks"))
+
+    monkeypatch.setattr(screen, "list_windows", _wins)
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "hidden")
+    monkeypatch.setattr(screen, "foreground_hwnd", lambda: 77)
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "click_at", _click)
+    monkeypatch.setattr(screen, "_await_state", lambda hwnd, want, timeout: False)
+    out = screen.shell_wake(1)
+    assert clicked == [2]  # a desktop icon opens on the second click
+    assert "opened" in out and "instead" in out
+
+
 def test_restore_reaches_for_the_shell_when_the_window_stays_asleep(monkeypatch):
     """A tray-resident app woken with ShowWindow alone offers no named controls
     (its renderer and a11y are still asleep); restore then does what the user does

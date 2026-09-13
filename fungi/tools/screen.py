@@ -15,6 +15,10 @@ Design decisions live in docs/spec.md §35; the load-bearing ones:
 - Every input action verifies itself against program-side truth (a11y value /
   focus / window rect / frame diff) and asks the user after FAILURE_LIMIT
   strikes instead of clicking blind again.
+- **触手可及**: opening a window goes through the application's *own* entry point on
+  screen — its taskbar button, its tray icon, or its desktop icon — because that is
+  the path the application listens to. `ShowWindow` is the fallback for an app with
+  no entry at all, and its result is the "visible but asleep" window (spec §35.15).
 - An elevated window (UAC secure desktop) stays out of reach: UIPI. That is the
   hard boundary and the natural human/machine line, not an implementation gap.
 
@@ -31,6 +35,7 @@ import ctypes.wintypes as wt
 import importlib
 import importlib.util
 import io
+import re
 import threading
 import time
 from collections import deque
@@ -99,6 +104,19 @@ _k32.GlobalLock.restype = ctypes.c_void_p
 _k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
 _k32.GlobalSize.argtypes = [ctypes.c_void_p]
 _k32.GlobalSize.restype = ctypes.c_size_t
+
+# Every one of these returns a window handle: left to ctypes' default (c_int) a
+# handle above 0x7FFFFFFF comes back negative, and comparing it with a window id
+# then silently fails. Declared here for the ones this module reads.
+_u32.FindWindowW.argtypes = [wt.LPCWSTR, wt.LPCWSTR]
+_u32.FindWindowW.restype = wt.HWND
+_u32.FindWindowExW.argtypes = [wt.HWND, wt.HWND, wt.LPCWSTR, wt.LPCWSTR]
+_u32.FindWindowExW.restype = wt.HWND
+_u32.WindowFromPoint.argtypes = [wt.POINT]
+_u32.WindowFromPoint.restype = wt.HWND
+_u32.GetAncestor.argtypes = [wt.HWND, ctypes.c_uint]
+_u32.GetAncestor.restype = wt.HWND
+_u32.GetForegroundWindow.restype = wt.HWND
 
 SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
 SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
@@ -345,7 +363,7 @@ def inside_client(hwnd: int, target: Target) -> bool:
 
 
 def foreground_hwnd() -> int:
-    return int(_u32.GetForegroundWindow())
+    return int(_u32.GetForegroundWindow() or 0)
 
 
 def set_foreground(hwnd: int) -> bool:
@@ -2052,6 +2070,48 @@ TRAY_FLYOUT_CLASSES = ("TopLevelWindowForOverflowXamlIsland", "NotifyIconOverflo
 SHELL_WAKE_S = (
     4.0  # the app's own wake path is asynchronous: a heavy tray app (WeChat) needs seconds
 )
+DESKTOP_CLASSES = ("Progman", "WorkerW")  # whichever of them hosts SHELLDLL_DefView
+TRAY_BUTTON_PREFIX = "SystemTray."  # the notification strip, vs Taskbar.TaskListButton*
+PINNED_HINTS = ("已固定", "Pinned")  # a pinned button is shown while the app is *not* running
+GA_ROOT = 2
+
+
+@dataclass(frozen=True)
+class Entry:
+    """A window's own door on screen: the icon or button a person would click.
+
+    "触手可及" (at hand) is this tool's name for it (spec §35.15) — the application's
+    entry point is on screen *now*, on the desktop, in the taskbar or in the tray, so
+    opening the window can run the application's own path instead of moving the OS's
+    idea of the window. Measured 2026-09-13: the OS path produced a window that was
+    visible, foreground and screenshot-able, and swallowed every input (§35.12).
+
+    `raise_first` is set for the tray strip only: that raise is what the pre-existing
+    taskbar path did and it is measured working. A flyout is opened by us and is
+    already in front, and the desktop is left alone — raising it is not what a person
+    does before double-clicking an icon."""
+
+    surface: int  # the window the entry is drawn in
+    target: Target  # the rectangle to click
+    where: str  # 桌面图标 | 任务栏按钮 | 托盘图标
+    clicks: int  # a desktop icon opens on the second click
+    label: str  # the row's own name, for the report
+    raise_first: bool = False  # raise the surface before clicking (the tray strip only)
+
+
+_ZERO_WIDTH = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"), None)
+
+
+def _norm(text: str) -> str:
+    """Comparable form of a title or a row name: casefolded, zero-width characters
+    removed.
+
+    Measured on this box 2026-09-13: Edge's title is 'Fungi - 个人 - Microsoft\\u200b Edge'
+    — a zero-width space between the two words — so the taskbar button
+    'Microsoft Edge - 1 个运行窗口' shares no plain substring with it, and the window
+    looked like it had no entry at all.
+    """
+    return text.translate(_ZERO_WIDTH).casefold()
 
 
 def _app_tokens(win: Win) -> list[str]:
@@ -2062,28 +2122,185 @@ def _app_tokens(win: Win) -> list[str]:
     个运行窗口' for WindowsTerminal.exe — so the title is the better token, and the
     tray tooltip happens to carry it too (' QQ: 3754901636…').
     """
-    tokens = [win.title.strip(), Path(win.proc).stem if win.proc else ""]
-    return [token.casefold() for token in tokens if len(token) >= 2]
+    tokens = [_norm(win.title).strip(), _norm(Path(win.proc).stem) if win.proc else ""]
+    return [token for token in tokens if len(token) >= 2]
+
+
+def _row_app_name(name: str) -> str:
+    """A taskbar row's application name: '文件资源管理器 - 1 个运行窗口' → '文件资源管理器'.
+
+    Windows 11 names a taskbar button after the app's display name and appends the
+    window count; a desktop icon and a tray tooltip carry the bare name.
+    """
+    head, sep, tail = name.partition(" - ")
+    if sep and ("运行窗口" in tail or tail.strip().isdigit()):
+        return head.strip()
+    return name.strip()
+
+
+def _mentions(haystack: str, needle: str) -> bool:
+    """Is `needle` a whole word of `haystack`?
+
+    Whole words only, because the names are short: a desktop icon called 'OS'
+    matched mid-word in 'Microsoft Edge' and in 'Task Host Window' — entries for
+    applications that have nothing to do with it (measured 2026-09-13).
+    """
+    return re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", haystack) is not None
 
 
 def _shell_row(rows: list[Target], win: Win) -> Target | None:
-    """The row in a shell surface (taskbar or tray flyout) that belongs to `win`."""
-    tokens = _app_tokens(win)
-    for token in tokens:
-        for cand in rows:
-            if token in cand.name.casefold():
+    """The row in a shell surface that belongs to `win`.
+
+    Both directions are needed, because a row and a window name the same application
+    differently (measured 2026-09-13):
+
+    * the row **contains** the window's title or process stem — 'QQ' on the desktop,
+      'QQ: 3754901636' in the tray, 'Microsoft Edge - 1 个运行窗口' for a title of
+      'Fungi - 个人 - Microsoft\u200b Edge';
+    * the row's application name is **contained in** the window's title — the Explorer
+      case that the first direction alone never matched: the button says
+      '文件资源管理器 - 1 个运行窗口' while the window says 'Fungi - 文件资源管理器'.
+    """
+    names = [(_norm(cand.name), cand) for cand in rows]
+    for token in _app_tokens(win):
+        for name, cand in names:
+            if _mentions(name, token):
+                return cand
+    title = _norm(win.title).strip()
+    if title:
+        for _, cand in names:
+            app = _norm(_row_app_name(cand.name))
+            if len(app) >= 2 and _mentions(title, app):
                 return cand
     return None
 
 
-def _shell_surfaces() -> list[int]:
-    """Window handles worth looking for the app's shell entry in."""
-    tray = int(_u32.FindWindowW("Shell_TrayWnd", None) or 0)
-    out = [tray] if tray else []
+def _entry_sized(cand: Target, surface: int) -> bool:
+    """Is this row an icon/button, rather than the container it is drawn in?
+
+    Both surfaces expose their own container as a row covering everything — the
+    desktop's '桌面' SysListView32 is 2240x1400, the taskbar's frame is the whole bar —
+    and clicking a container opens nothing (measured 2026-09-13).
+    """
+    box = window_rect(surface)
+    area = (cand.rect[2] - cand.rect[0]) * (cand.rect[3] - cand.rect[1])
+    if box is None:
+        return True
+    whole = (box[2] - box[0]) * (box[3] - box[1])
+    return not whole or area * 4 < whole
+
+
+def _surface_rows(surface: int) -> list[Target]:
+    """The rows of a shell surface that could be an entry.
+
+    Containers are out (see `_entry_sized`), and so is a pinned taskbar button:
+    Windows shows that form only while the application is *not* running, so it can
+    never be the way to a window we are already holding.
+    """
+    return [
+        cand
+        for cand, _ in _scan(surface, limit=80)
+        if _entry_sized(cand, surface) and not any(hint in cand.name for hint in PINNED_HINTS)
+    ]
+
+
+def _desktop_surface() -> int:
+    """The window the desktop icons are drawn in, or 0.
+
+    Explorer draws them into a `SysListView32` under a `SHELLDLL_DefView`, hosted by
+    `Progman` — or by a `WorkerW` when something else owns the wallpaper. Measured on
+    this box 2026-09-13: Progman 0x10148 → SHELLDLL_DefView → SysListView32, whose rows
+    are one per icon ('QQ', '微信', '学习', …) with the container row '桌面' on top.
+    """
     for win in list_windows(include_hidden=True):
-        if win.cls in TRAY_FLYOUT_CLASSES:
-            out.append(win.hwnd)
-    return out
+        if win.cls not in DESKTOP_CLASSES:
+            continue
+        if int(_u32.FindWindowExW(win.hwnd, 0, "SHELLDLL_DefView", None) or 0):
+            return win.hwnd
+    return 0
+
+
+def _desktop_reachable(point: tuple[int, int]) -> bool:
+    """Is the desktop icon still the thing at this point?
+
+    Anything covering the desktop covers its icons with it, and a blind double-click
+    would land on that window — the wrong-click class this tool refuses everywhere
+    else. Measured 2026-09-13: with a browser maximized, `WindowFromPoint` at a desktop
+    icon returned the browser's render host; with the desktop showing, it returned the
+    desktop's own SysListView32 (root: Progman).
+    """
+    desktop = _desktop_surface()
+    if not desktop:
+        return False
+    at = int(_u32.WindowFromPoint(wt.POINT(point[0], point[1])) or 0)
+    return bool(at) and int(_u32.GetAncestor(at, GA_ROOT) or 0) == desktop
+
+
+def _entry(surface: int, found: Target, where: str, clicks: int, *, raise_first=False) -> Entry:
+    """One door on screen. The label is the row's own first line, trimmed — the tray
+    writes its tooltip with a leading space (' QQ: 3754901636…')."""
+    return Entry(surface, found, where, clicks, found.name.splitlines()[0].strip(), raise_first)
+
+
+def _close_tray_flyout() -> None:
+    """Put the notification area's overflow flyout away again, if it is open."""
+    if any(w.cls in TRAY_FLYOUT_CLASSES for w in list_windows(include_hidden=True)):
+        send_keys(["escape"])
+
+
+def _tray_overflow_entry(win: Win, tray_rows: list[Target]) -> Entry | None:
+    """Look behind the overflow chevron: that is where a tray-only app's icon lives.
+
+    Opens the flyout, searches it, and closes it again when the application is not in
+    there. Left open when it is — the caller clicks the icon it returns.
+    """
+    chevron = next(
+        (c for c in tray_rows if any(h in c.name for h in TRAY_OVERFLOW_HINTS)), None
+    )
+    if chevron is None:
+        return None
+    tray = int(_u32.FindWindowW("Shell_TrayWnd", None) or 0)
+    set_foreground(tray)
+    click_at(*chevron.center)
+    deadline = time.monotonic() + 2.0
+    flyouts: list[Win] = []
+    while time.monotonic() < deadline:
+        flyouts = [w for w in list_windows(include_hidden=True) if w.cls in TRAY_FLYOUT_CLASSES]
+        if flyouts:
+            break
+        time.sleep(0.1)
+    for flyout in flyouts:
+        found = _shell_row(_surface_rows(flyout.hwnd), win)
+        if found is not None:
+            return _entry(flyout.hwnd, found, "托盘图标", 1)
+    _close_tray_flyout()
+    return None
+
+
+def at_hand(win: Win) -> Entry | None:
+    """The entry on screen that opens this window — 触手可及 — or None (spec §35.15).
+
+    The order is the user's decision (2026-09-13): 桌面、任务栏、托盘 all count as at
+    hand, but a taskbar button and a tray icon *activate* the window that is already
+    running, while a desktop icon is a double-click that *launches* the application
+    when it is not — so the desktop goes last.
+    """
+    tray = int(_u32.FindWindowW("Shell_TrayWnd", None) or 0)
+    if tray:
+        rows = _surface_rows(tray)
+        found = _shell_row(rows, win)
+        if found is not None:
+            where = "托盘图标" if found.cls.startswith(TRAY_BUTTON_PREFIX) else "任务栏按钮"
+            return _entry(tray, found, where, 1, raise_first=True)
+        entry = _tray_overflow_entry(win, rows)
+        if entry is not None:
+            return entry
+    desktop = _desktop_surface()
+    if desktop:
+        icon = _shell_row(_surface_rows(desktop), win)
+        if icon is not None and _desktop_reachable(icon.center):
+            return _entry(desktop, icon, "桌面图标", 2)
+    return None
 
 
 # Families that draw themselves and only wake input/a11y on their own activation
@@ -2117,8 +2334,24 @@ def shell_reason(hwnd: int, win: Win, *, just_woken: bool = False) -> str | None
     return None
 
 
+def _no_entry_reason(win: Win) -> str:
+    """Why nothing could be clicked: the windows an application has no entry in.
+
+    A desktop icon that exists but is covered is worth naming — the application *does*
+    have a door, it is just behind something right now, and a person would clear the
+    screen before double-clicking it (spec §35.15)."""
+    desktop = _desktop_surface()
+    icon = _shell_row(_surface_rows(desktop), win) if desktop else None
+    if icon is not None:
+        return (
+            f"its desktop icon {icon.name.splitlines()[0].strip()!r} is covered by another "
+            "window — nothing to click while it is (bring the desktop to the front first)"
+        )
+    return "no taskbar button, no tray icon and no desktop icon to open it through"
+
+
 def shell_wake(hwnd: int) -> str:
-    """Wake an application the way its own icon does — through the shell.
+    """Open an application the way its own icon does — through the shell.
 
     `ShowWindow` + `SetForegroundWindow` only move the *operating system's* idea of
     the window: measured on this box (2026-09-13), a QQ window woken that way was
@@ -2134,53 +2367,41 @@ def shell_wake(hwnd: int) -> str:
     "open my window" path. Measured the same afternoon: after that click the window
     went hidden -> normal and its a11y went from 7 anonymous shells to 20 elements
     with names.
+
+    What gets clicked is whatever is 触手可及 (`at_hand`, spec §35.15): the taskbar
+    button or tray icon when the app has one, else the desktop icon, double-clicked
+    because a single click only selects it. Nothing at hand means nothing to click —
+    the caller may still try `ShowWindow`, and should say out loud that the result is
+    likely the "visible but asleep" window.
     """
     win = next((w for w in list_windows(include_hidden=True) if w.hwnd == hwnd), None)
     if win is None:
         return "the window is gone"
-    for surface in _shell_surfaces():
-        rows = [cand for cand, _ in _scan(surface, limit=80)]
-        if not rows:
-            continue
-        entry = _shell_row(rows, win)
-        if entry is None and surface == int(_u32.FindWindowW("Shell_TrayWnd", None) or 0):
-            chevron = next(
-                (c for c in rows if any(hint in c.name for hint in TRAY_OVERFLOW_HINTS)), None
-            )
-            if chevron is not None:
-                set_foreground(surface)
-                click_at(*chevron.center)
-                time.sleep(0.6)
-                deadline = time.monotonic() + 2.0
-                while time.monotonic() < deadline and not any(
-                    w.cls in TRAY_FLYOUT_CLASSES for w in list_windows(include_hidden=True)
-                ):
-                    time.sleep(0.1)
-                for flyout in _shell_surfaces():
-                    if flyout == surface:
-                        continue
-                    for cand, _ in _scan(flyout, limit=80):
-                        if _shell_row([cand], win) is not None:
-                            click_at(*cand.center)
-                            # The tray click lands on explorer; the *application* then runs
-                            # its own wake path, which is asynchronous and can take
-                            # seconds (WeChat: measured slow enough that judging it after
-                            # 0.8s declared a live app dead — 2026-09-13). Wait for the
-                            # window itself to come up before deciding anything.
-                            woke = _await_state(hwnd, "normal", SHELL_WAKE_S)
-                            if woke:
-                                return f"clicked its tray icon {cand.name.splitlines()[0]!r} and it came up"
-                            send_keys(["escape"])  # nothing opened: close the flyout again
-                            return f"clicked its tray icon {cand.name.splitlines()[0]!r} but it stayed hidden"
-                send_keys(["escape"])
-            continue
-        if entry is not None:
-            set_foreground(surface)
-            click_at(*entry.center)
-            woke = _await_state(hwnd, "normal", SHELL_WAKE_S)
-            name = entry.name.splitlines()[0]
-            return f"clicked its shell entry {name!r}" + ("" if woke else " but it stayed hidden")
-    return "no taskbar button and no tray icon found for it"
+    if window_state(hwnd) == "normal" and foreground_hwnd() == hwnd:
+        # Clicking the taskbar button of the window that is already in front *minimizes*
+        # it — Windows toggles on that click. Nothing to open, so click nothing.
+        return "it is already on screen and in front — nothing to open"
+    entry = at_hand(win)
+    if entry is None:
+        _close_tray_flyout()
+        return f"no entry at hand: {_no_entry_reason(win)}"
+    if entry.raise_first:
+        set_foreground(entry.surface)
+    # A desktop double-click may *launch* the application rather than activate the
+    # window we hold (multi-instance apps), and then the effect is a new window — the
+    # same evidence rule the double_click action uses (spec §35.13).
+    before = {w.hwnd for w in list_windows()} if entry.clicks == 2 else set()
+    click_at(*entry.target.center, clicks=entry.clicks)
+    woke = _await_state(hwnd, "normal", SHELL_WAKE_S)
+    opened = f"{entry.where} {entry.label!r}" + (" (double-click)" if entry.clicks == 2 else "")
+    if woke:
+        return f"clicked its {opened} and it came up"
+    _close_tray_flyout()
+    if before:
+        launched = [w for w in list_windows() if w.hwnd not in before]
+        if launched:
+            return f"clicked its {opened} and it opened {launched[0].title!r} instead"
+    return f"clicked its {opened} but it stayed hidden"
 
 
 def _await_state(hwnd: int, want: str, timeout: float) -> bool:
@@ -2351,6 +2572,12 @@ SCHEMA = {
             "Minimized or tray-hidden windows: they keep off-screen geometry, so measure "
             'nothing until `restore` has run — `windows include="all"` is how you get their '
             "hwnd, and the taskbar row in that list is where tray icons themselves live. "
+            "`restore` opens a window through whatever is at hand (触手可及): the application's "
+            "own entry point on screen — its taskbar button, its tray icon, or its desktop icon "
+            "(double-clicked, so it goes last: a taskbar click activates the running window "
+            "while a desktop icon may launch a new one). Only an application with no such entry "
+            "is woken through the OS, and that path yields a window that looks normal and still "
+            "ignores input — the result says so. "
             "A window that needs administrator rights cannot be driven from here "
             "(Windows blocks it). A UI drawn in pixels (Chromium/Electron apps such as QQ are "
             "exactly this: they expose anonymous shells and no readable controls) still has "
@@ -2431,10 +2658,11 @@ SCHEMA = {
                     "enum": ["auto", "window", "shell"],
                     "description": (
                         "restore only. 'auto' (default) wakes the window and, if the application "
-                        "still offers no named controls, clicks its taskbar button or tray icon — "
-                        "the shell path, which is what makes a tray-resident app (QQ and friends) "
-                        "actually come alive instead of only becoming visible. 'window' is the "
-                        "OS-level wake alone; 'shell' forces the shell path."
+                        "still offers no named controls, opens it through what is at hand — its "
+                        "taskbar button, tray icon or desktop icon; that is the shell path, the one "
+                        "a tray-resident app (QQ and friends) actually responds to, instead of only "
+                        "becoming visible. 'window' is the OS-level wake alone; 'shell' forces the "
+                        "shell path."
                     ),
                 },
                 "include": {
