@@ -10,6 +10,7 @@ reported via the on_answer callback for session persistence.
 import time
 import uuid
 from collections.abc import Callable
+from typing import Any
 
 from fungi.agent import BoundTool
 from fungi.events import Sink
@@ -141,6 +142,69 @@ def _format_answer(value: str | list[str]) -> str:
     return f"USER: {value}"
 
 
+def blocking_ask(
+    sink: Sink,
+    questions: list[dict],
+    *,
+    should_abort: Callable[[], bool] | None = None,
+    on_answer: Callable[[dict], None] | None = None,
+    call_id: str | None = None,
+    timeout_s: float | None = None,
+) -> tuple[str, Any]:
+    """Emit an ask card and block this thread until the user answers.
+
+    The one place an ask is raised: `inquire` goes through it, and so does the
+    screen tool's arming / irreversible-action confirmation (spec §35.2).
+    Returns (status, value) with status `answered` | `timeout` | `aborted`;
+    `on_answer(record)` gets the same shape `inquire` has always persisted.
+
+    `timeout_s=None` means the configured ASK_TIMEOUT_S *as it stands when the
+    call is made* — not bound at import time, because callers and tests retune
+    the module constant (binding it as a default silently ignored that and froze
+    the whole suite for 15 minutes, 2026-09-13).
+    """
+    ask_id = uuid.uuid4().hex[:6]
+    _pending.register(ask_id)
+    sink.emit("ask", {"id": ask_id, "questions": questions})
+    answered = False
+    value = None
+    aborted = False
+    deadline = time.monotonic() + (ASK_TIMEOUT_S if timeout_s is None else timeout_s)
+    try:
+        # Slice the wait so a stop request wakes the tool within ~1s;
+        # heartbeat pings keep the NDJSON stream alive while blocked.
+        last_ping = 0.0
+        while True:
+            if should_abort is not None and should_abort():
+                aborted = True
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            answered, value = _pending.wait(ask_id, timeout_s=min(1.0, remaining))
+            if answered:
+                break
+            now = time.monotonic()
+            if now - last_ping >= HEARTBEAT_S:
+                sink.emit("ping", None)
+                last_ping = now
+    finally:
+        _pending.discard(ask_id)
+    status = "answered" if answered else ("aborted" if aborted else "timeout")
+    if on_answer is not None:
+        on_answer(
+            {
+                "id": ask_id,
+                "call_id": call_id,  # friend view: anchor this card at the tool call
+                "ts": time.time(),  # ...and slot it into the transcript timeline
+                "questions": questions,
+                "answers": value if answered else None,
+                "status": status,
+            }
+        )
+    return status, value
+
+
 def make_ask_tool(
     sink: Sink,
     on_answer: Callable[[dict], None] | None = None,
@@ -160,46 +224,17 @@ def make_ask_tool(
         questions = _normalize_questions(args)
         if not questions:
             return "ERROR: Missing required argument: question"
-        ask_id = uuid.uuid4().hex[:6]
-        _pending.register(ask_id)
-        sink.emit("ask", {"id": ask_id, "questions": questions})
-        answered = False
-        value = None
-        aborted = False
-        deadline = time.monotonic() + ASK_TIMEOUT_S
-        try:
-            # Slice the wait so a stop request wakes the tool within ~1s;
-            # heartbeat pings keep the NDJSON stream alive while blocked.
-            last_ping = 0.0
-            while True:
-                if should_abort is not None and should_abort():
-                    aborted = True
-                    break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                answered, value = _pending.wait(ask_id, timeout_s=min(1.0, remaining))
-                if answered:
-                    break
-                now = time.monotonic()
-                if now - last_ping >= HEARTBEAT_S:
-                    sink.emit("ping", None)
-                    last_ping = now
-        finally:
-            _pending.discard(ask_id)
-        status = "answered" if answered else ("aborted" if aborted else "timeout")
-        record = {
-            "id": ask_id,
-            "call_id": call_id,  # friend view: anchor this card at the tool call
-            "ts": time.time(),   # ...and slot it into the transcript timeline
-            "questions": questions,
-            "answers": value if answered else None,
-            "status": status,
-        }
-        if on_answer is not None:
-            on_answer(record)
-        if not answered:
-            return "ERROR: 回合已被停止，用户未回答" if aborted else "ERROR: 用户未回答"
+        status, value = blocking_ask(
+            sink,
+            questions,
+            should_abort=should_abort,
+            on_answer=on_answer,
+            call_id=call_id,
+        )
+        if status == "aborted":
+            return "ERROR: 回合已被停止，用户未回答"
+        if status == "timeout":
+            return "ERROR: 用户未回答"
         return _format_answer(value)
 
     return BoundTool(schema=ASK_SCHEMA, fn=ask, with_call_id=True)

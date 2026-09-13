@@ -3,7 +3,9 @@ name = "fungi"
 version = "0.5.2"
 description = "Fungi — LAN multi-host Orchestrator network built on the YESIR TriLayer agent harness"
 requires-python = ">=3.13"
-dependencies = ["segno>=1.6", "pillow>=10.0"]
+# comtypes drives UI Automation for the screen tool (spec §35): pure Python, and
+# PyInstaller ships a hook for comtypes.client, so the frozen exe keeps working.
+dependencies = ["segno>=1.6", "pillow>=10.0", "comtypes>=1.4"]
 
 [project.optional-dependencies]
 # Dev tooling. CI reads these pins from here (.github/workflows/ci.yml), so a
@@ -69,6 +71,8 @@ testpaths = ["tests"]
 # …and so is the Chinese prose inside the prompts the courier/local agents get
 "fungi/clone/comm.py" = ["RUF001"]
 "fungi/tools/ask.py" = ["RUF001"]
+# …and the screen tool's ask cards + tray hints (spec §35) are Chinese too
+"fungi/tools/screen.py" = ["RUF001"]
 # Tests: Chinese docstrings and test data (RUF00x), deferred imports of optional
 # deps and fixtures (PLC0415), unused fixture/lambda arguments (ARG*), and
 # class-level lookup tables (RUF012) are all deliberate test idioms here.

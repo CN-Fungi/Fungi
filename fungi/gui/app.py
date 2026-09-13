@@ -101,9 +101,20 @@ class FungiGui(FluentWindow):
         if self.rooms():
             if self._tray is None:
                 self._tray = _Tray(self)
+                self._wire_screen_notifications()
             self._tray.show()
         elif self._tray is not None:
             self._tray.hide()
+
+    def _wire_screen_notifications(self) -> None:
+        """Let the screen tool say on this machine when it has the desktop
+        (spec §35.2). The tray is the only surface that exists in every mode,
+        so it is the one that gets the hook."""
+        if not config_mod.load_config().pc_control:
+            return
+        from ..tools import screen  # noqa: PLC0415 (desktop control only)
+
+        screen.set_notifier(self._tray.notify)
 
     # ── 来信：托盘闪动 + 铃声 ──
 

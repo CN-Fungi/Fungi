@@ -324,10 +324,12 @@ def test_parallel_batch_keeps_private_tools_off_the_stream():
     )
     agent, _fake, events = make_agent(
         [
-            LLMResult(tool_calls=[
-                tool_call("diary", '{"action": "read"}', "d1"),
-                tool_call("todo", '{"action": "list"}', "t2"),
-            ]),
+            LLMResult(
+                tool_calls=[
+                    tool_call("diary", '{"action": "read"}', "d1"),
+                    tool_call("todo", '{"action": "list"}', "t2"),
+                ]
+            ),
             LLMResult(content="done"),
         ],
         extra_tools={"diary": inner, "todo": shared},
@@ -339,6 +341,34 @@ def test_parallel_batch_keeps_private_tools_off_the_stream():
     results = [c["content"] for kind, c in events if kind == "tool_result"]
     assert offered == ["todo"]  # the parallel batch still went through both
     assert all("felt seen" not in str(r) for r in results)
+
+
+def test_a_bound_tool_can_hand_pixels_back_to_the_model():
+    """The screen tool answers with an ImageRead (a summary plus data URLs).
+    `_dispatch` used to str() every bound-tool result, which silently dropped the
+    pictures the model was supposed to look at (spec §35.1)."""
+    from fungi.tools.files import ImageRead
+
+    shot = ImageRead("SCREEN 1x1", ["data:image/png;base64,AAAA"])
+    bound = BoundTool(
+        schema={"type": "function", "function": {"name": "screen", "parameters": {}}},
+        fn=lambda _args, _call_id: shot,
+        with_call_id=True,
+    )
+    agent, _fake, _events = make_agent(
+        [
+            LLMResult(tool_calls=[tool_call("screen", '{"action": "shot"}', "s1")]),
+            LLMResult(content="I can see the desktop"),
+        ],
+        extra_tools={"screen": bound},
+    )
+    messages = [{"role": "user", "content": "look"}]
+    agent.run(messages)
+
+    content = messages[3]["content"]
+    assert isinstance(content, list)  # upgraded to multimodal, not flattened
+    assert content[0]["text"] == "SCREEN 1x1"
+    assert content[1]["image_url"]["url"].startswith("data:image/png")
 
 
 def test_public_messages_stamps_the_moment_a_row_lands():

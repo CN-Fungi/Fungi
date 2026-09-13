@@ -72,6 +72,10 @@ class Config:
     # back to the default instead of failing here.
     ring: bool = True
     ring_tone: str = "dingdong"
+    # Screen control (spec §35): when on, the user-facing local agent gets the
+    # `screen` tool (see this machine's desktop, click/paste/type on it). Off =
+    # the tool is never attached, so the model cannot even see it.
+    pc_control: bool = False
 
     @property
     def configured(self) -> bool:
@@ -119,6 +123,7 @@ def load_config(path: Path | None = None) -> Config:
         cfg.courier = bool(data.get("courier", True))
         cfg.ring = bool(data.get("ring", True))
         cfg.ring_tone = str(data.get("ring_tone") or "dingdong")
+        cfg.pc_control = bool(data.get("pc_control"))
     cfg.api_key = os.environ.get("OPENAI_API_KEY") or cfg.api_key
     cfg.endpoint = os.environ.get("OPENAI_ENDPOINT") or cfg.endpoint
     cfg.model = os.environ.get("OPENAI_MODEL") or cfg.model
@@ -155,6 +160,8 @@ def save_config(cfg: Config, path: Path | None = None) -> None:
         data["ring"] = False
     if cfg.ring_tone != "dingdong":
         data["ring_tone"] = cfg.ring_tone
+    if cfg.pc_control:
+        data["pc_control"] = True
     if cfg.display:
         data["display"] = cfg.display
     target.write_text(json.dumps(data, indent=4), encoding="utf-8")

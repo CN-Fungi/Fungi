@@ -154,6 +154,7 @@ fungi/
     config.py  help.py  net.py  trayicon.py  widgets.py  const.py
   tools/                    # 移植自 YESIR + 路径守卫包装（search / webtools / shell / video / mcp / ask）
                             # shell.py 另有会话式 bash_start/bash_send/bash_kill（spec §31）
+                            # screen.py：本机 Agent 看屏与动手（看/a11y 定位/点击/粘贴/按键/滚动，spec §35）
 web/                        # 前端在**仓库根**：index/app.js/common.js/style.css/motion.js + m.* 手机端 + vendor/
 vidsense/                   # 视频理解管线（vendored，子进程跑）
 scripts/check.ps1

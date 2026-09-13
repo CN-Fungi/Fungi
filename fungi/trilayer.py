@@ -373,6 +373,20 @@ class TriLayer:
         if self.cfg.diary:  # experimental: private diary off by default
             prompt += diary.section()
             extra.update(diary.bound())
+        if self.cfg.pc_control:
+            # Screen control (spec §35.3): the user-facing L1 agent only, never
+            # a comm agent and never a spawned child. Imported here so a setup
+            # without the desktop deps never pays for the module.
+            from fungi.tools import screen  # noqa: PLC0415
+
+            extra.update(
+                screen.bound(
+                    self.cfg,
+                    sink,
+                    should_abort=self._should_abort,
+                    on_answer=self.asks.append,
+                )
+            )
         agent = Agent(
             self.cfg,
             sink,

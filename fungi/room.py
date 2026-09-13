@@ -17,6 +17,7 @@ and reversible in the friend view.
 
 import contextlib
 import json
+import sys
 import threading
 import time
 import webbrowser
@@ -773,6 +774,11 @@ class RoomBase:
             self._webui.shutdown()
             self._webui.server_close()
             self._webui = None
+        # Leaving the room (or quitting) ends any screen-control arming: the
+        # capability belongs to a room with the user present (spec §35.2/§35.3).
+        screen_module = sys.modules.get("fungi.tools.screen")
+        if screen_module is not None:
+            screen_module.disarm("room stopped")
 
 
 class StoreSessions:
@@ -1084,11 +1090,21 @@ class RoomRuntime(WebUIRuntime):
         # settings switch applies without a restart (self.room.cfg is the
         # cached room-start snapshot). Local clone only — comm clones never
         # get the diary (their turns go through clone/base.build_agent).
-        if load_config().diary:
+        live = load_config()
+        if live.diary:
             tools["diary"] = diary_bound()["diary"]
             prompt = clone.system_prompt + diary_section()
         else:
             prompt = clone.system_prompt
+        if live.pc_control:
+            # Screen control (spec §35.3): same live-flag rule as the diary —
+            # turning it off in the settings page takes effect next turn. The
+            # user-facing agent only; children never inherit it.
+            from fungi.tools import screen  # noqa: PLC0415
+
+            tools.update(
+                screen.bound(live, sink, should_abort=should_abort, on_answer=trilayer.asks.append)
+            )
         return trilayer.build_clone_agent(
             sink,
             system_prompt=prompt,

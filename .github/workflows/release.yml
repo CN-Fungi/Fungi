@@ -22,7 +22,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install build dependencies
-        run: python -m pip install pytest pillow segno PyQt5 PyQt-Fluent-Widgets pyinstaller
+        run: python -m pip install pytest pillow segno comtypes PyQt5 PyQt-Fluent-Widgets pyinstaller
 
       # Same gate as CI (pytest only — see ci.yml for the ruff drift note).
       - name: Run tests

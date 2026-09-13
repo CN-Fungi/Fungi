@@ -102,7 +102,7 @@ def _read_image(file: Path) -> str:
             f"ERROR: {file.name} is {len(raw)} bytes — too large to attach "
             f"(cap {IMAGE_MAX_BYTES})"
         )
-    url, mime, dims = _image_data_url(file.suffix.lower(), raw)
+    url, mime, dims = image_data_url(file.suffix.lower(), raw)
     if url is None:
         return (
             f"IMAGE: {file.name} ({len(raw)} bytes, extension says {file.suffix}) "
@@ -160,7 +160,7 @@ def _read_ooxml(file: Path) -> str:
         zf.close()
 
 
-def _image_data_url(ext: str, raw: bytes) -> tuple[str | None, str, str]:
+def image_data_url(ext: str, raw: bytes) -> tuple[str | None, str, str]:
     """Return (data_url, mime, "WxH"). Small originals ride as-is; anything
     bigger is downscaled and re-encoded JPEG (a 2448px phone photo base64s
     into an endpoint-killing payload). The mime comes from the decoded format,

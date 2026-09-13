@@ -122,6 +122,11 @@ def run_room(args: argparse.Namespace) -> int:
         data_dir_for_tray = None
 
     tray = TrayController(on_open_webui=room.open_webui, data_root=data_dir_for_tray)
+    if cfg.pc_control:
+        # Screen control announces itself on this machine (spec §35.2).
+        from fungi.tools import screen  # noqa: PLC0415
+
+        screen.set_notifier(tray.notify)
     room.start()
     tray.show()
 

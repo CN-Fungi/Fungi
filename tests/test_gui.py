@@ -1,6 +1,7 @@
 """GUI launcher smoke: three pages construct offscreen; validation logic holds."""
 
 import os
+import pathlib
 import time
 import uuid
 
@@ -146,9 +147,7 @@ def test_mobile_page_renders_qr_for_running_room(window):
     window.host_page.room = FakeWebRoom()
     try:
         page.refresh()
-        assert page.url_edit.text() == (
-            f"http://{gui.lan_ip()}:12345/m?t={WEBUI_TOKEN}"
-        )
+        assert page.url_edit.text() == (f"http://{gui.lan_ip()}:12345/m?t={WEBUI_TOKEN}")
         pm = page.qr_label.pixmap()
         assert pm is not None and not pm.isNull()
         assert not page.qr_dep_btn.isVisibleTo(page)  # 依赖在 → 不给安装按钮
@@ -185,6 +184,62 @@ def test_settings_put_video_understanding_under_experimental_below_diary(window)
     assert heading("VidSense") == -1, "视频理解又回到顶层了"
     assert slot(page.diary_switch) > experimental
     assert slot(page.video_label) > slot(page.diary_switch)  # 视频理解在日记下面
+
+
+def test_the_desktop_control_switch_sits_under_experimental_and_disarms_when_off(
+    window, monkeypatch
+):
+    """设置页的桌面控制开关（spec §35.2）：即时写盘；关掉时立刻收回已经给出的授权。"""
+    from fungi.gui import config as config_page
+    from fungi.tools import screen
+
+    saved = {}
+    disarmed = []
+    monkeypatch.setattr(
+        config_page.config_mod, "save_config", lambda cfg: saved.update(pc_control=cfg.pc_control)
+    )
+    monkeypatch.setattr(screen, "disarm", lambda reason="": disarmed.append(reason))
+
+    page = window.cfg_page
+    root = page.layout()
+    experimental = -1
+    for i in range(root.count()):
+        widget = root.itemAt(i).widget()
+        if widget is not None and getattr(widget, "text", lambda: None)() == "实验性":
+            experimental = i
+    assert experimental > -1
+
+    def slot(target):
+        for i in range(root.count()):
+            item = root.itemAt(i)
+            sub = item.layout()
+            if item.widget() is target or (sub is not None and sub.indexOf(target) >= 0):
+                return i
+        return -1
+
+    assert slot(page.pc_switch) > experimental
+
+    # The switch starts from whatever this machine's config says, so a single
+    # setChecked() only fires when it is the other value: force a transition in
+    # both directions instead. Nothing here may touch the real config.json —
+    # save_config is patched, and the file bytes are compared to pin that.
+    def config_bytes():
+        path = pathlib.Path("config.json")
+        return path.read_bytes() if path.is_file() else None
+
+    before = config_bytes()
+    if page.pc_switch.isChecked():
+        page.pc_switch.setChecked(False)
+        saved.clear()
+        disarmed.clear()
+
+    page.pc_switch.setChecked(True)
+    assert saved["pc_control"] is True
+    saved.clear()
+    page.pc_switch.setChecked(False)
+    assert saved["pc_control"] is False
+    assert disarmed == ["设置页关闭了桌面控制"]
+    assert config_bytes() == before
 
 
 def test_firewall_probe_parses_the_rule_count():
@@ -524,9 +579,7 @@ def test_discover_room_finds_matching_host(monkeypatch):
     monkeypatch.setattr(
         gui.net,
         "_port_open",
-        lambda ip, port, timeout=gui.SWEEP_TIMEOUT: (
-            (ip, port) == ("10.0.0.2", gui.GUI_PORT)
-        ),
+        lambda ip, port, timeout=gui.SWEEP_TIMEOUT: ((ip, port) == ("10.0.0.2", gui.GUI_PORT)),
     )
     monkeypatch.setattr(
         gui.net,
@@ -698,7 +751,6 @@ def test_gui_singleton_guard():
 
 
 def test_second_launch_activates_existing_window(window, monkeypatch):
-
     calls = []
     monkeypatch.setattr(window, "show_and_raise", lambda: calls.append(1))
     sock = QLocalSocket()
@@ -716,15 +768,19 @@ def test_second_launch_activates_existing_window(window, monkeypatch):
 
 def _ready(**overrides):
     return {
-        "ffmpeg": True, "huggingface_hub": True, "torch": True,
-        "transformers": True, "faster_whisper": True, "opencv": True,
-        "CLIP": True, "whisper": True, **overrides,
+        "ffmpeg": True,
+        "huggingface_hub": True,
+        "torch": True,
+        "transformers": True,
+        "faster_whisper": True,
+        "opencv": True,
+        "CLIP": True,
+        "whisper": True,
+        **overrides,
     }
 
 
-def test_config_page_video_models_all_present_disables_download(
-    window, monkeypatch
-):
+def test_config_page_video_models_all_present_disables_download(window, monkeypatch):
     """运行时全就绪 -> 按钮禁用, 状态行打勾 (不缺失禁用下载)."""
     page = window.cfg_page
     monkeypatch.setattr("fungi.gui.config._video_ready", lambda: _ready())
@@ -745,9 +801,7 @@ def test_config_page_video_models_missing_enables_download(window, monkeypatch):
 def test_config_page_missing_dep_enables_download(window, monkeypatch):
     """模型都在但 huggingface_hub 没了 -> 状态行标 ✗, 按钮启用(可自愈)."""
     page = window.cfg_page
-    monkeypatch.setattr(
-        "fungi.gui.config._video_ready", lambda: _ready(huggingface_hub=False)
-    )
+    monkeypatch.setattr("fungi.gui.config._video_ready", lambda: _ready(huggingface_hub=False))
     page._check_video_models()
     assert "huggingface_hub" in page.video_status.text()
     assert "✗" in page.video_status.text()
@@ -757,9 +811,7 @@ def test_config_page_missing_dep_enables_download(window, monkeypatch):
 def test_config_page_non_healable_missing_disables_download(window, monkeypatch):
     """torch/ffmpeg 缺失不可自愈: 状态行提示手动装, 按钮不给下载."""
     page = window.cfg_page
-    monkeypatch.setattr(
-        "fungi.gui.config._video_ready", lambda: _ready(torch=False, ffmpeg=False)
-    )
+    monkeypatch.setattr("fungi.gui.config._video_ready", lambda: _ready(torch=False, ffmpeg=False))
     page._check_video_models()
     assert "torch" in page.video_status.text() and "手动安装" in page.video_status.text()
     assert not page.download_btn.isEnabled()
@@ -768,9 +820,7 @@ def test_config_page_non_healable_missing_disables_download(window, monkeypatch)
 def test_config_page_download_runs_script_and_rechecks(window, monkeypatch):
     """点下载 -> Popen 脚本 + 轮询结束后自动复检并恢复按钮可用性。"""
     page = window.cfg_page
-    monkeypatch.setattr(
-        "fungi.gui.config._video_ready", lambda: _ready(CLIP=False, whisper=False)
-    )
+    monkeypatch.setattr("fungi.gui.config._video_ready", lambda: _ready(CLIP=False, whisper=False))
     monkeypatch.setattr("fungi.gui.config._hf_hub_missing", lambda: False)
     page._check_video_models()
 
@@ -792,9 +842,7 @@ def test_config_page_download_runs_script_and_rechecks(window, monkeypatch):
     assert len(spawned) == 1 and spawned[0][-1].endswith("download_video_models.py")
 
     # 下载结束后的复检, 两个模型都已就绪
-    monkeypatch.setattr(
-        "fungi.gui.config._video_ready", lambda: _ready()
-    )
+    monkeypatch.setattr("fungi.gui.config._video_ready", lambda: _ready())
     page._poll_download()
     assert page._dl_proc is None
     assert not page._dl_timer.isActive()
@@ -805,9 +853,7 @@ def test_config_page_download_runs_script_and_rechecks(window, monkeypatch):
 def test_config_page_download_installs_missing_dep_first(window, monkeypatch):
     """缺 huggingface_hub: 先 pip 装依赖, 成功后自动接下载脚本, 全程一次点击。"""
     page = window.cfg_page
-    monkeypatch.setattr(
-        "fungi.gui.config._video_ready", lambda: _ready(CLIP=False, whisper=False)
-    )
+    monkeypatch.setattr("fungi.gui.config._video_ready", lambda: _ready(CLIP=False, whisper=False))
     monkeypatch.setattr("fungi.gui.config._hf_hub_missing", lambda: True)
 
     spawned = []
@@ -829,9 +875,7 @@ def test_config_page_download_installs_missing_dep_first(window, monkeypatch):
     page._poll_download()  # 依赖装完 -> 链到模型下载
     assert len(spawned) == 2 and spawned[1][-1].endswith("download_video_models.py")
     assert "VidSense" in page.video_status.text()
-    monkeypatch.setattr(
-        "fungi.gui.config._video_ready", lambda: _ready()
-    )
+    monkeypatch.setattr("fungi.gui.config._video_ready", lambda: _ready())
     page._poll_download()  # 模型下完 -> 复检就绪并禁用按钮
     assert not page._dl_timer.isActive()
     assert not page.download_btn.isEnabled()
@@ -850,9 +894,7 @@ def test_config_page_frozen_exe_points_video_at_the_source_run(window, monkeypat
     状态行直接说清楚，别再给那个点了也没用的下载按钮。"""
     page = window.cfg_page
     monkeypatch.setattr(gui.sys, "frozen", True, raising=False)
-    monkeypatch.setattr(
-        "fungi.gui.config._video_ready", lambda: _ready(torch=False, CLIP=False)
-    )
+    monkeypatch.setattr("fungi.gui.config._video_ready", lambda: _ready(torch=False, CLIP=False))
     page._check_video_models()
 
     assert "python start.py" in page.video_status.text()
@@ -1057,6 +1099,7 @@ def test_token_focus_out_never_launches_the_room(window, monkeypatch):
 
 def _running_room(host="pc-alpha", display="花酱"):
     """A live room stub: records what Enter asks it to change."""
+
     class Room:
         calls: list = []
 
@@ -1123,8 +1166,8 @@ def test_join_page_enter_applies_nickname_and_verifies_token(window, monkeypatch
     page.room = room
     page._joined_ip = "192.168.1.20"
     page._joined_token = "tok-old"
-    page.ip_edit.setText("192.168.1.99")      # a different hub = a different room
-    page.name_edit.setText("pc-other")        # wire identity is fixed
+    page.ip_edit.setText("192.168.1.99")  # a different hub = a different room
+    page.name_edit.setText("pc-other")  # wire identity is fixed
     page.nick_edit.setText("新昵称")
     page.token_edit.setText("tok-new")
     QTest.keyClick(page.token_edit, Qt.Key_Return)
@@ -1132,9 +1175,9 @@ def test_join_page_enter_applies_nickname_and_verifies_token(window, monkeypatch
     assert ("token", "tok-new") in room.calls
     assert room.token == "tok-new"
     assert page.nick_edit.text() == "新昵称"
-    assert page.ip_edit.text() == "192.168.1.20"    # reverted: needs a fresh join
-    assert page.name_edit.text() == "pc-beta"       # reverted: identity is fixed
-    assert page._joined_token == "tok-new"          # future compares use the new one
+    assert page.ip_edit.text() == "192.168.1.20"  # reverted: needs a fresh join
+    assert page.name_edit.text() == "pc-beta"  # reverted: identity is fixed
+    assert page._joined_token == "tok-new"  # future compares use the new one
     page.room = None
 
 
@@ -1216,7 +1259,7 @@ def test_unread_flashes_at_once_and_rings_after_the_grace(window, ringing):
     room.last_unread = 2
     window._poll_unread()
     assert window._tray._alerting is True  # 未读立刻闪
-    assert ringer.played == []             # 铃声还没到
+    assert ringer.played == []  # 铃声还没到
 
     window._unread_since -= gui.app.RING_GRACE_S + 1
     window._poll_unread()

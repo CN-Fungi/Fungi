@@ -244,10 +244,14 @@ class Agent:
         if bound is not None:
             try:
                 if bound.with_call_id:
-                    return str(bound.fn(args, call_id))
-                return str(bound.fn(args))
+                    result = bound.fn(args, call_id)
+                else:
+                    result = bound.fn(args)
             except Exception as exc:
                 return f"ERROR: {exc}"
+            # ImageRead (str subclass) must survive: str() would flatten it and
+            # the loop would lose the pixels a bound tool attached (screen shots).
+            return result if isinstance(result, str) else str(result)
         return tools.dispatch(name, args, should_abort=self._aborted)
 
     def _run_tool_call(self, tc: dict, messages: list[dict]) -> None:

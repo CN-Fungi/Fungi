@@ -161,6 +161,29 @@ class ConfigPage(QWidget):
         diary_hint.setWordWrap(True)
         root.addWidget(diary_hint)
 
+        # 桌面控制（小标题）：默认关；开着时本机 Agent 能看屏并动手（spec §35）
+        root.addSpacing(10)
+        pc_row = QHBoxLayout()
+        pc_lbl = BodyLabel("桌面控制（screen）")
+        pc_lbl.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        pc_row.addWidget(pc_lbl)
+        pc_row.addSpacing(8)
+        self.pc_switch = SwitchButton()
+        self.pc_switch.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        # setChecked BEFORE connect (checkedChanged fires on programmatic sets)
+        self.pc_switch.setChecked(config_mod.load_config().pc_control)
+        pc_row.addWidget(self.pc_switch)
+        self.pc_switch.checkedChanged.connect(self._toggle_pc_control)
+        pc_row.addStretch(1)
+        root.addLayout(pc_row)
+        pc_hint = BodyLabel(
+            "让本机 Agent 看屏幕、点控件、粘文本。它动手前会弹卡片征得你同意，10 分钟后自动收回；"
+            "关掉开关会立刻收回。\n"
+            "注意：截图会随工具结果发给模型；需要管理员权限的窗口它够不到。"
+        )
+        pc_hint.setWordWrap(True)
+        root.addWidget(pc_hint)
+
         # 视频理解（小标题）：进场自动检查，缺失才给下载入口（video 工具拒绝现场下载）
         root.addSpacing(10)
         video_lbl = BodyLabel("视频理解")
@@ -373,6 +396,27 @@ class ConfigPage(QWidget):
         InfoBar.success(
             "已保存",
             "日记已开启，下一轮对话生效" if checked else "日记已关闭，下一轮对话生效",
+            duration=2500,
+            parent=self.window_ref,
+        )
+
+    def _toggle_pc_control(self, checked: bool) -> None:
+        """桌面控制开关（spec §35.2）：即时写盘，本机 Agent 下一轮拿到/丢掉工具。
+
+        关掉时顺手收回已授权的动作——不然「现在不许」要等 10 分钟才生效。
+        """
+        cfg = config_mod.load_config()
+        cfg.pc_control = bool(checked)
+        config_mod.save_config(cfg)
+        if not checked:
+            from ..tools import screen  # noqa: PLC0415 (desktop control only)
+
+            screen.disarm("设置页关闭了桌面控制")
+        InfoBar.success(
+            "已保存",
+            "桌面控制已开启：下一轮对话里 Agent 能看屏，动手前会先问你"
+            if checked
+            else "桌面控制已关闭：下一轮起工具移除，已授权的动作也一并收回",
             duration=2500,
             parent=self.window_ref,
         )
