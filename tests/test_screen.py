@@ -306,6 +306,9 @@ class _Shell:
     def GetAncestor(self, hwnd, _flag):  # noqa: N802 (mimics user32)
         return hwnd
 
+    def GetForegroundWindow(self):  # noqa: N802 (mimics user32)
+        return self.tray
+
 
 _TASKBAR_BOX = (0, 1328, 2240, 1400)
 _DESKTOP_BOX = (0, 0, 2240, 1400)
@@ -381,6 +384,112 @@ def test_a_pinned_button_is_not_a_way_to_a_window(monkeypatch):
     _shell_env(monkeypatch, {900: [(pinned, object())]})
     assert screen._surface_rows(900) == []
     assert screen.at_hand(_qq()) is None
+
+
+def test_a_tray_tooltip_never_claims_a_foreign_window():
+    """A tray tooltip is free-form text the app chooses, and measured on this box one
+    of them is the bare word 'Fungi' — which is also the first word of an Edge window's
+    title. The app-name direction belongs to taskbar buttons and desktop icons."""
+    edge = screen.Win(
+        1,
+        "Fungi - 个人 - Microsoft\u200b Edge",
+        "Chrome_WidgetWin_1",
+        (0, 0, 10, 10),
+        5,
+        "msedge.exe",
+        "normal",
+    )
+    tooltip = _cand(1, "Fungi", "SystemTray.NormalButton", (1884, 1184, 1944, 1244))
+    button = _cand(
+        2, "Microsoft Edge - 1 个运行窗口", "Taskbar.TaskListButtonAutomationPeer", (0, 0, 5, 5)
+    )
+    assert screen._shell_row([tooltip], edge) is None
+    assert screen._shell_row([tooltip, button], edge) is button
+
+
+def test_the_flyout_counts_as_open_only_while_it_is_shown(monkeypatch):
+    """It is not created on demand: measured, the island window already exists hidden
+    before the arrow is ever clicked — so an Escape sent on *existence* would go to
+    whatever window has the focus instead of closing a flyout."""
+    hidden = screen.Win(31, "", "TopLevelWindowForOverflowXamlIsland", (1700, 1180, 2040, 1330), 5, "explorer.exe", "hidden")
+    _shell_env(monkeypatch, {}, wins=[hidden, _qq()])
+    monkeypatch.setattr(screen, "send_keys", lambda keys: pytest.fail(f"sent {keys}"))
+    screen._close_tray_flyout()
+    shown = screen.Win(31, "", "TopLevelWindowForOverflowXamlIsland", (1700, 1180, 2040, 1330), 5, "explorer.exe", "normal")
+    assert screen._tray_flyout() is None
+    monkeypatch.setattr(screen, "list_windows", lambda include_hidden=False: [shown, _qq()])
+    assert screen._tray_flyout() is shown
+    sent: list[list[str]] = []
+    monkeypatch.setattr(screen, "send_keys", lambda keys: sent.append(keys))
+    screen._close_tray_flyout()
+    assert sent == [["escape"]]
+
+
+def test_the_tray_icon_is_looked_for_behind_the_arrow(monkeypatch):
+    """The tray branch, in the user's words: click the arrow to expand the hidden
+    icons, then single-click the one that belongs to the window."""
+    arrow = _cand(1, "显示隐藏的图标", "SystemTray.NormalButton", (1829, 1328, 1877, 1400))
+    hidden_icon = _cand(1, " QQ: 3754901636", "SystemTray.NormalButton", (1944, 1183, 2029, 1327))
+    flyout = screen.Win(31, "", "TopLevelWindowForOverflowXamlIsland", (1700, 1180, 2040, 1330), 5, "explorer.exe")
+    state = {"open": False}
+    clicked: list[tuple[int, int]] = []
+
+    def _wins(include_hidden=False):
+        island = screen.Win(
+            31, "", flyout.cls, flyout.rect, 5, "explorer.exe", "normal" if state["open"] else "hidden"
+        )
+        return [island, _qq()]
+
+    def _click(x, y, **kwargs):
+        clicked.append((x, y))
+        state["open"] = True  # the arrow is what opens it
+
+    _shell_env(monkeypatch, {900: [(arrow, object())], 31: [(hidden_icon, object())]})
+    monkeypatch.setattr(screen, "list_windows", _wins)
+    monkeypatch.setattr(screen, "click_at", _click)
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    entry = screen.at_hand(_qq())
+    assert clicked == [arrow.center]  # only the arrow, not the icon: at_hand finds, it does not act
+    assert entry is not None and entry.where == "托盘图标" and entry.clicks == 1
+    assert entry.label == "QQ: 3754901636"
+
+    # The arrow is a toggle (measured): with the flyout already open, clicking it would
+    # *close* it and the search would come back empty.
+    state["open"] = True
+    clicked.clear()
+    entry = screen.at_hand(_qq())
+    assert clicked == [] and entry is not None and entry.where == "托盘图标"
+
+
+def test_a_tray_click_that_opens_another_window_says_which(monkeypatch):
+    """Measured on OneDrive: clicking its tray icon raises the 'Activity Center' while
+    the window we hold stays a hidden balloon host. The click did something, so the
+    report has to name what appeared instead of 'stayed hidden'."""
+    icon = _cand(1, " OneDrive - 个人", "SystemTray.NormalButton", (1764, 1216, 1824, 1275))
+    held = screen.Win(5, "OneDrive - 个人", "SkyDrive", (0, 0, 194, 56), 7, "OneDrive.exe", "hidden")
+    _shell_env(monkeypatch, {900: [(icon, object())]}, wins=[_PROGMAN, _qq(), held])
+    state = {"clicked": False}
+
+    def _wins(include_hidden=False):
+        rows = [_PROGMAN, _qq(), held]
+        if state["clicked"]:
+            rows.append(
+                screen.Win(
+                    6, "Activity Center", "SkyDrive", (1513, 202, 2053, 1162), 7, "OneDrive.exe"
+                )
+            )
+        return rows
+
+    def _click(*_a, **_k):
+        state["clicked"] = True
+
+    monkeypatch.setattr(screen, "list_windows", _wins)
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "hidden")
+    monkeypatch.setattr(screen, "foreground_hwnd", lambda: 77)
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "click_at", _click)
+    monkeypatch.setattr(screen, "_await_state", lambda hwnd, want, timeout: False)
+    assert screen.shell_wake(5) == "clicked its 托盘图标 'OneDrive - 个人' and it opened 'Activity Center' instead"
 
 
 def test_the_window_already_in_front_is_never_clicked(monkeypatch):

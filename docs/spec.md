@@ -1250,4 +1250,25 @@ shell 路。
 并照旧声明僵尸风险。（任务栏行的 UIA 属性里没有 AutomationId / HelpText 可用：本机 comtypes 代理上逐个读都是
 AttributeError，拿不到 AUMID 这类能对齐 exe 的身份。）
 
+**三种打开方式，各自真机跑过**
+
+| 表面 | 方式 | 实测 |
+|---|---|---|
+| 任务栏按钮 | **单击** | 最小化 Explorer 窗口 → `clicked its 任务栏按钮 '文件资源管理器 - 1 个运行窗口' and it came up`（minimized → normal，27 个可用控件） |
+| 桌面图标 | **双击**（单击只选中） | §35.13 那轮已在真机双击桌面图标打开过 `Code - 文件资源管理器`；本轮加的是护栏（hit-test + 容器过滤） |
+| 托盘图标 | **点箭头展开隐藏 → 单击图标** | OneDrive（窗口藏在托盘）→ `clicked its 托盘图标 'OneDrive - 个人' and it came up`（0.5s，hidden → normal）；干净起点连测 3/3 成功 |
+
+**托盘那条的三个实测事实**（都写进了代码）
+
+- **飞窗不是"点了才有"**：`TopLevelWindowForOverflowXamlIsland` 在点箭头之前就存在（hidden）——实测点后 0.12s 变 `normal`、
+  0.30s 才有 12 个图标行。所以判"开着"看 **state**，不看存在；`_close_tray_flyout()` 也只在真开着时才发 ESC
+  （否则那一下 ESC 会打到当前有焦点的窗口上）。
+- **箭头是开关**：把飞窗留在开着状态后，下一次点箭头是**关掉**它（本机实测踩到：搜索因此落空）。所以只在飞窗确实关着时才点它。
+- **点完托盘图标，飞窗不会自己关**（实测飞窗仍开着、应用窗口已经起来），而且**不能顺手关**：应用的面板/窗口多在"窗外点一下"时
+  light-dismiss —— 实测点箭头去收飞窗，把刚起来的 OneDrive 面板一起点没了。所以成功路径**不碰任何东西**，只把
+  `(the notification flyout is still open)` 写进结果。
+- **点托盘图标可能起的是"另一个窗口"**：OneDrive 的托盘图标起的是它的 `Activity Center`，而被持有的那个窗口（`OneDrive - 个人`，
+  194x56 的气球宿主）始终是 hidden。所以判定改成"注入前后比可见窗口列表"，与 §35.13 双击同一证据规则：
+  `clicked its 托盘图标 'OneDrive - 个人' and it opened 'Activity Center' instead`。
+
 

@@ -2070,6 +2070,7 @@ TRAY_FLYOUT_CLASSES = ("TopLevelWindowForOverflowXamlIsland", "NotifyIconOverflo
 SHELL_WAKE_S = (
     4.0  # the app's own wake path is asynchronous: a heavy tray app (WeChat) needs seconds
 )
+TRAY_FLYOUT_S = 2.0  # the overflow flyout: 0.12s to open, ~0.3s to fill (measured)
 DESKTOP_CLASSES = ("Progman", "WorkerW")  # whichever of them hosts SHELLDLL_DefView
 TRAY_BUTTON_PREFIX = "SystemTray."  # the notification strip, vs Taskbar.TaskListButton*
 PINNED_HINTS = ("已固定", "Pinned")  # a pinned button is shown while the app is *not* running
@@ -2160,6 +2161,12 @@ def _shell_row(rows: list[Target], win: Win) -> Target | None:
     * the row's application name is **contained in** the window's title — the Explorer
       case that the first direction alone never matched: the button says
       '文件资源管理器 - 1 个运行窗口' while the window says 'Fungi - 文件资源管理器'.
+
+    The second direction is only trusted where a row's name really is an application's
+    name — a taskbar button or a desktop icon. A tray tooltip is free-form text chosen
+    by the app, and measured on this box it can be a bare word that also appears in a
+    foreign title: the tray icon 'Fungi' would otherwise claim the window titled
+    'Fungi - 个人 - Microsoft Edge'.
     """
     names = [(_norm(cand.name), cand) for cand in rows]
     for token in _app_tokens(win):
@@ -2169,6 +2176,8 @@ def _shell_row(rows: list[Target], win: Win) -> Target | None:
     title = _norm(win.title).strip()
     if title:
         for _, cand in names:
+            if cand.cls.startswith(TRAY_BUTTON_PREFIX):
+                continue
             app = _norm(_row_app_name(cand.name))
             if len(app) >= 2 and _mentions(title, app):
                 return cand
@@ -2242,38 +2251,61 @@ def _entry(surface: int, found: Target, where: str, clicks: int, *, raise_first=
     return Entry(surface, found, where, clicks, found.name.splitlines()[0].strip(), raise_first)
 
 
+def _tray_flyout() -> Win | None:
+    """The overflow flyout *while it is open*, or None.
+
+    Measured on this box 2026-09-13: the island window is not created on demand — it
+    already exists, hidden, before the arrow is ever clicked. So "it exists" says
+    nothing; its state does ('hidden' → 'normal' 0.12s after the arrow click), and its
+    rows appear a moment later still (12 icons read at 0.30s).
+    """
+    return next(
+        (
+            w
+            for w in list_windows(include_hidden=True)
+            if w.cls in TRAY_FLYOUT_CLASSES and w.state == "normal"
+        ),
+        None,
+    )
+
+
 def _close_tray_flyout() -> None:
-    """Put the notification area's overflow flyout away again, if it is open."""
-    if any(w.cls in TRAY_FLYOUT_CLASSES for w in list_windows(include_hidden=True)):
+    """Put the overflow flyout away again — but only when it is open: an Escape sent
+    into a hidden flyout goes to whatever window has the focus instead."""
+    if _tray_flyout() is not None:
         send_keys(["escape"])
 
 
 def _tray_overflow_entry(win: Win, tray_rows: list[Target]) -> Entry | None:
     """Look behind the overflow chevron: that is where a tray-only app's icon lives.
 
-    Opens the flyout, searches it, and closes it again when the application is not in
-    there. Left open when it is — the caller clicks the icon it returns.
+    Opens the flyout, keeps looking until it is open *and* populated (both are later
+    than the click), and closes it again when the application is not in there. Left
+    open when it is — the caller clicks the icon it returns.
     """
     chevron = next(
         (c for c in tray_rows if any(h in c.name for h in TRAY_OVERFLOW_HINTS)), None
     )
     if chevron is None:
         return None
-    tray = int(_u32.FindWindowW("Shell_TrayWnd", None) or 0)
-    set_foreground(tray)
-    click_at(*chevron.center)
-    deadline = time.monotonic() + 2.0
-    flyouts: list[Win] = []
+    # The arrow is a *toggle*, measured the hard way: an earlier attempt that left the
+    # flyout open made the next arrow click close it, and the search then found nothing.
+    # So: only click it when the flyout is actually closed.
+    opened = _tray_flyout() is None
+    if opened:
+        tray = int(_u32.FindWindowW("Shell_TrayWnd", None) or 0)
+        set_foreground(tray)
+        click_at(*chevron.center)
+    deadline = time.monotonic() + TRAY_FLYOUT_S
     while time.monotonic() < deadline:
-        flyouts = [w for w in list_windows(include_hidden=True) if w.cls in TRAY_FLYOUT_CLASSES]
-        if flyouts:
-            break
+        flyout = _tray_flyout()
+        if flyout is not None:
+            found = _shell_row(_surface_rows(flyout.hwnd), win)
+            if found is not None:
+                return _entry(flyout.hwnd, found, "托盘图标", 1)
         time.sleep(0.1)
-    for flyout in flyouts:
-        found = _shell_row(_surface_rows(flyout.hwnd), win)
-        if found is not None:
-            return _entry(flyout.hwnd, found, "托盘图标", 1)
-    _close_tray_flyout()
+    if opened:
+        _close_tray_flyout()
     return None
 
 
@@ -2387,20 +2419,27 @@ def shell_wake(hwnd: int) -> str:
         return f"no entry at hand: {_no_entry_reason(win)}"
     if entry.raise_first:
         set_foreground(entry.surface)
-    # A desktop double-click may *launch* the application rather than activate the
-    # window we hold (multi-instance apps), and then the effect is a new window — the
-    # same evidence rule the double_click action uses (spec §35.13).
-    before = {w.hwnd for w in list_windows()} if entry.clicks == 2 else set()
+    # A click on an entry can open a *different* window of the application, and for a
+    # desktop icon that is the normal case. Measured 2026-09-13 on OneDrive: its tray
+    # icon raised the 'Activity Center' while the window we were holding stayed a hidden
+    # balloon host — so reporting only the held window would say "nothing happened" about
+    # a click that plainly did something. The evidence is the window list, the same one
+    # the double_click action uses (spec §35.13).
+    before = {w.hwnd for w in list_windows()}
     click_at(*entry.target.center, clicks=entry.clicks)
     woke = _await_state(hwnd, "normal", SHELL_WAKE_S)
     opened = f"{entry.where} {entry.label!r}" + (" (double-click)" if entry.clicks == 2 else "")
     if woke:
-        return f"clicked its {opened} and it came up"
+        # A tray click leaves the overflow flyout open, and it has to stay that way: the
+        # app's window often light-dismisses on any outside click, and clicking the arrow
+        # to tidy up measured taking OneDrive's panel back down with it (2026-09-13). So
+        # the flyout is reported, not cleaned up.
+        note = " (the notification flyout is still open)" if _tray_flyout() is not None else ""
+        return f"clicked its {opened} and it came up{note}"
+    appeared = [w for w in list_windows() if w.hwnd not in before]
+    if appeared:
+        return f"clicked its {opened} and it opened {appeared[0].title!r} instead"
     _close_tray_flyout()
-    if before:
-        launched = [w for w in list_windows() if w.hwnd not in before]
-        if launched:
-            return f"clicked its {opened} and it opened {launched[0].title!r} instead"
     return f"clicked its {opened} but it stayed hidden"
 
 
