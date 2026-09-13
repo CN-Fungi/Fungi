@@ -1122,6 +1122,15 @@ def move_to(x: int, y: int, *, steps: int = MOVE_STEPS, duration: float = MOVE_D
     The pointer moves through the same `SendInput` channel as the clicks, never
     `SetCursorPos`: one injection path for everything this tool does, so an application
     that watches for injected input sees one continuous gesture.
+
+    pyautogui would do this in one call (`moveTo(duration=, tween=)`) and is installed on
+    dev boxes, but it is not a Fungi dependency, and taking it would cost more than the
+    ~15 lines here — measured 2026-09-14: its Windows move is `SetCursorPos` and its
+    buttons are the superseded `mouse_event` (two more injection channels), its
+    `num_steps` is capped at one point per `MINIMUM_SLEEP`=50ms (4 points where this
+    makes 14), every public call adds `PAUSE`=0.1s (0.378s vs 0.225s), and its FAILSAFE
+    raises when the pointer sits in a screen corner. User decision the same day: ours
+    (spec §36).
     """
     move = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
     nx, ny = _norm_point(x, y)

@@ -1333,3 +1333,20 @@ hit-test 发现图标位置现在归别的窗口。
   （瞬移只会是 1–2 个），耗时 **0.225s**，落点与目标**逐像素相等**；端到端点击最小化的 Explorer 窗口 →
   `clicked its 任务栏按钮 '文件资源管理器 - 1 个运行窗口' and it came up`（minimized → normal），随后已把窗口还原。
 
+**为什么不用 pyautogui（2026-09-14 用户问过，裁决：不换）**：pyautogui 确实有现成的 `moveTo(x, y, duration=, tween=)`，
+本机也装着 `0.9.54`，但**它从来不是 Fungi 的依赖**（`screen.py` 第一版 `dbb88cd` 就写了这句注释，自建 VK 表与
+`SendInput` 都是同一个口径；用户记得的 pyautogui 是上游原型 **Ophio**，`Ophio/repo/app/screen_capture.py` 里
+`pyautogui.moveTo(..., duration=0.1)` 与 `duration=0`（瞬移）各一条）。本机实测对照：
+
+| | 本实现 | `pyautogui.moveTo(duration=0.22)` |
+|---|---|---|
+| 中间点数 | 14（采样到 15 个位置） | 4（`num_steps = int(duration/MINIMUM_SLEEP 0.05)`；要 14 步得 `duration≥0.7`） |
+| 单次耗时 | 0.225s | 0.378s（每次公开调用后固定 `PAUSE=0.1`） |
+| 注入通道 | `SendInput`（与点击/按键同一条） | 移动 `SetCursorPos`、按键过时的 `mouse_event`（源码注释自述） |
+| 自检 / 到达校验 | 有 | 无（越界自己 clamp 到边缘照点） |
+| 旁路 | 无 | 指针在屏幕角时 `moveTo` 抛 `FailSafeException`（实测），须全局关掉 |
+| 依赖 | 0 | +`pytweening`/`pyscreeze`/`pygetwindow`/`mouseinfo`/`pymsgbox`/`pyperclip`，且要同步 `release.yml` 的 pip 行（§35.5） |
+
+留一手的可选改进（**未做**，等哪天嫌慢再说）：现在不管远近都 0.22s/14 步，短跳也花 0.22s；可按距离给时长
+（`distance/6000 px·s⁻¹`，下限 0.06s）并把步数按 ~16ms 一点重算，短跳降到 ~0.06s。
+
