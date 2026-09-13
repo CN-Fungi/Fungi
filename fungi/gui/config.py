@@ -89,9 +89,7 @@ class ConfigPage(QWidget):
         )
         courier_hint.setWordWrap(True)
         root.addWidget(courier_hint)
-        file_hint = BodyLabel(
-            "文件不经信使：一律先弹卡片征求你的同意，收下的文件落在 inbox/ 里。"
-        )
+        file_hint = BodyLabel("文件不经信使：一律先弹卡片征求你的同意，收下的文件落在 inbox/ 里。")
         file_hint.setWordWrap(True)
         root.addWidget(file_hint)
 
@@ -177,8 +175,8 @@ class ConfigPage(QWidget):
         pc_row.addStretch(1)
         root.addLayout(pc_row)
         pc_hint = BodyLabel(
-            "让本机 Agent 看屏幕、点控件、粘文本。它动手前会弹卡片征得你同意，10 分钟后自动收回；"
-            "关掉开关会立刻收回。\n"
+            "让本机 Agent 看屏幕、点控件、粘文本。打开开关即表示你同意它直接动手——不再逐次弹卡片询问；"
+            "关掉开关立刻收回，并释放所有还按着的键。\n"
             "注意：截图会随工具结果发给模型；需要管理员权限的窗口它够不到。"
         )
         pc_hint.setWordWrap(True)
@@ -253,11 +251,7 @@ class ConfigPage(QWidget):
         missing = [name for name, ok in ready.items() if not ok]
         healable = [name for name in missing if name in _HEALABLE]
         if missing:
-            hint = (
-                "点「下载缺失模型」自动补齐"
-                if healable
-                else "需手动安装 VidSense 依赖"
-            )
+            hint = "点「下载缺失模型」自动补齐" if healable else "需手动安装 VidSense 依赖"
             self.video_status.setText(f"{marks}\n缺 {'、'.join(missing)}，{hint}")
         else:
             self.video_status.setText(f"{marks}\n已就绪，video 工具可用")
@@ -277,9 +271,7 @@ class ConfigPage(QWidget):
             return
         py = self._python_cmd()
         if py is None:
-            self.video_status.setText(
-                "未找到系统 Python（exe 模式需先安装 Python 并加入 PATH）"
-            )
+            self.video_status.setText("未找到系统 Python（exe 模式需先安装 Python 并加入 PATH）")
             return
         script = PROJECT_ROOT / "scripts" / "download_video_models.py"
         if not script.is_file():
@@ -323,15 +315,14 @@ class ConfigPage(QWidget):
         self._dl_timer.stop()
         self._check_video_models()
         if code == 0:
-            InfoBar.success(
-                "下载完成", "VidSense 已就绪", duration=2500, parent=self.window_ref
-            )
+            InfoBar.success("下载完成", "VidSense 已就绪", duration=2500, parent=self.window_ref)
         else:
             InfoBar.error(
-                "下载失败", f"「{self._dl_stage}」步骤退出码 {code}，详见其控制台窗口",
-                duration=4000, parent=self.window_ref,
+                "下载失败",
+                f"「{self._dl_stage}」步骤退出码 {code}，详见其控制台窗口",
+                duration=4000,
+                parent=self.window_ref,
             )
-
 
     @staticmethod
     def _key_mask(key: str) -> str:
@@ -362,14 +353,9 @@ class ConfigPage(QWidget):
     def _refresh_status(self) -> None:
         cfg = config_mod.load_config()
         key = self.key_edit.text().strip() or cfg.api_key
-        state = (
-            "已配置"
-            if key and key != DEFAULT_API_KEY
-            else "未配置（使用占位 key，无法对话）"
-        )
+        state = "已配置" if key and key != DEFAULT_API_KEY else "未配置（使用占位 key，无法对话）"
         self.status.setText(
-            f"当前状态：{state}"
-            "\n改完按回车即保存（三个输入框各自生效；留空 = 保持不变）"
+            f"当前状态：{state}\n改完按回车即保存（三个输入框各自生效；留空 = 保持不变）"
         )
 
     def _save(self) -> None:

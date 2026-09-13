@@ -112,72 +112,45 @@ def test_release_all_keys_clears_whatever_is_still_held(monkeypatch):
 
 
 # ── the armed window (spec §35.2) ──────────────────────────────────────────
-def test_the_armed_window_expires_on_its_own():
-    screen._session.arm(60)
-    assert screen._session.armed() and screen._session.remaining() > 0
-    screen._session.armed_until = time.monotonic() - 1
-    assert not screen._session.armed() and screen._session.remaining() == 0
-
-
 def test_disarm_releases_keys_forgets_frames_and_tells_the_machine(monkeypatch):
     released = []
     seen = []
     monkeypatch.setattr(screen, "release_all_keys", lambda: released.append(True) or ["0x11"])
     screen.set_notifier(lambda title, body: seen.append(title))
-    screen._session.arm(60)
+    screen._session.announced = True
+    screen._session.labels = {"发送": _cand(0, "发送", "", (1, 2, 3, 4), (), "visual")}
     screen._session.remember(_frame())
     screen.disarm("room stopped")
-    assert released and not screen._session.armed()
-    assert len(screen._session.frames) == 0
+    assert released and not screen._session.announced
+    assert screen._session.labels == {} and len(screen._session.frames) == 0
     assert seen == ["Fungi 已收回桌面控制"]
 
 
-def test_a_declined_card_refuses_the_action_without_touching_the_desktop(monkeypatch):
-    monkeypatch.setattr(screen, "blocking_ask", lambda *a, **k: ("answered", "不允许"))
-    monkeypatch.setattr(screen, "ensure_on_screen", lambda hwnd: pytest.fail("woke a window"))
-    ok, note = screen._guarded_input("click", {}, 42, None, None, None, None)
-    assert ok is False and note.startswith("REFUSED")
-    assert not screen._session.armed()
-
-
-def test_one_card_buys_the_whole_armed_window(monkeypatch):
-    asked = []
+def test_an_input_action_asks_nothing_and_says_so_once(monkeypatch):
+    """Consent is the settings switch (user decision 2026-09-13): no card per
+    action. What remains is one visible notice per session, not a block."""
+    hints: list[str] = []
+    monkeypatch.setattr(screen, "blocking_ask", lambda *a, **k: pytest.fail("asked the user"))
+    monkeypatch.setattr(screen, "_hint", lambda title, body: hints.append(title))
     wakes = iter(["minimized", "normal"])
-
-    def fake_ask(_sink, questions, **_kw):
-        asked.append(questions[0]["question"])
-        return ("answered", "允许")
-
-    monkeypatch.setattr(screen, "blocking_ask", fake_ask)
     monkeypatch.setattr(screen, "ensure_on_screen", lambda hwnd: next(wakes, "normal"))
     monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
     monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
 
-    ok, note = screen._guarded_input("click", {}, 42, None, None, None, None)
+    ok, note = screen._guarded_input("click", 42)
     assert ok and "restored from minimized" in note
-    ok, note = screen._guarded_input("click", {}, 42, None, None, None, None)
-    assert ok and note == "" and len(asked) == 1
+    ok, note = screen._guarded_input("click", 42)
+    assert ok and note == ""
+    assert hints == ["Fungi 正在控制桌面"]  # once, and never again this session
 
 
 def test_a_window_that_stays_off_screen_is_refused(monkeypatch):
-    monkeypatch.setattr(screen, "blocking_ask", lambda *a, **k: ("answered", "允许"))
     monkeypatch.setattr(screen, "ensure_on_screen", lambda hwnd: "hidden")
     monkeypatch.setattr(screen, "window_state", lambda hwnd: "hidden")
-    ok, note = screen._guarded_input("click", {}, 42, None, None, None, None)
+    ok, note = screen._guarded_input("click", 42)
     assert ok is False and "cannot be driven" in note
 
 
-def test_only_irreversible_actions_ask_every_time(monkeypatch):
-    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
-    assert screen._needs_confirm("key", {"keys": ["ctrl", "s"]}, 7)
-    assert screen._needs_confirm("key", {"keys": ["enter"]}, 7) is None
-    assert screen._needs_confirm("type", {"text": "x"}, 7)
-    screen._session.confirmed_windows.add(7)
-    assert screen._needs_confirm("type", {"text": "x"}, 7) is None
-    assert screen._needs_confirm("click", {"target": 1}, 7) is None
-
-
-# ── target resolution: the model names one, the program locates it ─────────
 def test_a_listing_number_resolves_against_the_live_window(monkeypatch):
     element = object()
     pairs = [
@@ -302,31 +275,6 @@ def test_the_frame_diff_counts_pixels_not_promises():
     assert screen._diff_ratio(before, _frame((60, 50))) == 1.0
 
 
-def test_an_allow_answer_from_a_card_is_never_read_as_a_refusal(monkeypatch):
-    """The WebUI answers a card as a list (one entry per question), so a single
-    "允许" arrives as ["允许"] — reading the raw value declined a permission the
-    user had just granted (real report, 2026-09-13)."""
-    assert screen._allowance(["允许"]) is True
-    assert screen._allowance(" 允许 ") is True
-    assert screen._allowance("YES") is True
-    assert screen._allowance(["不允许"]) is False
-    assert screen._allowance("不允许") is False
-    assert screen._allowance(["也许吧"]) is None
-    assert screen._allowance(None) is None
-
-    monkeypatch.setattr(screen, "blocking_ask", lambda *a, **k: ("answered", ["允许"]))
-    monkeypatch.setattr(screen, "ensure_on_screen", lambda hwnd: "normal")
-    ok, _note = screen._guarded_input("click", {}, 42, None, None, None, None)
-    assert ok and screen._session.armed()
-
-
-def test_a_declined_list_answer_still_refuses(monkeypatch):
-    monkeypatch.setattr(screen, "blocking_ask", lambda *a, **k: ("answered", ["不允许"]))
-    monkeypatch.setattr(screen, "ensure_on_screen", lambda hwnd: "normal")
-    ok, note = screen._guarded_input("click", {}, 42, None, None, None, None)
-    assert ok is False and note.startswith("REFUSED") and not screen._session.armed()
-
-
 def test_a_self_drawn_window_falls_back_to_ocr_text(monkeypatch):
     """WeChat 4.x exposes one pattern-less surface element and nothing else; the
     listing used to hand that back as the only target. Now the picture's text is
@@ -370,17 +318,6 @@ def test_a_target_outside_its_window_is_refused(monkeypatch):
     outside = screen.Target(1, "搜索", "", (100, 100, 200, 130), ())
     problem = screen.target_problem(42, outside)
     assert problem and "outside window" in problem and "underneath" in problem
-
-
-def test_the_enter_that_sends_a_paste_asks_again(monkeypatch):
-    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
-    assert screen._needs_confirm("key", {"keys": ["enter"]}, 7) is None  # plain navigation
-    screen._session.typed_windows.add(7)  # something was pasted here first
-    asking = screen._needs_confirm("key", {"keys": ["enter"]}, 7)
-    assert asking and "提交" in asking and "发出去" in asking
-    assert screen._needs_confirm("key", {"keys": ["tab"]}, 7) is None  # Tab never sends
-    screen._session.disarm()
-    assert screen._needs_confirm("key", {"keys": ["enter"]}, 7) is None
 
 
 def test_a_blank_capture_of_a_covered_window_is_not_an_answer(monkeypatch):
@@ -648,8 +585,7 @@ def test_a_real_control_outranks_a_label(monkeypatch):
     assert isinstance(hit, screen.Target) and hit.cls == "Button"
 
 
-def test_labels_die_with_the_armed_session():
-    screen._session.arm(60)
+def test_labels_die_with_the_session():
     screen._session.labels = {"发送": _cand(0, "发送", "", (1, 2, 3, 4), (), "visual")}
     screen._session.labels_hwnd = 42
     screen.disarm("test")
@@ -702,7 +638,6 @@ def test_three_fruitless_attempts_ask_the_user_instead_of_retrying(monkeypatch):
     monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
     monkeypatch.setattr(screen, "ensure_on_screen", lambda hwnd: "normal")
     monkeypatch.setattr(screen, "window_rect", lambda hwnd: (900, 400, 1200, 600))
-    screen._session.arm(600)
     screen._session.candidates = {1: pairs[0][0]}
     screen._session.candidates_hwnd = 42
 

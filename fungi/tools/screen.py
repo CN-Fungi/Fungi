@@ -7,10 +7,11 @@ Design decisions live in docs/spec.md §35; the load-bearing ones:
   comes from the OS. Measured 2026-09-13: coordinates produced by the model miss
   by 15-68px (a coin flip on an 18px target); picking a candidate number hit 3/3,
   1px on the hard one.
-- `config.json` `pc_control` (default off) is what attaches the tool at all; the
-  first input action asks the user once for an ARM_TTL_S window of arming. An
-  armed window always ends in `disarm()`, which releases every held key — a
-  stuck host Ctrl is a fault only a human can clear.
+- `config.json` `pc_control` (default off) is both the consent and the switch: on
+  means the agent works the desktop directly, with no per-action prompt (user
+  decision 2026-09-13). Turning it off — or leaving the room — ends it at once and
+  releases every held key, because a stuck host Ctrl is a fault only a human can
+  clear.
 - Every input action verifies itself against program-side truth (a11y value /
   focus / window rect / frame diff) and asks the user after FAILURE_LIMIT
   strikes instead of clicking blind again.
@@ -46,7 +47,6 @@ from fungi.events import Sink
 from fungi.tools.ask import blocking_ask
 from fungi.tools.files import ImageRead, image_data_url
 
-ARM_TTL_S = 600.0  # one confirmation buys ten minutes of screen control
 FAILURE_LIMIT = 3  # strikes before the tool asks the user instead of retrying
 MAX_CANDIDATES = 60
 DIFF_THRESHOLD = 0.002  # fraction of changed pixels that counts as an effect
@@ -1243,7 +1243,11 @@ class Session:
     just the current and the previous frame (spec §35.4): enough to answer "did
     that change anything", never a screen recorder."""
 
-    armed_until: float = 0.0
+    # No permission state lives here: the `pc_control` switch is the consent
+    # (user decision 2026-09-13 — "the experimental switch means I already
+    # allowed it"). What stays is bookkeeping that makes one action trustworthy:
+    # which window is where, what the user was told, and which keys are down.
+    announced: bool = False
     candidates: dict[int, Target] = field(default_factory=dict)
     candidates_hwnd: int = 0
     candidates_rect: tuple[int, int, int, int] | None = None
@@ -1254,23 +1258,10 @@ class Session:
     labels_rect: tuple[int, int, int, int] | None = None
     frames: deque[Frame] = field(default_factory=lambda: deque(maxlen=2))
     failures: dict[str, int] = field(default_factory=dict)
-    confirmed_windows: set[int] = field(default_factory=set)
-    typed_windows: set[int] = field(default_factory=set)  # pasted into during this arm
     lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def armed(self) -> bool:
-        return time.monotonic() < self.armed_until
-
-    def remaining(self) -> float:
-        return max(0.0, self.armed_until - time.monotonic())
-
-    def arm(self, seconds: float = ARM_TTL_S) -> None:
-        self.armed_until = time.monotonic() + seconds
-
     def disarm(self) -> None:
-        self.armed_until = 0.0
-        self.confirmed_windows.clear()
-        self.typed_windows.clear()
+        self.announced = False
         self.labels.clear()
         self.labels_hwnd = 0
         self.labels_rect = None
@@ -1311,10 +1302,6 @@ def disarm(reason: str = "disarmed") -> None:
 
 
 atexit.register(disarm, "process exit")
-
-
-def arm_seconds_left() -> float:
-    return _session.remaining()
 
 
 # ── target resolution: the model names one, the program locates it ─────────
@@ -1759,132 +1746,22 @@ def _escalate(sink, key: str, what: str, detail: str, should_abort, on_answer, c
     )
 
 
-_ALLOW_ANSWERS = frozenset({"允许", "同意", "可以", "好", "yes", "y", "allow", "ok"})
-_DENY_ANSWERS = frozenset({"不允许", "拒绝", "不要", "取消", "no", "n", "deny", "cancel"})
+def _guarded_input(action: str, hwnd: int) -> tuple[bool, str]:
+    """The part of every input action that is not the action itself.
 
-
-def _answer_text(value: Any) -> str:
-    """An answered card's value as one plain string.
-
-    The card comes back the way the ask protocol answers it: one entry per
-    question, so a single "允许" arrives as `["允许"]`. Comparing the raw value
-    against a tuple of words then read a permission as a refusal — the user's
-    "允许" was reported back as REFUSED on 2026-09-13. Both shapes must land on
-    the same word.
+    Nothing here asks the user for permission: `config.json`'s `pc_control` switch
+    *is* the consent (user decision 2026-09-13 — "the experimental switch means I
+    already allowed it"). What remains is what the tool owes the machine: it says
+    once per session that it has the desktop (visible, not blocking), and it wakes
+    a window that is minimized or hiding in the notification area before anything
+    tries to measure or click it.
     """
-    if isinstance(value, (list, tuple)):
-        return " ".join(str(item) for item in value).strip()
-    return str(value or "").strip()
-
-
-def _allowance(value: Any) -> bool | None:
-    """True = allowed, False = declined, None = not a word we recognise."""
-    text = _answer_text(value).casefold()
-    if text in _DENY_ANSWERS:
-        return False
-    if text in _ALLOW_ANSWERS:
-        return True
-    return None
-
-
-def _arm(sink, action: str, what: str, should_abort, on_answer, call_id) -> tuple[bool, str]:
-    """One confirmation, ARM_TTL_S of screen control (spec §35.2)."""
-    status, value = blocking_ask(
-        sink,
-        [
-            {
-                "question": (
-                    f"Agent 请求控制这台电脑的桌面（{int(ARM_TTL_S // 60)} 分钟内可点击、粘贴、按键）。\n"
-                    f"它要做的第一步：{what}\n允许吗？（屏幕画面会随工具结果发给模型）"
-                ),
-                "options": [{"label": "允许"}, {"label": "不允许"}],
-                "allow_custom": False,
-            }
-        ],
-        should_abort=should_abort,
-        on_answer=on_answer,
-        call_id=call_id,
-    )
-    if status != "answered":
-        return False, f"REFUSED: no answer to the screen-control request ({status})."
-    if _allowance(value) is not True:
-        return False, (
-            "REFUSED: the user did not allow screen control (answer: "
-            f"{_answer_text(value)!r}; the card must come back as 允许 to arm)."
+    if not _session.announced:
+        _session.announced = True
+        _hint(
+            "Fungi 正在控制桌面",
+            f"已按设置里的开关直接操作：{action}；可在设置页随时关掉，关掉即立刻收回",
         )
-    _session.arm()
-    _hint(
-        "Fungi 正在控制桌面",
-        f"{int(ARM_TTL_S // 60)} 分钟内允许：{action}；可点系统托盘图标查看 WebUI",
-    )
-    return True, f"armed for {int(ARM_TTL_S // 60)} minutes"
-
-
-# The keystrokes that send, not the ones that navigate: Tab is left out on purpose.
-_COMMIT_KEYS = frozenset({"enter", "return"})
-
-
-def _needs_confirm(action: str, args: dict, hwnd: int) -> str | None:
-    """Irreversible actions ask every time, arming or not (spec §35.2).
-
-    Three measured shapes: a modifier combination is global; pasting into a
-    window the user has not watched go by cannot be supervised; and the Enter
-    (or Tab) that *sends* what was just pasted is the one keystroke whose effect
-    leaves the machine — a chat message, a form submit.
-    """
-    if action == "key":
-        names = [str(k).strip().lower() for k in args.get("keys") or []]
-        if any(name in MODIFIER_NAMES for name in names) and len(names) > 1:
-            return f"按键组合 {'+'.join(names)}"
-        if hwnd in _session.typed_windows and any(name in _COMMIT_KEYS for name in names):
-            return f"按下 {'/'.join(names)} 提交刚粘贴进 0x{hwnd:X} 的内容（可能就此发出去了）"
-    if action == "type" and hwnd not in _session.confirmed_windows:
-        return f"往窗口 0x{hwnd:X} {_window_text(hwnd)!r} 里粘贴文本"
-    return None
-
-
-def _confirm(sink, what: str, should_abort, on_answer, call_id) -> tuple[bool, str]:
-    status, value = blocking_ask(
-        sink,
-        [
-            {
-                "question": f"这个动作不好撤销，需要你再确认一次：{what}。允许吗？",
-                "options": [{"label": "允许"}, {"label": "不允许"}],
-                "allow_custom": False,
-            }
-        ],
-        should_abort=should_abort,
-        on_answer=on_answer,
-        call_id=call_id,
-    )
-    if status != "answered":
-        return False, f"REFUSED: no answer to the confirmation ({status})."
-    if _allowance(value) is not True:
-        return False, f"REFUSED: the user declined (answer: {_answer_text(value)!r})."
-    return True, "confirmed"
-
-
-def _guarded_input(
-    action: str, args: dict, hwnd: int, sink, should_abort, on_answer, call_id
-) -> tuple[bool, str]:
-    what = {
-        "click": "点击一个控件",
-        "type": "粘贴文本",
-        "key": "按键",
-        "scroll": "滚动到某个控件",
-        "restore": "把窗口叫回屏幕",
-    }[action]
-    if not _session.armed():
-        entered, note = _arm(sink, action, what, should_abort, on_answer, call_id)
-        if not entered:
-            return False, note
-    confirm_note = _needs_confirm(action, args, hwnd)
-    if confirm_note:
-        allowed, note = _confirm(sink, confirm_note, should_abort, on_answer, call_id)
-        if not allowed:
-            return False, note
-        if action == "type":
-            _session.confirmed_windows.add(hwnd)
     # A minimized window's controls sit at their icon coordinates and a hidden one
     # has no on-screen geometry at all: wake it before anything measures or clicks.
     was = ensure_on_screen(hwnd)
@@ -1908,7 +1785,7 @@ def _action_click(args: dict, sink, should_abort, on_answer, call_id) -> str | I
         first = resolve_target(hwnd, args)
         if isinstance(first, str):
             return first
-    ok, note = _guarded_input("click", args, hwnd, sink, should_abort, on_answer, call_id)
+    ok, note = _guarded_input("click", hwnd)
     if not ok:
         return note
     # Raise it before measuring: a click has to land in the window the caller
@@ -1945,7 +1822,7 @@ def _action_click(args: dict, sink, should_abort, on_answer, call_id) -> str | I
         f"  verify: {'focus matched' if focus_hit else 'frame changed ' + format(changed, '.2%')} "
         f"→ {'verified' if verified else 'unverified (no visible effect)'}"
         f"{'' if raised else ' · could not raise the window to the foreground!'}",
-        f"  armed: {int(_session.remaining() // 60)}m{int(_session.remaining() % 60):02d}s left",
+        "  control: on (pc_control switch; no prompt for this action)",
     ]
     summary = "\n".join(lines)
     return _attach(summary, after) if after is not None else summary
@@ -1964,7 +1841,7 @@ def _action_type(args: dict, sink, should_abort, on_answer, call_id) -> str | Im
         if isinstance(resolved, str):
             return resolved
         target = resolved
-    ok, note = _guarded_input("type", args, hwnd, sink, should_abort, on_answer, call_id)
+    ok, note = _guarded_input("type", hwnd)
     if not ok:
         return note
     set_foreground(hwnd)
@@ -2018,7 +1895,7 @@ def _action_type(args: dict, sink, should_abort, on_answer, call_id) -> str | Im
         + note,
         f"  verify: {verdict}",
         f"  clipboard restored: {'yes' if snapshot.formats else 'nothing to restore'}{clip}",
-        f"  armed: {int(_session.remaining() // 60)}m{int(_session.remaining() % 60):02d}s left",
+        "  control: on (pc_control switch; no prompt for this action)",
     ]
     summary = "\n".join(lines)
     return _attach(summary, after_frame) if after_frame is not None else summary
@@ -2029,7 +1906,7 @@ def _action_key(args: dict, sink, should_abort, on_answer, call_id) -> str | Ima
     names = [str(k) for k in args.get("keys") or []]
     if not names:
         return 'ERROR: key needs keys=[...] (e.g. ["ctrl","s"] or ["enter"])'
-    ok, note = _guarded_input("key", args, hwnd, sink, should_abort, on_answer, call_id)
+    ok, note = _guarded_input("key", hwnd)
     if not ok:
         return note
     set_foreground(hwnd)
@@ -2066,7 +1943,7 @@ def _action_key(args: dict, sink, should_abort, on_answer, call_id) -> str | Ima
         f"KEY {'+'.join(sent)} into hwnd=0x{hwnd:X}{note}",
         f"  verify: {signal} → {'verified' if verified else 'unverified (no visible effect)'}",
         f"  held keys after: {', '.join(held_keys()) or 'none'}",
-        f"  armed: {int(_session.remaining() // 60)}m{int(_session.remaining() % 60):02d}s left",
+        "  control: on (pc_control switch; no prompt for this action)",
     ]
     summary = "\n".join(lines)
     return _attach(summary, after_frame) if after_frame is not None else summary
@@ -2093,7 +1970,7 @@ def _action_scroll(args: dict, sink, should_abort, on_answer, call_id) -> str | 
         first = resolve_target(hwnd, args)
         if isinstance(first, str):
             return first
-    ok, note = _guarded_input("scroll", args, hwnd, sink, should_abort, on_answer, call_id)
+    ok, note = _guarded_input("scroll", hwnd)
     if not ok:
         return note
     set_foreground(hwnd)
@@ -2136,20 +2013,20 @@ def _action_scroll(args: dict, sink, should_abort, on_answer, call_id) -> str | 
         f"SCROLL to {target.label} in hwnd=0x{hwnd:X}{note}",
         f"  verify: ScrollItemPattern={'used' if scrolled else 'not available'} · "
         f"frame changed {changed:.2%} → {'verified' if verified else 'unverified'}",
-        f"  armed: {int(_session.remaining() // 60)}m{int(_session.remaining() % 60):02d}s left",
+        "  control: on (pc_control switch; no prompt for this action)",
     ]
     summary = "\n".join(lines)
     return _attach(summary, after_frame) if after_frame is not None else summary
 
 
-def _action_restore(args: dict, sink, should_abort, on_answer, call_id) -> str | ImageRead:
+def _action_restore(args: dict) -> str | ImageRead:
     """Wake a window that is minimized or living in the notification area.
 
     Its own action because it is the one thing a tray-only application needs,
     and because the agent should be able to just say "bring it back" without
     clicking anything (spec §35.7)."""
     hwnd = int(args["hwnd"])
-    ok, note = _guarded_input("restore", args, hwnd, sink, should_abort, on_answer, call_id)
+    ok, note = _guarded_input("restore", hwnd)
     if not ok:
         return note
     set_foreground(hwnd)
@@ -2160,7 +2037,7 @@ def _action_restore(args: dict, sink, should_abort, on_answer, call_id) -> str |
     now = window_state(hwnd)
     summary = (
         f"RESTORE hwnd=0x{hwnd:X} {_window_text(hwnd)!r} → {now}{note}\n"
-        f"  armed: {int(_session.remaining() // 60)}m{int(_session.remaining() % 60):02d}s left"
+        "  control: on (pc_control switch; no prompt for this action)",
     )
     return _attach(summary, frame) if frame is not None else summary
 
@@ -2236,8 +2113,9 @@ SCHEMA = {
             "lands where the program says the control is, never where a model "
             "estimated. Workflow: windows → targets(hwnd) → click/type on a number; "
             "each action returns the window's new picture so you can check the "
-            "effect yourself. Input actions need the user's permission: the first "
-            "one asks for a 10-minute window and irreversible ones ask every time. "
+            "effect yourself. Input actions ask nothing per action: the settings switch "
+            "(config.json pc_control) is the consent, and turning it off stops the agent "
+            "immediately. "
             "Minimized or tray-hidden windows: they keep off-screen geometry, so measure "
             'nothing until `restore` has run — `windows include="all"` is how you get their '
             "hwnd, and the taskbar row in that list is where tray icons themselves live. "
