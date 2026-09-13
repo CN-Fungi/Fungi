@@ -1082,3 +1082,53 @@ vidsense 子进程的 Python 解释器）——需要视频理解请用源码方
 - **不做**：为某个应用写死的坐标脚本、图标模板库。要更干净的路，就在启动参数上做文章（上面的旗标），而不是
   在像素上堆补丁。
 
+### 35.12 「命令唤醒」为什么没用、点托盘为什么有用（2026-09-13 实测）
+
+用户问：「为啥我点任务栏的微信 / 托盘的 QQ 就响应，fungi 用命令唤醒的窗口就不响应？」——量出来的结论是：
+**唤醒方式确实有问题，但不是"没抬到前台"，而是"应用自己不知道它被打开了"。**
+
+- `ShowWindow(SW_RESTORE)` 单独：窗口变 `normal`/可见，但**不是前台**（`GetForegroundWindow()` 仍是别人）。
+- 再加 `SetForegroundWindow`：返回 1，窗口**确实是前台**（实测 `GetForegroundWindow() == hwnd`），`SwitchToThisWindow`
+  同样有效。**所以"没唤醒"这个解释不成立。**
+- 此时对 QQ 注入：单次 `SendInput`、批量 `SendInput`、甚至**直接 `PostMessage` 的 WM_LBUTTONDOWN/UP**（绕开输入
+  队列、也绕开任何低级钩子）→ 整屏像素差 **0.000%**；`ctrl+f` 也一样；四个 QQ 窗口逐个试，**没有一个是活的**。
+- 对照实验：普通 Win32 窗口（探针）**隐藏 → `restore` → 按编号点击 → 应用自己的日志确认收到**（0→1）。
+  也就是说唤醒方式与注入通道本身没问题，问题在被注入的那个应用。
+- 排除 UIPI：QQ、微信、我们这个进程**都是 ELEVATED**（同级），不是完整性级别把输入挡了。
+- 排除"窗口选错"：四个 QQ 窗口逐个唤醒到前台再试，全都不理。
+- 强制 a11y 激活也无效：`oleacc.AccessibleObjectFromWindow(hwnd, OBJID_CLIENT, IID_IAccessible)` 返回 `hr=0`
+  并拿到指针，重建 UIA 树仍是 **7 个无名元素**。
+- **走 shell 才真的打开**：`targets(hwnd=Shell_TrayWnd)` → 点 `显示隐藏的图标` → 溢出面板
+  （`TopLevelWindowForOverflowXamlIsland`）出现 → 点里面的 ` QQ: 3754901636…` → QQ 窗口 `hidden → normal`。
+- **但它的 a11y 不能指望**：同一条路径下，一次读到 **20 个带名元素**（`窗口控制区域`、`天气:晴,点击查看详情`），
+  另一次点开后 5 秒仍是 **0 个带名控件**（同一个 hwnd、同样是 `normal` 且前台）。所以：shell 路径解决的是
+  「应用有没有真的打开」，**读写要靠像素层**（OCR + 二值化切框，实测 29 个文本框 + 15 个形状）。`restore`
+  的结果里带上「named controls: N」，就是让模型知道自己处在哪个体制里。
+
+**机制**：`ShowWindow`/`SetForegroundWindow` 改的是**操作系统**对窗口的账；应用自己仍以为它在托盘里——渲染面没接上、
+输入路径不处理、a11y 也不打开。而点任务栏/托盘的图标**不是点在应用上**：那一下落在 **explorer**（任务栏宿主）上，
+explorer 随后投递应用自己的 tray / 激活回调，应用于是跑它自己的「打开主窗口」流程。**这就是"人点就行、命令不行"的全部原因。**
+
+**工具的修法**（`restore`，spec §35.7 的延伸）：
+
+- **条件前移**（2026-09-13 用户要求："对于微信 QQ 这种，直接采用新方法"）：`via="auto"` 先看窗口再动手，
+  满足任一条就**直接走 shell**，不再先等 OS 唤醒失败：① 窗口不在屏幕上（`minimized`/`hidden`，这就是应用的托盘
+  状态）；② 它的 a11y **没有任何可寻址的东西**（无名字也无类名，QQ 的标志性 7 个空壳）；③ 它属于自绘家族
+  （`Chrome_WidgetWin*` / `Qt5*` / `Qt6*` / `MMUIRender*`）**且刚被我们唤醒过**——第三条规定了"刚叫回来的
+  Chromium/Qt 窗口"才走 shell，健康在屏的 Chromium 应用（如 Edge，有带名控件）不会被多余地点一下任务栏。
+  走完 shell 若窗口仍不在屏幕上，再回落到 OS 唤醒。
+- `via="window"` 只走 OS 唤醒；`via="shell"` 强制走 shell。
+  先按「窗口标题 / 进程名」在任务栏找它的按钮，找不到就点 `显示隐藏的图标` 打开溢出面板，再按名字点它的托盘图标，
+  然后关掉面板。
+- `via="window"` 只走 OS 唤醒；`via="shell"` 强制走 shell。
+- 判据用**带名字的 a11y 元素数**（`_named_a11y`），比帧差可靠：实测隐藏态 0 → 真正醒来的 QQ 是 10–20。
+- 真机验收：把 QQ 隐藏 → `restore(via="auto")` → 回到 `normal` 且 `named controls: 10`（修前同样是"可见"，
+  但带名控件是 0，等于给了一个死窗口）。
+- **只有一个唤醒入口**（2026-09-13 用户追问「你跑了新旧两种方法，不应该直接新方法吗」后重构）：
+  `wake_window(hwnd, via)` 是 `restore` 与**所有注入动作**共用的唯一入口。`auto` 时先读窗口再决定——需要 shell
+  的（不在屏幕上 / a11y 无可寻址 / 自绘且刚被唤醒）**直接走 shell，不再先跑一次 `ShowWindow`**：先跑 OS 唤醒
+  只会把一个死窗口弄成"可见"，而且会破坏判据本身（窗口已经 `normal` 了，`shell_reason` 的第一条就失效）。
+  只有 shell 走完窗口仍不在屏幕上，才回落到 `ShowWindow` 兜底。实测（QQ 隐藏态）：
+  `→ normal (was hidden, named controls: 10)` + `shell wake first: it is hidden…` +
+  `shell wake: clicked its tray icon ' QQ: …'`，**OS 唤醒一次都没用**。
+

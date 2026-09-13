@@ -1756,18 +1756,15 @@ def _guarded_input(action: str, hwnd: int) -> tuple[bool, str]:
     a window that is minimized or hiding in the notification area before anything
     tries to measure or click it.
     """
-    if not _session.announced:
-        _session.announced = True
-        _hint(
-            "Fungi 正在控制桌面",
-            f"已按设置里的开关直接操作：{action}；可在设置页随时关掉，关掉即立刻收回",
-        )
+    announce_once(action)
     # A minimized window's controls sit at their icon coordinates and a hidden one
-    # has no on-screen geometry at all: wake it before anything measures or clicks.
-    was = ensure_on_screen(hwnd)
-    if was != "normal" and window_state(hwnd) != "normal":
+    # has no on-screen geometry at all: wake it before anything measures or clicks,
+    # through the path that actually wakes its application (see wake_window).
+    was = window_state(hwnd)
+    wake_window(hwnd)
+    if window_state(hwnd) != "normal":
         return False, (
-            f"ERROR: 0x{hwnd:X} is still {window_state(hwnd)} after a restore attempt — an "
+            f"ERROR: 0x{hwnd:X} is still {window_state(hwnd)} after a wake attempt — an "
             "elevated window (or one on another virtual desktop) cannot be driven from here."
         )
     return True, (f"  restored from {was}" if was != "normal" else "")
@@ -2019,32 +2016,208 @@ def _action_scroll(args: dict, sink, should_abort, on_answer, call_id) -> str | 
     return _attach(summary, after_frame) if after_frame is not None else summary
 
 
-def _action_restore(args: dict) -> str | ImageRead:
-    """Wake a window that is minimized or living in the notification area.
+TRAY_OVERFLOW_HINTS = ("显示隐藏的图标", "Show hidden icons", "显示隐藏的图标 ")
+TRAY_FLYOUT_CLASSES = ("TopLevelWindowForOverflowXamlIsland", "NotifyIconOverflowWindow")
 
-    Its own action because it is the one thing a tray-only application needs,
-    and because the agent should be able to just say "bring it back" without
-    clicking anything (spec §35.7)."""
-    hwnd = int(args["hwnd"])
-    ok, note = _guarded_input("restore", hwnd)
-    if not ok:
-        return note
+
+def _app_tokens(win: Win) -> list[str]:
+    """What a shell row for this application could be called.
+
+    (the window title, the process stem). The taskbar names a button after the
+    app's display name, not after its exe — measured on this box: '智能终端 - 1
+    个运行窗口' for WindowsTerminal.exe — so the title is the better token, and the
+    tray tooltip happens to carry it too (' QQ: 3754901636…').
+    """
+    tokens = [win.title.strip(), Path(win.proc).stem if win.proc else ""]
+    return [token.casefold() for token in tokens if len(token) >= 2]
+
+
+def _shell_row(rows: list[Target], win: Win) -> Target | None:
+    """The row in a shell surface (taskbar or tray flyout) that belongs to `win`."""
+    tokens = _app_tokens(win)
+    for token in tokens:
+        for cand in rows:
+            if token in cand.name.casefold():
+                return cand
+    return None
+
+
+def _shell_surfaces() -> list[int]:
+    """Window handles worth looking for the app's shell entry in."""
+    tray = int(_u32.FindWindowW("Shell_TrayWnd", None) or 0)
+    out = [tray] if tray else []
+    for win in list_windows(include_hidden=True):
+        if win.cls in TRAY_FLYOUT_CLASSES:
+            out.append(win.hwnd)
+    return out
+
+
+# Families that draw themselves and only wake input/a11y on their own activation
+# path: Chromium/Electron (QQ), Qt (WeChat), and Qt's rendered surfaces.
+SELF_DRAWN_CLASSES = ("Chrome_WidgetWin", "Chrome_RenderWidgetHost", "Qt5", "Qt6", "MMUIRender")
+
+
+def shell_reason(hwnd: int, win: Win, *, just_woken: bool = False) -> str | None:
+    """Why this window wants the shell path *first*, or None if the cheap wake is fine.
+
+    Decided before anything is touched, from three signals measured on 2026-09-13:
+
+    * it is not on screen (minimized or hidden): that is the application's own tray
+      state, and `ShowWindow` cannot make the app *believe* it left the tray;
+    * its a11y has nothing addressable at all — no name and no class anywhere,
+      which is the QQ signature (7 anonymous ScrollItem shells);
+    * its class is a self-drawn family (Chromium/Electron, Qt, MMUIRender): those
+      render inside themselves and only attach input and accessibility when their
+      own activation path runs.
+    """
+    state = window_state(hwnd)
+    if state != "normal":
+        return f"it is {state}: the application's own wake path is what ends that state"
+    if not any(cand.name or cand.cls for cand, _ in _scan(hwnd, limit=40)):
+        return "its a11y offers nothing addressable — the app is still asleep"
+    if just_woken and win.cls.startswith(SELF_DRAWN_CLASSES):
+        # Only for a window we just brought back: a healthy Chromium app (Edge) has
+        # named controls and needs no help, while one that was sitting in the tray
+        # keeps its renderer asleep even once it is visible again.
+        return f"it draws itself ({win.cls}) and was just brought back"
+    return None
+
+
+def shell_wake(hwnd: int) -> str:
+    """Wake an application the way its own icon does — through the shell.
+
+    `ShowWindow` + `SetForegroundWindow` only move the *operating system's* idea of
+    the window: measured on this box (2026-09-13), a QQ window woken that way was
+    the real foreground window, and yet every one of its windows ignored
+    SendInput, batched SendInput, and even a directly posted WM_LBUTTONDOWN — while
+    the same code drove a plain Win32 window (click confirmed by the app itself).
+    The application still believed it was in the tray: no render surface attached,
+    no a11y, no input.
+
+    Clicking the icon in the taskbar or the notification area is what the user does,
+    and it works because that click lands on *explorer*: the shell then delivers the
+    application's own tray/activation callback, and the app runs its real
+    "open my window" path. Measured the same afternoon: after that click the window
+    went hidden -> normal and its a11y went from 7 anonymous shells to 20 elements
+    with names.
+    """
+    win = next((w for w in list_windows(include_hidden=True) if w.hwnd == hwnd), None)
+    if win is None:
+        return "the window is gone"
+    for surface in _shell_surfaces():
+        rows = [cand for cand, _ in _scan(surface, limit=80)]
+        if not rows:
+            continue
+        entry = _shell_row(rows, win)
+        if entry is None and surface == int(_u32.FindWindowW("Shell_TrayWnd", None) or 0):
+            chevron = next(
+                (c for c in rows if any(hint in c.name for hint in TRAY_OVERFLOW_HINTS)), None
+            )
+            if chevron is not None:
+                set_foreground(surface)
+                click_at(*chevron.center)
+                time.sleep(0.6)
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline and not any(
+                    w.cls in TRAY_FLYOUT_CLASSES for w in list_windows(include_hidden=True)
+                ):
+                    time.sleep(0.1)
+                for flyout in _shell_surfaces():
+                    if flyout == surface:
+                        continue
+                    for cand, _ in _scan(flyout, limit=80):
+                        if _shell_row([cand], win) is not None:
+                            click_at(*cand.center)
+                            time.sleep(0.8)
+                            send_keys(["escape"])  # close the flyout again
+                            return f"clicked its tray icon {cand.name.splitlines()[0]!r}"
+                send_keys(["escape"])
+            continue
+        if entry is not None:
+            set_foreground(surface)
+            click_at(*entry.center)
+            time.sleep(0.8)
+            return f"clicked its shell entry {entry.name.splitlines()[0]!r}"
+    return "no taskbar button and no tray icon found for it"
+
+
+def _named_a11y(hwnd: int) -> int:
+    """How many addressable (named) controls the window's a11y offers right now."""
+    return sum(1 for cand, _ in _scan(hwnd, limit=40) if cand.name)
+
+
+def announce_once(action: str) -> None:
+    """Say on this machine that the agent has the desktop — visible, not blocking.
+
+    One notice per session: consent is the settings switch, so there is no card to
+    wait on, but the machine should still be told (spec §35.2).
+    """
+    if _session.announced:
+        return
+    _session.announced = True
+    _hint(
+        "Fungi 正在控制桌面",
+        f"已按设置里的开关直接操作：{action}；可在设置页随时关掉，关掉即立刻收回",
+    )
+
+
+def wake_window(hwnd: int, via: str = "auto") -> list[str]:
+    """Get a window on screen, choosing the path the *application* needs.
+
+    Returns the lines to report. `auto` reads the window before touching it (state,
+    whether its a11y is addressable at all, whether it draws itself): for a
+    tray-resident or self-drawn app the shell click runs **first and alone** —
+    running `ShowWindow` first would only make a dead window visible, and it also
+    destroys the very evidence the decision rests on. `ShowWindow` gets a turn only
+    if the app still is not on screen afterwards.
+    """
+    win = next((w for w in list_windows(include_hidden=True) if w.hwnd == hwnd), None)
+    if win is None:
+        return ["  the window is gone"]
+    notes: list[str] = []
+    reason = shell_reason(hwnd, win) if via == "auto" else None
+    if via == "shell" or reason is not None:
+        if reason is not None:
+            notes.append(f"  shell wake first: {reason}")
+        notes.append(f"  shell wake: {shell_wake(hwnd)}")
+        time.sleep(SETTLE_S)
+    if window_state(hwnd) != "normal":
+        was = ensure_on_screen(hwnd)
+        notes.append(f"  OS wake (ShowWindow): the shell path left it {was}")
+        time.sleep(SETTLE_S)
     set_foreground(hwnd)
     time.sleep(SETTLE_S)
-    frame = grab_window(hwnd) if window_state(hwnd) == "normal" else None
+    return notes
+
+
+def _action_restore(args: dict) -> str | ImageRead:
+    """Bring a window back on screen, through the path the application needs.
+
+    `via` defaults to `auto`: the shell entry (its taskbar button, or its tray icon
+    behind the notification area's overflow) for a tray-resident or self-drawn app,
+    `ShowWindow` otherwise — see `wake_window` and spec §35.12.
+    """
+    hwnd = int(args["hwnd"])
+    via = str(args.get("via") or "auto").strip().lower()
+    announce_once("restore")
+    was = window_state(hwnd)
+    notes = wake_window(hwnd, via)
+    now = window_state(hwnd)
+    frame = grab_window(hwnd) if now == "normal" else None
     if frame is not None:
         _session.remember(frame)
-    now = window_state(hwnd)
     summary = (
-        f"RESTORE hwnd=0x{hwnd:X} {_window_text(hwnd)!r} → {now}{note}\n"
-        "  control: on (pc_control switch; no prompt for this action)",
+        f"RESTORE hwnd=0x{hwnd:X} {_window_text(hwnd)!r} → {now}"
+        f" (was {was}, named controls: {_named_a11y(hwnd) if now == 'normal' else 0})\n"
+        "  control: on (pc_control switch; no prompt for this action)"
     )
+    if notes:
+        summary += "\n" + "\n".join(notes)
     return _attach(summary, frame) if frame is not None else summary
 
 
 _INPUT_ACTIONS = {
     "click": _action_click,
-    "restore": _action_restore,
     "type": _action_type,
     "key": _action_key,
     "scroll": _action_scroll,
@@ -2072,7 +2245,7 @@ def _run(
     if action == "label":
         return _action_label(args)
     handler = _INPUT_ACTIONS.get(action)
-    if handler is None:
+    if handler is None and action != "restore":
         return (
             f"ERROR: unknown action {action!r} — use shot, windows, targets, click, type, key, "
             "scroll or restore"
@@ -2087,6 +2260,8 @@ def _run(
     if not _u32.IsWindow(hwnd):
         return f"ERROR: no such window: 0x{hwnd:X}"
     try:
+        if action == "restore":  # asks nothing, so it takes no ask plumbing
+            return _action_restore(args)
         return handler(args, sink, should_abort, on_answer, call_id)
     finally:
         # Belt and braces: no injection path may leave a key down, including
@@ -2191,6 +2366,17 @@ SCHEMA = {
                         '"发送". It is bound to where that shape was, so click(name="发送") '
                         "keeps working across later listings — and an unlabelled picture shape has "
                         "no name at all, so label the ones you will need again."
+                    ),
+                },
+                "via": {
+                    "type": "string",
+                    "enum": ["auto", "window", "shell"],
+                    "description": (
+                        "restore only. 'auto' (default) wakes the window and, if the application "
+                        "still offers no named controls, clicks its taskbar button or tray icon — "
+                        "the shell path, which is what makes a tray-resident app (QQ and friends) "
+                        "actually come alive instead of only becoming visible. 'window' is the "
+                        "OS-level wake alone; 'shell' forces the shell path."
                     ),
                 },
                 "include": {

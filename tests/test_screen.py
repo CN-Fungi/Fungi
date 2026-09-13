@@ -132,20 +132,34 @@ def test_an_input_action_asks_nothing_and_says_so_once(monkeypatch):
     hints: list[str] = []
     monkeypatch.setattr(screen, "blocking_ask", lambda *a, **k: pytest.fail("asked the user"))
     monkeypatch.setattr(screen, "_hint", lambda title, body: hints.append(title))
-    wakes = iter(["minimized", "normal"])
-    monkeypatch.setattr(screen, "ensure_on_screen", lambda hwnd: next(wakes, "normal"))
+    monkeypatch.setattr(screen, "ensure_on_screen", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "shell_wake", lambda hwnd: "no shell entry")
     monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(
+        screen,
+        "list_windows",
+        lambda include_hidden=False: [
+            screen.Win(42, "demo", "Notepad", (0, 0, 5, 5), 5, "notepad.exe", "normal")
+        ],
+    )
     monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
 
-    ok, note = screen._guarded_input("click", 42)
-    assert ok and "restored from minimized" in note
-    ok, note = screen._guarded_input("click", 42)
-    assert ok and note == ""
+    first_ok, _note = screen._guarded_input("click", 42)
+    second_ok, _note = screen._guarded_input("click", 42)
+    assert first_ok and second_ok
     assert hints == ["Fungi 正在控制桌面"]  # once, and never again this session
 
 
 def test_a_window_that_stays_off_screen_is_refused(monkeypatch):
     monkeypatch.setattr(screen, "ensure_on_screen", lambda hwnd: "hidden")
+    monkeypatch.setattr(screen, "shell_wake", lambda hwnd: "no shell entry")
+    monkeypatch.setattr(
+        screen,
+        "list_windows",
+        lambda include_hidden=False: [
+            screen.Win(42, "demo", "Notepad", (0, 0, 5, 5), 5, "notepad.exe", "hidden")
+        ],
+    )
     monkeypatch.setattr(screen, "window_state", lambda hwnd: "hidden")
     ok, note = screen._guarded_input("click", 42)
     assert ok is False and "cannot be driven" in note
@@ -238,6 +252,105 @@ def test_a_covered_dpi_unaware_window_is_not_measured(monkeypatch):
     assert problem and "DPI-unaware" in problem and "restore" in problem
     monkeypatch.setattr(screen, "foreground_hwnd", lambda: 7)
     assert screen.capture_problem(7) is None
+
+
+def test_shell_rows_are_matched_by_the_application_s_own_names():
+    """The taskbar names a button after the app's display name, not its exe
+    ('智能终端 - 1 个运行窗口' for WindowsTerminal.exe), so the window title is the
+    better token — and the tray tooltip carries it too."""
+    win = screen.Win(1, "QQ", "Chrome_WidgetWin_1", (0, 0, 10, 10), 5, "QQ.exe", "normal")
+    rows = [
+        _cand(1, " Clash Verge 2.5.2", "", (0, 0, 5, 5)),
+        _cand(2, " QQ: 3754901636", "", (0, 0, 5, 5)),
+    ]
+    hit = screen._shell_row(rows, win)
+    assert hit is not None and "3754901636" in hit.name
+    titled = screen.Win(
+        2, "智能终端", "CASCADIA", (0, 0, 10, 10), 5, "WindowsTerminal.exe", "normal"
+    )
+    assert (
+        screen._shell_row([_cand(1, "智能终端 - 1 个运行窗口", "", (0, 0, 5, 5))], titled)
+        is not None
+    )
+    assert screen._shell_row([_cand(1, "无关的图标", "", (0, 0, 5, 5))], win) is None
+
+
+def test_restore_reaches_for_the_shell_when_the_window_stays_asleep(monkeypatch):
+    """A tray-resident app woken with ShowWindow alone offers no named controls
+    (its renderer and a11y are still asleep); restore then does what the user does
+    and clicks its shell entry (measured on QQ, 2026-09-13)."""
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "QQ")
+    monkeypatch.setattr(screen, "_named_a11y", lambda hwnd: 0)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: None)
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: [])
+    monkeypatch.setattr(
+        screen,
+        "list_windows",
+        lambda include_hidden=False: [
+            screen.Win(42, "QQ", "Chrome_WidgetWin_1", (0, 0, 10, 10), 5, "QQ.exe", "normal")
+        ],
+    )
+    woken: list[int] = []
+    monkeypatch.setattr(
+        screen, "shell_wake", lambda hwnd: woken.append(hwnd) or "clicked its tray icon ' QQ'"
+    )
+
+    out = str(screen._action_restore({"hwnd": 42}))
+    assert woken == [42]
+    assert "shell wake first" in out and "tray icon" in out
+
+
+def test_the_up_front_condition_names_why_the_shell_is_needed(monkeypatch):
+    """Decided before anything is touched (user's ask, 2026-09-13): a tray-resident
+    or self-drawn window goes to the shell path first, a healthy one does not."""
+    qq = screen.Win(1, "QQ", "Chrome_WidgetWin_1", (0, 0, 10, 10), 5, "QQ.exe", "normal")
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: [])
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    assert "nothing addressable" in screen.shell_reason(1, qq)
+
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "hidden")
+    assert "is hidden" in screen.shell_reason(1, qq)
+
+    named = [(_cand(1, "保存", "Button", (0, 0, 5, 5), ("Invoke",)), object())]
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: named)
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    assert screen.shell_reason(1, qq) is None  # alive and on screen: no help needed
+    assert "just brought back" in screen.shell_reason(1, qq, just_woken=True)
+
+
+def test_restore_leaves_an_awake_window_alone(monkeypatch):
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
+    monkeypatch.setattr(screen, "_named_a11y", lambda hwnd: 12)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: None)
+    monkeypatch.setattr(screen, "shell_wake", lambda hwnd: pytest.fail("clicked the shell"))
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: [
+            (_cand(1, "保存", "Button", (0, 0, 5, 5), ("Invoke",)), object())
+        ],
+    )
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
+
+    out = str(screen._action_restore({"hwnd": 42}))
+    assert "named controls: 12" in out and "shell wake" not in out
+
+
+def test_restore_window_only_never_touches_the_shell(monkeypatch):
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
+    monkeypatch.setattr(screen, "_named_a11y", lambda hwnd: 0)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: None)
+    monkeypatch.setattr(screen, "shell_wake", lambda hwnd: pytest.fail("clicked the shell"))
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: [])
+
+    out = str(screen._action_restore({"hwnd": 42, "via": "window"}))
+    assert "shell wake" not in out
 
 
 def test_waking_a_window_reports_what_it_was(monkeypatch):
