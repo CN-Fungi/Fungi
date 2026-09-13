@@ -60,6 +60,7 @@ DOUBLE_CLICK_GAP_S = 0.06  # well inside the system's double-click time (default
 MOVE_STEPS = 14  # intermediate points on the way to a click target — a glide, not a teleport
 MOVE_DURATION_S = 0.22  # total travel time: a person's flick, and small against SETTLE_S
 MOVE_TOLERANCE_PX = 2  # measured round-trip error of the 0..65535 space: 0px, -1px at a corner
+TYPE_CHAR_DELAY_S = 0.03  # 逐字输入: the gap between characters (Typer's own knob, §37)
 LAUNCH_WAIT_S = 3.0  # a gesture that starts a process: its window is not up immediately
 SHOT_MAX_DIM = 1568  # same vision sweet spot as files.IMAGE_MAX_DIM
 
@@ -989,6 +990,7 @@ class _INPUT(ctypes.Structure):
 
 INPUT_MOUSE, INPUT_KEYBOARD = 0, 1
 KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP = 0x0001, 0x0002
+KEYEVENTF_UNICODE = 0x0004  # wScan carries a UTF-16 unit: the character, not a keycode
 MOUSEEVENTF_MOVE, MOUSEEVENTF_ABSOLUTE = 0x0001, 0x8000
 MOUSEEVENTF_VIRTUALDESK = 0x4000
 MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP = 0x0002, 0x0004
@@ -1193,6 +1195,67 @@ def _key_event(vk: int, *, down: bool) -> int:
     else:
         _held.discard(vk)
     return result
+
+
+def _char_units(char: str) -> list[int]:
+    """The UTF-16 code units this character is sent as: one, or two for an astral
+    character (an emoji is a surrogate pair, and Windows takes one unit per event)."""
+    code = ord(char)
+    if code <= 0xFFFF:
+        return [code]
+    code -= 0x10000
+    return [0xD800 + (code >> 10), 0xDC00 + (code & 0x3FF)]
+
+
+def _char_event(unit: int, *, down: bool) -> int:
+    """One character as `KEYEVENTF_UNICODE`: the character itself, not a keycode.
+
+    That is what makes CJK work without touching the input method — no layout, no IME
+    state, nothing to translate. The `_held` bookkeeping is deliberately not involved:
+    a character is not a key that can be left down.
+    """
+    flags = KEYEVENTF_UNICODE | (0 if down else KEYEVENTF_KEYUP)
+    return _send(_INPUT(INPUT_KEYBOARD, _INPUTUNION(ki=_KEYBDINPUT(0, unit, flags, 0, None))))
+
+
+def type_text(text: str, *, delay: float = TYPE_CHAR_DELAY_S) -> tuple[int, str | None]:
+    """Type `text` one character at a time — the effect a human typing has.
+
+    The user's own Typer tool is the reference (2026-09-14): pynput's
+    `keyboard.type(char)` per character with an adjustable gap between them, no
+    clipboard involved. Here each character is an explicit `KEYEVENTF_UNICODE`
+    down/up pair, so the keyboard layout and the IME are bypassed, and the gap is
+    `TYPE_CHAR_DELAY_S` unless the caller asks for another one.
+
+    `\\n`/`\\r` go out as Enter and `\\t` as Tab, exactly as Typer maps them: a raw
+    U+000A character is not what an application reads as "next line".
+
+    Returns `(characters typed, error)`. A run that dies half way stops there and
+    reports how far it got — the text that already landed is a fact the caller has to
+    be told, not something to hide behind an exception.
+    """
+    typed = 0
+    for index, char in enumerate(text):
+        if char in "\r\n":
+            events = [_key_event(0x0D, down=True), _key_event(0x0D, down=False)]
+        elif char == "\t":
+            events = [_key_event(0x09, down=True), _key_event(0x09, down=False)]
+        else:
+            units = _char_units(char)
+            events = [
+                result
+                for unit in units
+                for result in (_char_event(unit, down=True), _char_event(unit, down=False))
+            ]
+        if any(result != 1 for result in events):
+            return typed, (
+                f"SendInput refused {char!r} (character {index + 1} of {len(text)}) — "
+                f"{typed} character(s) had already been typed"
+            )
+        typed += 1
+        if delay > 0 and index < len(text) - 1:
+            time.sleep(delay)
+    return typed, None
 
 
 def send_keys(names: list[str]) -> tuple[list[str], str | None]:
@@ -2023,19 +2086,36 @@ def _action_type(args: dict, sink, should_abort, on_answer, call_id) -> str | Im
         _focus_target(hwnd, target)
     _before_value, where = _read_back_settled(hwnd, target)
     before_frame = grab_window(hwnd)
-    snapshot = snapshot_clipboard()
-    pasted = set_clipboard_text(text)
-    if not pasted:
-        return "ERROR: could not open the clipboard (another process is holding it)"
-    _names, error = send_keys(["ctrl", "v"])
-    if error:
-        return f"ERROR: {error}"
+    style = str(args.get("style") or "paste").strip().lower()
+    if style not in ("paste", "type"):
+        return f"ERROR: style must be 'paste' or 'type', got {style!r}"
+    snapshot = None
+    typed = 0
+    typing_error = None
+    if style == "type":
+        # 逐字输入 (spec §37): no clipboard at all — each character is injected on its
+        # own, paced, the way the user's Typer tool does it.
+        try:
+            delay = float(args.get("char_delay") or TYPE_CHAR_DELAY_S)
+        except (TypeError, ValueError):
+            return f"ERROR: char_delay must be a number, got {args.get('char_delay')!r}"
+        typed, typing_error = type_text(text, delay=max(0.0, delay))
+    else:
+        snapshot = snapshot_clipboard()
+        pasted = set_clipboard_text(text)
+        if not pasted:
+            return "ERROR: could not open the clipboard (another process is holding it)"
+        _names, error = send_keys(["ctrl", "v"])
+        if error:
+            return f"ERROR: {error}"
+        typed = len(text)
     time.sleep(SETTLE_S)
     after_value, _where = _read_back_settled(hwnd, target)
     after_frame = grab_window(hwnd)
     if after_frame is not None:
         _session.remember(after_frame)
-    restore_clipboard(snapshot)
+    if snapshot is not None:
+        restore_clipboard(snapshot)
     changed = _diff_ratio(before_frame, after_frame) if before_frame and after_frame else 0.0
     key = f"type:{hwnd}:{target.label if target else where}"
     verified = text in after_value or after_value.strip() == text.strip()
@@ -2054,7 +2134,7 @@ def _action_type(args: dict, sink, should_abort, on_answer, call_id) -> str | Im
         verdict = "unverified: nothing changed on screen"
     clip = (
         ""
-        if not snapshot.other
+        if snapshot is None or not snapshot.other
         else " · the clipboard also held a non-text format, which is not restored"
     )
     lines = [
@@ -2062,9 +2142,20 @@ def _action_type(args: dict, sink, should_abort, on_answer, call_id) -> str | Im
         + (f" target {target.label}" if target else " (current focus)")
         + note,
         f"  verify: {verdict}",
-        f"  clipboard restored: {'yes' if snapshot.formats else 'nothing to restore'}{clip}",
-        "  control: on (pc_control switch; no prompt for this action)",
+        (
+            "  clipboard restored: "
+            f"{'yes' if snapshot and snapshot.formats else 'nothing to restore'}{clip}"
+            if snapshot is not None
+            else "  method: 逐字输入 (one character at a time; the clipboard was never touched)"
+        ),
     ]
+    if style == "type":
+        lines.insert(
+            1,
+            f"  typed: {typed}/{len(text)} characters"
+            + (f" · {typing_error}" if typing_error else ""),
+        )
+    lines.append("  control: on (pc_control switch; no prompt for this action)")
     summary = "\n".join(lines)
     return _attach(summary, after_frame) if after_frame is not None else summary
 
@@ -2808,6 +2899,27 @@ SCHEMA = {
                 "text": {
                     "type": "string",
                     "description": "type only: the text to paste at the focused control",
+                },
+                "style": {
+                    "type": "string",
+                    "enum": ["paste", "type"],
+                    "description": (
+                        "type only. 'paste' (default) sets the clipboard and presses ctrl+V: one "
+                        "atomic insert, and the only way measured to work in self-drawn apps "
+                        "whose input box the a11y tree cannot address (WeChat, QQ). 'type' "
+                        "injects the text one character at a time through Unicode input — no "
+                        "clipboard involved, and the field fills visibly, character by "
+                        "character, the way a person types. Use 'type' when a human-like "
+                        "typing effect is wanted, or when a paste comes back "
+                        "unverified/nothing changed."
+                    ),
+                },
+                "char_delay": {
+                    "type": "number",
+                    "description": (
+                        "type only, style='type': seconds between characters (default 0.03). "
+                        "Longer reads as slower, more deliberate typing."
+                    ),
                 },
                 "keys": {
                     "type": "array",

@@ -193,6 +193,115 @@ def test_a_click_is_not_pressed_when_the_pointer_never_arrived(monkeypatch):
     assert screen.click_at(701, 399) is True
 
 
+# ── 逐字输入: one character at a time, the way Typer does it (spec §37) ─────
+def _char_events(monkeypatch):
+    """Record every injected event as (wVk, wScan, dwFlags)."""
+    events: list[tuple[int, int, int]] = []
+    monkeypatch.setattr(
+        screen, "_send", lambda payload: events.append(
+            (payload.ki.wVk, payload.ki.wScan, payload.ki.dwFlags)
+        ) or 1
+    )
+    return events
+
+
+def test_typing_sends_one_unicode_pair_per_character_in_order(monkeypatch):
+    """The character itself, not a keycode: that is what lets CJK arrive without an IME."""
+    events = _char_events(monkeypatch)
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    typed, error = screen.type_text("A你", delay=0.01)
+    assert (typed, error) == (2, None)
+    unicode_down, unicode_up = screen.KEYEVENTF_UNICODE, screen.KEYEVENTF_UNICODE | screen.KEYEVENTF_KEYUP
+    assert events == [
+        (0, ord("A"), unicode_down), (0, ord("A"), unicode_up),
+        (0, ord("你"), unicode_down), (0, ord("你"), unicode_up),
+    ]
+    assert screen._held == set()  # a character is not a key that can be left down
+
+
+def test_typing_paces_characters_and_stops_pacing_at_the_end(monkeypatch):
+    """Typer's own knob: a gap between characters, none after the last one."""
+    _char_events(monkeypatch)
+    slept: list[float] = []
+    monkeypatch.setattr(screen.time, "sleep", lambda seconds: slept.append(seconds))
+    screen.type_text("abc", delay=0.05)
+    assert slept == [0.05, 0.05]  # between a-b and b-c; typing the copy is not followed by a pause
+
+
+def test_an_emoji_is_sent_as_a_surrogate_pair(monkeypatch):
+    events = _char_events(monkeypatch)
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    typed, _error = screen.type_text("😀")
+    assert typed == 1
+    unicode_down = screen.KEYEVENTF_UNICODE
+    assert [scan for _vk, scan, flags in events if flags == unicode_down] == [0xD83D, 0xDE00]
+
+
+def test_a_newline_is_enter_not_the_unicode_character(monkeypatch):
+    """Typer maps '\\n' to Enter for a reason: U+000A is not what an app reads as
+    'next line'."""
+    events = _char_events(monkeypatch)
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    typed, error = screen.type_text("a\nb")
+    assert (typed, error) == (3, None)
+    assert events[2] == (0x0D, 0, 0) and events[3] == (0x0D, 0, screen.KEYEVENTF_KEYUP)
+    assert all(flags & screen.KEYEVENTF_UNICODE == 0 for _vk, _scan, flags in events[2:4])
+
+
+def test_a_refused_character_stops_the_run_and_reports_what_landed(monkeypatch):
+    """The text that already arrived is a fact the caller must be told."""
+    events = _char_events(monkeypatch)
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(
+        screen, "_send", lambda payload: events.append(None) or (0 if len(events) > 4 else 1)
+    )
+    typed, error = screen.type_text("abcd")
+    assert typed == 2 and error and "already been typed" in error and "2 character" in error
+    assert screen._held == set()
+
+
+def test_typing_mode_never_touches_the_clipboard(monkeypatch):
+    """The user's Typer tool has no clipboard code at all — neither does this path:
+    their clipboard is not ours to overwrite."""
+    monkeypatch.setattr(screen, "_guarded_input", lambda hwnd: (True, ""))
+    monkeypatch.setattr(screen, "wake_window", lambda hwnd, via="auto": [])
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((200, 100)))
+    monkeypatch.setattr(screen, "_read_back_settled", lambda hwnd, target: ("你好", "Edit"))
+    monkeypatch.setattr(screen, "snapshot_clipboard", lambda: pytest.fail("touched the clipboard"))
+    monkeypatch.setattr(screen, "set_clipboard_text", lambda text: pytest.fail("touched the clipboard"))
+    monkeypatch.setattr(screen, "restore_clipboard", lambda snap: pytest.fail("touched the clipboard"))
+    monkeypatch.setattr(screen, "send_keys", lambda names: pytest.fail(f"pressed {names}"))
+    typed: list[str] = []
+    monkeypatch.setattr(screen, "type_text", lambda text, delay=0: typed.append(text) or (len(text), None))
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+
+    out = str(screen._action_type({"hwnd": 42, "text": "你好", "style": "type"}, None, None, None, None))
+    assert typed == ["你好"]
+    assert "逐字输入" in out and "typed: 2/2 characters" in out
+    assert "clipboard" not in out.split("verify")[0]  # no clipboard line at all
+
+
+def test_the_paste_path_is_still_the_default(monkeypatch):
+    monkeypatch.setattr(screen, "_guarded_input", lambda hwnd: (True, ""))
+    monkeypatch.setattr(screen, "wake_window", lambda hwnd, via="auto": [])
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((200, 100)))
+    monkeypatch.setattr(screen, "_read_back_settled", lambda hwnd, target: ("你好", "Edit"))
+    monkeypatch.setattr(screen, "snapshot_clipboard", lambda: screen.ClipSnapshot())
+    pasted: list[str] = []
+    monkeypatch.setattr(screen, "set_clipboard_text", lambda text: pasted.append(text) or True)
+    monkeypatch.setattr(screen, "restore_clipboard", lambda snap: None)
+    monkeypatch.setattr(screen, "send_keys", lambda names: (names, None))
+    monkeypatch.setattr(screen, "type_text", lambda text, delay=0: pytest.fail("typed instead of pasting"))
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+
+    out = str(screen._action_type({"hwnd": 42, "text": "你好"}, None, None, None, None))
+    assert pasted == ["你好"] and "clipboard restored" in out and "逐字输入" not in out
+
+
 # ── the armed window (spec §35.2) ──────────────────────────────────────────
 def test_disarm_releases_keys_and_forgets_frames(monkeypatch):
     released = []
