@@ -1,6 +1,6 @@
 [project]
 name = "fungi"
-version = "0.6.0"
+version = "0.6.1"
 description = "Fungi — LAN multi-host Orchestrator network built on the YESIR TriLayer agent harness"
 requires-python = ">=3.13"
 # comtypes drives UI Automation for the screen tool (spec §35): pure Python, and
