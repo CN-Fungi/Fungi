@@ -24,6 +24,19 @@ TRANSIENT_LLM_MARKERS = (
 TRANSIENT_HTTP_RE = re.compile(r"^HTTP (429|5\d\d)")
 
 FILE_OPS_RULE = """\
+- Which tool, when two could do the job (user's order, 2026-09-14): *at hand on
+  screen* comes first — a desktop icon, a file already listed in a window that is
+  showing, a taskbar button, a tray icon — and that includes opening a file: show the
+  desktop (`screen` key ['win','d']), list its icons with `targets`, and
+  `double_click` the file's. Then a filesystem *change*, which belongs to `bash`.
+  Then a window that draws itself (no addressable controls: QQ, WeChat, Chromium
+  shells), which is the `screen` tool's too. Everything left over goes to `bash`.
+- Opening a file is not a file operation, and knowing the path does not make it the
+  shell's: the icon *is* the app's own entry point, so `start` / `explorer.exe` are
+  never how something at hand gets opened. `start "" "<path>"` (what a double-click
+  would pick) is only for what has no entry point on screen at all; a `start`ed app
+  inherits this tool's output handles, so a shell launch counts as done when the
+  launcher exits, not when the app does.
 - File *existence* — creating a directory, deleting, renaming, moving — has no
   dedicated tool, so it goes through `bash` (`mkdir`, `ren`, `move`, `del`), in
   ANY place: this host's disk, a peer's store, anywhere. NEVER through a GUI —

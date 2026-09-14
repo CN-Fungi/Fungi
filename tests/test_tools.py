@@ -138,6 +138,19 @@ def test_bash_timeout(monkeypatch):
     assert result.startswith("ERROR: Timed out")
 
 
+def test_bash_returns_when_the_command_hands_its_handles_to_a_child(monkeypatch):
+    """`start` gives the launched app a copy of this tool's output handles, so the
+    process we wait on is gone while the copy lives on. The call ends with that
+    process (spec §42) — waiting on the pipes instead sat there for the whole
+    BASH_TIMEOUT (measured 2026-09-14: 600s with cmd.exe already exited, rc=0, which
+    is the turn the user aborted)."""
+    monkeypatch.setattr(shell_mod, "BASH_TIMEOUT", 6)
+    started = time.monotonic()
+    out = tool_bash('start /b cmd /c "ping -n 20 127.0.0.1 >nul"')
+    assert "Timed out" not in out
+    assert time.monotonic() - started < 5
+
+
 def test_glob_and_grep(tmp_path, monkeypatch):
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub" / "x.py").write_text("target_token = 1\n", encoding="utf-8")

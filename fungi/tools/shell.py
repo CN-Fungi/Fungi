@@ -2,6 +2,13 @@
 
 Uses a temp .bat file (chcp 65001 trick from the PowerShell original) to avoid
 quoting hell when the command contains quotes, pipes, or redirections.
+
+The command's output goes to files, not pipes (spec §42): a command is free to
+hand its handles to something that outlives it — `start "" notepad <file>` does
+exactly that — and a pipe whose write end lives on in that grandchild never
+reaches EOF, so waiting on it means waiting out BASH_TIMEOUT with nothing to show
+for it. The call ends with the process we launched, which is also the only thing
+`start` was ever meant to wait for.
 """
 
 import codecs
@@ -39,16 +46,61 @@ def _child_env() -> dict[str, str]:
     return {**os.environ, "WSL_UTF8": "1"}
 
 
+def _open_temporary(path: Path) -> int:
+    """O_TEMPORARY: the OS deletes the file once the *last* handle closes.
+
+    A launched app inherits the handles we pass to the command and may hold them
+    for hours, so deletion cannot be ours to do at return time."""
+    flags = os.O_RDWR | os.O_CREAT | os.O_TRUNC | getattr(os, "O_TEMPORARY", 0)
+    return os.open(str(path), flags)
+
+
+def _read_temporary(fd: int) -> bytes:
+    """Everything written so far, and let go of our handle."""
+    chunks: list[bytes] = []
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        while True:
+            block = os.read(fd, 65536)
+            if not block:
+                break
+            chunks.append(block)
+    except OSError:
+        pass
+    finally:
+        _close_quietly(fd)
+    return b"".join(chunks)
+
+
+def _close_quietly(fd: int) -> None:
+    if fd >= 0:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
+def _unlink_quietly(path: Path) -> None:
+    # A live grandchild makes this a sharing violation on Windows (O_TEMPORARY
+    # covers that case); on the POSIX-named branch below it is the real cleanup.
+    with contextlib.suppress(OSError):
+        path.unlink(missing_ok=True)
+
+
 def tool_bash(
     command: str, cwd: str | None = None, should_abort: Callable[[], bool] | None = None
 ) -> str:
-    bat = Path(tempfile.gettempdir()) / f"fungi-{os.getpid()}-{uuid.uuid4().hex[:8]}.bat"
+    tag = f"fungi-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    bat = Path(tempfile.gettempdir()) / f"{tag}.bat"
+    out_path = Path(tempfile.gettempdir()) / f"{tag}.out"
+    err_path = Path(tempfile.gettempdir()) / f"{tag}.err"
+    out_fd = err_fd = -1
     try:
         bat.write_text(f"chcp 65001 >nul\r\n{command}\r\n", encoding="utf-8", newline="")
+        out_fd = _open_temporary(out_path)
+        err_fd = _open_temporary(err_path)
         proc = subprocess.Popen(
             ["cmd.exe", "/c", str(bat)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=out_fd,
+            stderr=err_fd,
             # stdin=NUL: an interactive command (date/pause/...) reads EOF and
             # exits at once instead of holding the turn hostage for the full
             # timeout — fast-fail without banning any command.
@@ -57,34 +109,33 @@ def tool_bash(
             env=_child_env(),
             start_new_session=os.name != "nt",  # own group: killpg on abort
         )
-    except OSError as exc:
-        bat.unlink(missing_ok=True)
-        return f"ERROR: {exc}"
 
-    def _kill_tree() -> None:
-        """The command may have its own children; kill the whole tree."""
-        try:
-            if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                    capture_output=True,
-                    check=False,
-                    timeout=10,
-                )
-            else:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (OSError, subprocess.SubprocessError):
-            pass
-        with contextlib.suppress(OSError):
-            proc.kill()
+        def _kill_tree() -> None:
+            """The command may have its own children; kill the whole tree."""
+            try:
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                        capture_output=True,
+                        check=False,
+                        timeout=10,
+                    )
+                else:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            with contextlib.suppress(OSError):
+                proc.kill()
 
-    try:
-        # Poll instead of blocking communicate(): a stop press must take
-        # effect within ~0.2s, not after the command finishes (up to 10min).
+        # Wait on the process instead of on its output: a stop press must take
+        # effect within ~0.2s, and a command that handed its handles to a
+        # grandchild (`start`) must not keep us here after the process we
+        # launched is gone (measured 2026-09-14: the full 600s, with cmd.exe
+        # already exited rc=0) — spec §42.
         deadline = BASH_TIMEOUT
         while True:
             try:
-                out_b, err_b = proc.communicate(timeout=0.2)
+                proc.wait(timeout=0.2)
                 break
             except subprocess.TimeoutExpired:
                 pass
@@ -95,8 +146,9 @@ def tool_bash(
             if deadline <= 0:
                 _kill_tree()
                 return f"ERROR: Timed out after {BASH_TIMEOUT}s"
-        out = out_b.decode("utf-8", errors="replace")
-        err = err_b.decode("utf-8", errors="replace")
+        out = _read_temporary(out_fd).decode("utf-8", errors="replace")
+        err = _read_temporary(err_fd).decode("utf-8", errors="replace")
+        out_fd = err_fd = -1  # both handles are gone: the finally must not repeat it
         result = out
         if err:
             result += ("\n[stderr]\n" if result else "") + err
@@ -108,7 +160,11 @@ def tool_bash(
     except OSError as exc:
         return f"ERROR: {exc}"
     finally:
-        bat.unlink(missing_ok=True)
+        _close_quietly(out_fd)
+        _close_quietly(err_fd)
+        _unlink_quietly(bat)
+        _unlink_quietly(out_path)
+        _unlink_quietly(err_path)
 
 # ---------------------------------------------------------------------------
 # Session bash: REPL-style read/write interaction with a child process.

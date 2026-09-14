@@ -84,26 +84,38 @@ def test_local_clone_tool_surface():
 
 
 def test_the_file_ops_rule_reaches_every_prompt_that_can_touch_a_filesystem():
-    """The user's 大规则 (2026-09-14): create/delete/rename/move go through the shell
-    'in ANY place' — so it has to live in *every* prompt that has file tools, not just
-    in the screen tool's description. These are all the assembly points: the shared
-    base prompt (L1/orchestrator), the local agent, the courier, and the two child
-    layers. The room/clone turn agents copy the local/clone prompt, so they inherit."""
+    """The user's order (2026-09-14): what is *at hand on screen* goes to the screen
+    tool — opening a file included — while create/delete/rename/move go to the shell
+    'in ANY place'. Both halves have to live in *every* prompt that has file tools,
+    not just in the screen tool's description. These are all the assembly points: the
+    shared base prompt (L1/orchestrator), the local agent, the courier, and the two
+    child layers. The room/clone turn agents copy the local/clone prompt, so they
+    inherit."""
     from fungi import trilayer
     from fungi.agent import FILE_OPS_RULE, SYSTEM_PROMPT
     from fungi.clone.comm import build_comm_clone
 
-    key = "NEVER through a GUI"
-    assert key in FILE_OPS_RULE and key in SYSTEM_PROMPT
+    keys = (
+        "NEVER through a GUI",  # the CRUD half: filesystem changes, never a GUI
+        "and that includes opening a file",  # at hand wins, and it outranks the path
+        "Opening a file is not a file operation",  # ... so `start` is not the answer
+    )
 
     local = build_local_clone(
         "alpha", transport=None, cfg=CFG, sink=NullSink(), peers_fn=lambda: ["beta"]
     )
-    assert key in local.system_prompt
-    assert key in trilayer.L2_SYSTEM and key in trilayer.L3_SYSTEM
-
     courier = build_comm_clone("alpha", "beta", transport=None, cfg=CFG, sink=NullSink())
-    assert key in courier.resolved_prompt()  # the courier's prompt is callable (re-read per turn)
+    prompts = {
+        "FILE_OPS_RULE": FILE_OPS_RULE,
+        "SYSTEM_PROMPT": SYSTEM_PROMPT,
+        "local": local.system_prompt,
+        "L2_SYSTEM": trilayer.L2_SYSTEM,
+        "L3_SYSTEM": trilayer.L3_SYSTEM,
+        "courier": courier.resolved_prompt(),  # the courier's prompt is callable (per turn)
+    }
+    for name, prompt in prompts.items():
+        for key in keys:
+            assert key in prompt, f"{key!r} is missing from {name}"
     assert "SendToRecycleBin" in local.system_prompt  # the Recycle Bin caveat rides along
 
 

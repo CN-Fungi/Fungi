@@ -1432,6 +1432,8 @@ fungi 中的哪部分能力和这些项目有重合，再写文档」。逐一�
   把桌面叫出来（§35.16 订正），再动图标；自绘应用里**没有程序路径**的东西（微信/QQ 的消息输入框之类）→ 才动像素（OCR + 切框）。
 - **联系**：一条强烈建议用 **shell**，另一条强烈建议用**桌控**；判据是「**有没有程序路径**」——有（文件；有命令行/API 的东西）就走 shell，
   没有（窗口的打开动作、自绘界面里的控件）才动像素。§35.1 里「重命名用 F2」由大规则取代：工具面仍接受 `key ["f2"]`，但推荐路径变了。
+- **本节并列写法已被 §41 次序化（2026-09-14 用户第三次澄清）**：触手可及（**含打开文件**）> CRUD > 自绘 > 其余，
+  「有没有程序路径」不再是第一判据——它曾经把「打开一个文件」整条推给 shell。
 
 ## 40. 自绘界面：事先判断，直接走桌控
 
@@ -1457,4 +1459,70 @@ fungi 中的哪部分能力和这些项目有重合，再写文档」。逐一�
   桌控的"触手可及"管的是**打开**（三个面各一种方式），这条管的是**打开之后怎么在自绘界面里动手**。
 - 真机证据（§35.11）：微信 4.x = Qt + `MMUIRender` 自绘，OCR 出 36 个文本框 + 10 个形状；QQ = Chromium/Electron，7 个匿名空壳。
   二值化图本身永远不进模型（§35.9 = 喂阈值图给模型是负收益：误差 21-296px、延迟 ×3）。
+
+## 41. 决策链（2026-09-14 第三次澄清）：触手可及 > CRUD > 自绘 > 其余
+
+用户原话：「文件的CRUD和触手可及优先，如果属于触手可及的范畴，一律采用桌控，包括打开文件，任务栏和托盘等。
+如果属于CRUD，一律采用SHELL（不包括打开操作）。如果不是前两者，则判断是不是自绘界面，如果是，也采用桌控；
+最后if else，才使用Shell。」——这是一个**次序**，不是 §39 那种并列清单。
+
+| 次序 | 判据 | 归谁 | 做法 |
+|---|---|---|---|
+| 1 | **触手可及**：屏幕上有一个入口点——桌面图标、已经开着的窗口里列出的文件行、任务栏按钮、托盘图标 | **桌控**（`screen`） | 任务栏单击 / 托盘展开后单击 / 桌面 `win+d` 后双击（§35.15、§35.16）。**打开文件也在这一条** |
+| 2 | **CRUD**：创建/删除/重命名/移动文件或目录 | **shell** | `mkdir` / `ren` / `move` / `del`；内容归 read/write/edit。**打开不在其中** |
+| 3 | **自绘界面**：没有可寻址控件（QQ/微信/Chromium 壳） | **桌控** | 事先判断、铺像素层（§40） |
+| 4 | 其余 | **shell** | 打开一个"屏幕上什么都没有"的文件 → `start "" "<path>"`（§42 之后它不再困住回合） |
+
+**为什么这一轮必须写次序（2026-09-14 的真实回合，用户贴出 `data/sessions/20260914-113234.json`）**：任务
+「去桌面新建文本文档，在里面输入前赤壁赋全文。请使用 screen 工具。」模型 6 步：`bash` 探桌面路径 → `screen key win+d`
+（先被拒"needs hwnd"，补 `windows` 后成功，**桌面已经露出来、帧已附上**）→ `write` 建 `前赤壁赋.txt`（内容只有 1 字节 `" "`）
+→ **`bash start "" notepad "<path>"`** → 这一调用挂住（§42），用户按停止（`ERROR: cancelled by user`），会话 11:32:34 → 11:35:44 结束。
+它自己的 reasoning 里其实**先想过**桌控那条路（右键桌面 → 新建 → 文本文档），是被规则劝退的。两处文字各推了一把：
+
+- **§39 的判据**「有没有程序路径——有（**文件**…）就走 shell」把"文件"整类判给 shell，于是"打开一个文件"跟着走；
+  而 CRUD 的清单（创建/删除/重命名/移动）里从来没有"打开"。次序写清楚（第 1 行在第 2 行之前）就没有这个缝。
+- **screen 工具描述**把 `double_click` 写成 "the open gesture for an icon that **has no path you know**"（`fungi/tools/screen.py` 的 `SCHEMA`）。
+  这一轮模型**知道**路径（文件是它自己写的），按字面就该排除 `double_click`——它照字面做了。已改成
+  「at hand on screen 的东西的打开手势：桌面图标、文档图标、已经开着的窗口里列出的文件」。
+- 同类事故 §35.16 记过一次（微信没跑 → `bash start Weixin.exe`）：那次补的是「Program Manager 就是桌面」，治的是**窗口**；这次是**文档**。
+
+**残留分支要说清**：既不在屏幕上、也不是 CRUD 的打开（深层目录里的文件）落在次序 4，用 `start "" "<path>"`
+——它挑的是"双击会挑的那个应用"；本机 `.txt` 关联实测是 `txtfilelegacy` → **Notepad++**，所以 `start "" notepad <path>`
+这种写法挑的是**另一个**应用。这一支现在能用，是因为 §42 把管道那条坑堵了。
+
+**真机验收（2026-09-14，本机）**：桌面放一个 `fungi-chain-probe-<hex>.txt` → `targets(hwnd=Progman)` 直接读出
+`#29 [Invoke+Select+ScrollItem] 'fungi-chain-probe-….txt'`（**文档图标在 a11y 里是有名、可寻址的一行**，不必靠 OCR）
+→ `key ['win','d']` → `double_click(name='….txt')` → `verify: opened 'C:\…\fungi-chain-probe-….txt - Notepad++' → verified`。
+即「打开文件走桌控」这条在真机上成立（此前 §35.13 只验过**应用**图标）。顺带两个老事实再次命中：`win+d` 是**开关**
+（工具自报 `frame changed 0.00% → unverified` 就是"这一下没换状态"，隔一次再按才生效），而被它最小化的窗口要靠
+**点任务栏按钮**回来（`click '文件资源管理器 - 1 个运行窗口'` → `frame changed 0.47% → verified`，`ShowWindow` 不管用）。
+
+**落地的文字**：`fungi/agent.py::FILE_OPS_RULE`（次序 + "Opening a file is not a file operation"），追加到五个提示词
+（§39 已记装配点）；screen 工具描述的 `double_click` 与"at hand 优先"两处；回归用例
+`tests/test_local_clone.py::test_the_file_ops_rule_reaches_every_prompt_that_can_touch_a_filesystem`（三个 key 逐一在六个提示词里找）。
+
+## 42. bash 不再被交出去的句柄困住：等的是进程，不是管道 EOF
+
+**症状（本机实测 2026-09-14）**：`tool_bash` 把命令写进 `.bat`、`cmd.exe /c` 起、stdout/stderr 接 `PIPE`，每 0.2s
+`communicate(timeout=0.2)` 轮询，上限 `BASH_TIMEOUT = 600`（`fungi/tools/shell.py`）。`start "" notepad <path>` 起的
+GUI 子进程**继承了 cmd 的 stdout/stderr 写端**：cmd 自己**立刻退出**，但写端还开在 Notepad 手里 → `communicate()`
+永远等不到 EOF → 循环转到 600s 或用户按停止（`ERROR: cancelled by user`）。**是句柄问题，不是"在等 Notepad 关掉"。**
+
+| 形状（与工具同形的 Popen） | 实测 |
+|---|---|
+| `stdout=PIPE` + `communicate()`，bat 里 `start "" notepad <tmp>` | cmd 已退出（`poll()==0`）却**阻塞 >8s**；杀掉那个 Notepad 才释放 |
+| 同上，`start /b cmd /c "ping -n 20 127.0.0.1 >nul"` | 同样阻塞（**无声**——这就是回归用例的复现命令） |
+| 输出改文件 + `proc.wait()` | **0.11s 返回** |
+
+**改法**：输出不走管道，改两个 `O_TEMPORARY` 临时文件（`os.open(..., O_TEMPORARY)` = `FILE_FLAG_DELETE_ON_CLOSE`）；
+等待从 `communicate()` 改成 `proc.wait(timeout=0.2)` —— **等进程，不等 EOF**。为什么必须 `O_TEMPORARY`：句柄随 `start`
+交给被启动的应用，它可能握几小时，那时 `unlink` 是共享冲突（POSIX 命名的分支由 `finally` 里的 `unlink` 兜底）。
+实测语义：最后一个句柄关闭前文件存在（哪怕只有被启动的应用还握着），关掉即消失；`lseek(0)` 读得回子进程写的内容。
+
+**代价与边界（如实）**：命令的输出在**我们启动的那个进程退出时**定格——`start` 之后的输出不再等（正是 `start` 该有的语义）；
+`BASH_TIMEOUT`、`should_abort` 的 0.2s 响应不变（`test_bash_timeout` 仍走超时分支）；`bash_start` 那套会话机（`PIPE` + 读线程）没动。
+
+**验收**：`tests/test_tools.py::test_bash_returns_when_the_command_hands_its_handles_to_a_child`——`BASH_TIMEOUT` 调到 6s、
+跑无声复现那条命令，断言不出现 `Timed out` 且 5s 内返回。**修前跑它红**（实测 `AssertionError: 'ERROR: Timed out after 6s'`）；
+修后 0.11s 返回。
 
