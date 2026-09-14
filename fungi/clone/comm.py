@@ -4,7 +4,7 @@ from pathlib import Path
 
 from .. import config as config_mod
 from .. import todos
-from ..agent import Agent  # noqa: F401 (re-exported type)
+from ..agent import FILE_OPS_RULE, Agent  # noqa: F401 (re-exported type)
 from ..config import Config
 from ..events import Sink
 from ..pending import PendingAsks
@@ -92,13 +92,14 @@ def build_comm_clone(
                 + "\n"
             )
         if not memory and not calendar:
-            return base_prompt + "\n" + todos.RULES
+            return base_prompt + "\n" + todos.RULES + FILE_OPS_RULE
         return (
             base_prompt
             + "\n本机主人的长期备忘（用户在 GUI 里写给你的背景记忆，回答时可用它代为说明或转达）:\n"
             + memory + "\n"
             + calendar
             + "\n" + todos.RULES
+            + FILE_OPS_RULE
         )
 
     return Clone(

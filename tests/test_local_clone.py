@@ -83,6 +83,30 @@ def test_local_clone_tool_surface():
     assert "user's calendar" in clone.system_prompt
 
 
+def test_the_file_ops_rule_reaches_every_prompt_that_can_touch_a_filesystem():
+    """The user's 大规则 (2026-09-14): create/delete/rename/move go through the shell
+    'in ANY place' — so it has to live in *every* prompt that has file tools, not just
+    in the screen tool's description. These are all the assembly points: the shared
+    base prompt (L1/orchestrator), the local agent, the courier, and the two child
+    layers. The room/clone turn agents copy the local/clone prompt, so they inherit."""
+    from fungi import trilayer
+    from fungi.agent import FILE_OPS_RULE, SYSTEM_PROMPT
+    from fungi.clone.comm import build_comm_clone
+
+    key = "NEVER through a GUI"
+    assert key in FILE_OPS_RULE and key in SYSTEM_PROMPT
+
+    local = build_local_clone(
+        "alpha", transport=None, cfg=CFG, sink=NullSink(), peers_fn=lambda: ["beta"]
+    )
+    assert key in local.system_prompt
+    assert key in trilayer.L2_SYSTEM and key in trilayer.L3_SYSTEM
+
+    courier = build_comm_clone("alpha", "beta", transport=None, cfg=CFG, sink=NullSink())
+    assert key in courier.resolved_prompt()  # the courier's prompt is callable (re-read per turn)
+    assert "SendToRecycleBin" in local.system_prompt  # the Recycle Bin caveat rides along
+
+
 def test_local_clone_includes_mcp_tools(monkeypatch):
     """Room mode must surface configured MCP tools on the user-facing clone."""
 

@@ -1,6 +1,7 @@
 """Local Agent assembly: the user-facing Agent with delegate/peers."""
 
 from .. import tools as _tools
+from ..agent import FILE_OPS_RULE
 from ..config import Config
 from ..events import Sink
 from ..pending import PendingAsks
@@ -63,7 +64,7 @@ def build_local_clone(
     tools.update(todos.bound())
     prompt = (system_prompt or LOCAL_SYSTEM_PROMPT.format(
         host=host, store_hint=STORE_LOCAL if local_store else STORE_REMOTE
-    )) + todos.RULES
+    )) + todos.RULES + FILE_OPS_RULE
     clone = Clone(
         addr,
         transport,

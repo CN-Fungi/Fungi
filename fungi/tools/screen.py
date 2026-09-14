@@ -1707,9 +1707,11 @@ def _action_targets(args: dict) -> str | ImageRead:
     # client area (QQ measured 2026-09-13), which counted as actionable and so
     # silently switched the OCR and shape tiers off — the model got seven targets
     # it could neither name nor distinguish and no text at all.
-    if not any(
-        cand.patterns and (cand.name or cand.cls) and inside_client(hwnd, cand) for cand in targets
-    ):
+    # The judgment has a name now (`self_drawn_reason`; user rule 2026-09-14: a self-drawn
+    # UI is judged UP FRONT and also gets the desktop-control route) — and the listing says
+    # which way it went, so the model need not infer it from the absence of names.
+    drawn = self_drawn_reason(hwnd, pairs)
+    if drawn:
         found_a11y = targets
         ocr = _ocr_targets(frame, start=len(found_a11y))
         shapes = _visual_targets(frame, start=len(found_a11y) + len(ocr))
@@ -1723,7 +1725,7 @@ def _action_targets(args: dict) -> str | ImageRead:
         ocr = [cand for cand in ocr if inside_client(hwnd, cand)]
         shapes = [cand for cand in shapes if inside_client(hwnd, cand)]
         targets = _renumber([*found_a11y, *ocr, *shapes])
-        note = _candidate_note(found_a11y, ocr, shapes)
+        note = _candidate_note(found_a11y, ocr, shapes, lead=f"self-drawn: {drawn}")
     if _session.labels_hwnd == hwnd and _session.labels_rect == window_rect(hwnd):
         for bound_name, bound in _session.labels.items():
             for cand in targets:
@@ -1857,10 +1859,50 @@ def _overlaps(a: tuple[int, int, int, int], b: tuple[int, int, int, int], iou: f
     return inter / max(1, area_a + area_b - inter) >= iou or inter >= 0.9 * min(area_a, area_b)
 
 
-def _candidate_note(found_a11y: list[Target], ocr: list[Target], shapes: list[Target]) -> str:
+def self_drawn_reason(hwnd: int, pairs: list[tuple[Target, Any]] | None = None) -> str | None:
+    """Why this window draws itself, or None — decided *before* the picture is read.
+
+    The user's rule (2026-09-14): a self-drawn UI is judged UP FRONT and also gets the
+    desktop-control route. A self-drawn surface is not discovered by watching a11y fail —
+    route changes with it, because for these windows the pixel tiers (OCR text, and the
+    shapes the program cuts out) are not a fallback — they are the tool face.
+
+    Two measured signals, either one is enough:
+
+    * nothing **inside the client area** is both named/classed and has a pattern — the
+      "screenshot with a title bar" shape: a11y offers the window buttons and nothing
+      else (WeChat 4.x is one `MMUIRenderSubWindowHW` element over the whole client area);
+    * the class is a self-drawn family (Chromium/Electron, Qt, MMUIRender — the same list
+      `shell_reason` wakes through the shell) **and** nothing inside the client area is
+      addressable, which is QQ's signature: seven anonymous ScrollItem shells.
+
+    The class alone is deliberately not enough: Edge is Chromium and exposes named
+    controls, and treating it as self-drawn would throw away the better source.
+    """
+    pairs = _scan(hwnd) if pairs is None else pairs
+    addressable = [
+        cand
+        for cand, _elem in pairs
+        if cand.patterns and (cand.name or cand.cls) and inside_client(hwnd, cand)
+    ]
+    if addressable:
+        return None
+    cls = _class_name(hwnd)
+    empty = "nothing inside its client area is addressable"
+    if cls.startswith(SELF_DRAWN_CLASSES):
+        return f"{cls} is a self-drawn family and {empty} — the picture is the tool face here"
+    return f"{empty} — the picture is the tool face here"
+
+
+def _candidate_note(
+    found_a11y: list[Target], ocr: list[Target], shapes: list[Target], lead: str = ""
+) -> str:
     """Say where the candidates came from: a listing that hides its origin invites
-    the model to treat a cut-out shape as if it were a named control."""
+    the model to treat a cut-out shape as if it were a named control. `lead` puts the
+    reason first (a self-drawn surface says so before listing what the pixels gave)."""
     parts = ["a11y has nothing clickable here" if found_a11y else "no a11y at all"]
+    if lead:
+        parts.insert(0, lead)
     if ocr:
         parts.append(f"{len(ocr)} text boxes read off the picture by OCR (found by name)")
     elif importlib.util.find_spec("rapidocr_onnxruntime") is None:
@@ -2840,16 +2882,18 @@ SCHEMA = {
             "it lists the desktop icons, and `double_click` on one starts that application — the "
             "way to open something that is running nowhere at all (no window, no taskbar button, "
             "no tray icon, so no hwnd to restore). Do not go looking for the exe on disk instead: "
-            "the icons are the app's own entry point. While another window covers the icons that "
-            "click is refused and the refusal names the window on top — bring the desktop up first "
-            "(`key` with ['win','d'] shows it, the same keys bring the windows back), or act on the "
-            "window that is actually covering it. "
-            "`restore` opens a window through whatever is at hand (触手可及): the application's "
-            "own entry point on screen — its taskbar button, its tray icon, or its desktop icon "
-            "(double-clicked, so it goes last: a taskbar click activates the running window "
-            "while a desktop icon may launch a new one). Only an application with no such entry "
-            "is woken through the OS, and that path yields a window that looks normal and still "
-            "ignores input — the result says so. "
+            "the icons are the app's own entry point. When the task is about the desktop, show the "
+            "desktop first — `key` with ['win','d'] is the shell's own way to do it (the same keys "
+            "bring the windows back) — and then act on the icon. If another window covers the "
+            "icons, the icon click comes back refused with the name of the window on top: that "
+            "means 'show the desktop first', not 'give up'. "
+            "`restore` opens a window through whatever is at hand (触手可及), which has three "
+            "faces, one method each: a taskbar button is single-clicked, a tray icon is reached "
+            "behind the notification area's overflow arrow and then single-clicked, and a desktop "
+            "icon is double-clicked after `key` ['win','d'] has brought the desktop up. The "
+            "application's own entry point is what gets clicked — an application with no such entry "
+            "is woken through the OS instead, and that path yields a window that looks normal and "
+            "still ignores input, which the result says out loud. "
             "Files and folders are the other half of that rule: creating, deleting, renaming or "
             "moving one goes through the shell — bash (mkdir / ren / move / del) or the file "
             "tools — not through screen gestures (select the row, F2, type, Enter; drag and drop). "
@@ -2859,8 +2903,12 @@ SCHEMA = {
             "user's, delete it the way Explorer does, or ask first. Drive pixels only where there "
             "is no programmatic path at all. "
             "A window that needs administrator rights cannot be driven from here "
-            "(Windows blocks it). A UI drawn in pixels (Chromium/Electron apps such as QQ are "
-            "exactly this: they expose anonymous shells and no readable controls) still has "
+            "(Windows blocks it). A window that draws itself is recognised up front — its class "
+            "plus the fact that nothing inside its client area is addressable — and the listing "
+            "says so: for those the picture IS the tool face (read the text off it and pick the "
+            "cut-out shapes by number), not a second-best fallback. A UI drawn in pixels "
+            "(Chromium/Electron apps such as QQ are exactly this: they expose anonymous shells "
+            "and no readable controls) still has "
             "targets — the tool reads the text off the picture and cuts the icons out of it, "
             "numbered, so pick those by the number you can see on the attached frame rather than "
             "by name; names from OCR are approximate (a rare character can be misread), numbers "

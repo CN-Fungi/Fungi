@@ -28,9 +28,10 @@ def _cand(n, name, cls, rect, patterns=(), source="a11y"):
 class _U32:
     """Stand-in for the user32 handle: records what was asked of the OS."""
 
-    def __init__(self, window=True, client=(1000, 500, 1400, 800)):
+    def __init__(self, window=True, client=(1000, 500, 1400, 800), cls="Notepad"):
         self.window = window
         self.client = client
+        self.cls = cls
         self.shown = []
 
     def IsWindow(self, _hwnd):  # noqa: N802 (mimics user32)
@@ -54,6 +55,11 @@ class _U32:
     def ClientToScreen(self, _hwnd, point_ref):  # noqa: N802 (mimics user32)
         point_ref._obj.x, point_ref._obj.y = self.client[0], self.client[1]
         return 1
+
+    def GetClassNameW(self, _hwnd, buf, size):  # noqa: N802 (mimics user32)
+        name = self.cls
+        buf.value = name[: max(0, size - 1)]
+        return len(buf.value)
 
 
 @pytest.fixture(autouse=True)
@@ -916,6 +922,59 @@ def test_a_self_drawn_window_falls_back_to_ocr_text(monkeypatch):
     out = str(screen._action_targets({"hwnd": 42}))
     assert "OCR" in out and "搜索" in out
     assert screen._session.candidates[2].name == "搜索"
+
+
+def test_a_self_drawn_window_is_judged_before_the_picture_is_read(monkeypatch):
+    """User rule 2026-09-14: 对于特殊的自绘界面，事先判断并也采用桌控 — the pixel tiers are the
+    tool face for these windows, not a fallback discovered by watching a11y fail."""
+    monkeypatch.setattr(screen, "inside_client", lambda hwnd, target: True)
+
+    # QQ's signature: a self-drawn class with anonymous shells (no name, no pattern)
+    monkeypatch.setattr(screen, "_class_name", lambda hwnd: "Chrome_WidgetWin_1")
+    anonymous = [(_cand(1, "", "ScrollItem", (0, 0, 5, 5)), object()) for _ in range(7)]
+    reason = screen.self_drawn_reason(42, anonymous)
+    assert "self-drawn family" in reason and "Chrome_WidgetWin_1" in reason
+
+    # WeChat 4.x: one named surface element, no pattern, over the whole client area
+    monkeypatch.setattr(screen, "_class_name", lambda hwnd: "Qt5152QWindowIcon")
+    surface = [(_cand(1, "MMUIRenderSubWindowHW", "", (0, 0, 5, 5)), object())]
+    assert "nothing inside its client area" in screen.self_drawn_reason(42, surface)
+
+    # A real control inside the client area wins, whatever the class says
+    real = [(_cand(1, "保存", "Button", (0, 0, 5, 5), ("Invoke",)), object())]
+    assert screen.self_drawn_reason(42, real) is None
+
+    # Chromium that DOES expose named controls (Edge) must not be judged self-drawn:
+    # the class alone is never enough.
+    monkeypatch.setattr(screen, "_class_name", lambda hwnd: "Chrome_WidgetWin_1")
+    assert screen.self_drawn_reason(42, real) is None
+
+    # …and a named control that lives outside the client area (the title bar's own
+    # buttons) does not count either.
+    monkeypatch.setattr(screen, "inside_client", lambda hwnd, target: False)
+    assert screen.self_drawn_reason(42, real) is not None
+
+
+def test_the_listing_says_it_is_self_drawn_before_listing_the_pixels(monkeypatch):
+    """The model should not have to infer 'this one draws itself' from the absence of
+    names — the note leads with it."""
+    pairs = [(_cand(1, "MMUIRenderSubWindow", "", (0, 0, 200, 200)), object())]
+    monkeypatch.setattr(screen, "_u32", _U32())
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: pairs)
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "capture_problem", lambda hwnd: None)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((200, 200)))
+    monkeypatch.setattr(screen, "_mark_targets", lambda frame, targets: frame.image)
+    monkeypatch.setattr(screen, "_ocr_targets", lambda frame, start=0: [])
+    monkeypatch.setattr(screen, "_visual_targets", lambda frame, start=0: [_cand(start + 1, "", "", (10, 10, 40, 40))])
+    monkeypatch.setattr(screen, "inside_client", lambda hwnd, target: True)
+    monkeypatch.setattr(screen, "_class_name", lambda hwnd: "Qt5152QWindowIcon")
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "微信")
+
+    out = str(screen._action_targets({"hwnd": 42}))
+    assert "self-drawn:" in out
+    assert out.index("self-drawn:") < out.index("a11y has nothing clickable here")
+    assert "shapes the program cut out of the picture" in out
 
 
 def test_the_whole_surface_of_a_self_drawn_window_is_not_clickable(monkeypatch):

@@ -16,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from fungi import diary, skills, todos, tools
-from fungi.agent import SYSTEM_PROMPT, Agent, BoundTool
+from fungi.agent import FILE_OPS_RULE, SYSTEM_PROMPT, Agent, BoundTool
 from fungi.config import Config
 from fungi.events import FnSink, Sink
 from fungi.llm import LLMResult
@@ -80,7 +80,7 @@ Discipline (mandatory):
   the only thing the orchestrator sees. No preamble, no meta commentary.
 - If the task cannot be completed, say so inside the required reply format
   rather than improvising something else.
-"""
+""" + FILE_OPS_RULE
 
 L3_SYSTEM = """\
 You are a basic Worker (layer 3, the lowest layer of a three-layer system).
@@ -95,7 +95,7 @@ Discipline (mandatory):
 - Your FINAL message must follow the required reply_format exactly — it is
   the only thing the dispatcher sees.
 - If the job cannot be done, report that inside the required reply format.
-"""
+""" + FILE_OPS_RULE
 
 BACKGROUND_SCHEMA = {
     "type": "function",

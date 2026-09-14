@@ -23,6 +23,18 @@ TRANSIENT_LLM_MARKERS = (
 )
 TRANSIENT_HTTP_RE = re.compile(r"^HTTP (429|5\d\d)")
 
+FILE_OPS_RULE = """\
+- File *existence* — creating a directory, deleting, renaming, moving — has no
+  dedicated tool, so it goes through `bash` (`mkdir`, `ren`, `move`, `del`), in
+  ANY place: this host's disk, a peer's store, anywhere. NEVER through a GUI —
+  no clicking a row, no F2, no drag-and-drop, no screen tool. A GUI action needs
+  the pixels resolved into a rectangle first, and a filesystem is not where that
+  may go wrong. `del` skips the Recycle Bin (measured: the bin's item count does
+  not move); for anything that belongs to the user, delete it with the
+  SendToRecycleBin call or ask first. File *content* is the other half and stays
+  with the tools above: read / write / edit.
+"""
+
 SYSTEM_PROMPT = """\
 You are a coding assistant. You have tools to read, write, edit files, run
 shell commands, search code, and access the web. Core rules:
@@ -46,6 +58,7 @@ shell commands, search code, and access the web. Core rules:
   running instead of staying silent.
 - To edit: use `edit`. NEVER `bash echo >` to overwrite files.
 - `bash` is ONLY for: running programs, builds, tests, git, pip, npm, python, etc.
+""" + FILE_OPS_RULE + """\
 - When editing, match the existing code style. Use the edit tool (old_string /
   new_string) for surgical changes, not rewrite the whole file.
 - When you need up-to-date information, use `web_search` to find sources,
