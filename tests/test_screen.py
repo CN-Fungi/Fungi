@@ -268,8 +268,8 @@ def test_a_refused_character_stops_the_run_and_reports_what_landed(monkeypatch):
 
 def test_the_default_pace_is_one_a_person_can_watch(monkeypatch):
     """User 2026-09-14: 一秒 5 到 10 个字就差不多了. A default fast enough that the text
-    lands in a blur looks exactly like a paste — the thing `style='type'` exists to
-    avoid — so this measures the clock rather than echoing the constant."""
+    lands in a blur is indistinguishable from a paste, which is why the paste route is
+    gone — so this measures the clock rather than echoing the constant."""
     _char_events(monkeypatch)
     started = time.monotonic()
     typed, error = screen.type_text("一二三四五")  # no char_delay: the shipped default
@@ -293,52 +293,44 @@ def test_a_stop_press_ends_a_typed_run_within_one_character(monkeypatch):
     assert typed == 0 and error and "aborted" in error
 
 
-def test_typing_mode_never_touches_the_clipboard(monkeypatch):
-    """The user's Typer tool has no clipboard code at all — neither does this path:
-    their clipboard is not ours to overwrite."""
+def test_typing_is_the_only_route_and_never_touches_the_clipboard(monkeypatch):
+    """User ruling, 2026-09-14: 「不要提供全文粘贴这种方式 …… 我们要做输入，就只有一种方式，
+    逐字复制」. So `type` always types, and the clipboard half of this tool is gone —
+    there is nothing left that could spend the user's clipboard."""
     monkeypatch.setattr(screen, "_guarded_input", lambda hwnd: (True, ""))
     monkeypatch.setattr(screen, "wake_window", lambda hwnd, via="auto": [])
     monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
     monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
     monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((200, 100)))
     monkeypatch.setattr(screen, "_read_back_settled", lambda hwnd, target: ("你好", "Edit"))
-    monkeypatch.setattr(screen, "snapshot_clipboard", lambda: pytest.fail("touched the clipboard"))
-    monkeypatch.setattr(screen, "set_clipboard_text", lambda text: pytest.fail("touched the clipboard"))
-    monkeypatch.setattr(screen, "restore_clipboard", lambda snap: pytest.fail("touched the clipboard"))
     monkeypatch.setattr(screen, "send_keys", lambda names: pytest.fail(f"pressed {names}"))
     typed: list[str] = []
     monkeypatch.setattr(
-        screen, "type_text", lambda text, delay=0, should_abort=None: typed.append(text) or (len(text), None)
-    )
-    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
-
-    out = str(screen._action_type({"hwnd": 42, "text": "你好", "style": "type"}, None, None, None, None))
-    assert typed == ["你好"]
-    assert "逐字输入" in out and "typed: 2/2 characters" in out
-    assert "clipboard" not in out.split("verify")[0]  # no clipboard line at all
-
-
-def test_the_paste_path_is_still_the_default(monkeypatch):
-    monkeypatch.setattr(screen, "_guarded_input", lambda hwnd: (True, ""))
-    monkeypatch.setattr(screen, "wake_window", lambda hwnd, via="auto": [])
-    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
-    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
-    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((200, 100)))
-    monkeypatch.setattr(screen, "_read_back_settled", lambda hwnd, target: ("你好", "Edit"))
-    monkeypatch.setattr(screen, "snapshot_clipboard", lambda: screen.ClipSnapshot())
-    pasted: list[str] = []
-    monkeypatch.setattr(screen, "set_clipboard_text", lambda text: pasted.append(text) or True)
-    monkeypatch.setattr(screen, "restore_clipboard", lambda snap: None)
-    monkeypatch.setattr(screen, "send_keys", lambda names: (names, None))
-    monkeypatch.setattr(
         screen,
         "type_text",
-        lambda text, delay=0, should_abort=None: pytest.fail("typed instead of pasting"),
+        lambda text, delay=0, should_abort=None: typed.append(text) or (len(text), None),
     )
     monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
 
+    # No style at all is the normal call now, and it types.
     out = str(screen._action_type({"hwnd": 42, "text": "你好"}, None, None, None, None))
-    assert pasted == ["你好"] and "clipboard restored" in out and "逐字输入" not in out
+    assert typed == ["你好"]
+    assert "逐字输入" in out and "typed: 2/2 characters" in out
+    assert "the clipboard is never touched" in out
+    assert "clipboard restored" not in out  # nothing to restore: it was never used
+
+    # Asking for the clipboard route is refused, and says why.
+    refused = str(
+        screen._action_type({"hwnd": 42, "text": "你好", "style": "paste"}, None, None, None, None)
+    )
+    assert refused.startswith("ERROR: there is no 'paste' route")
+    assert typed == ["你好"]  # nothing was typed on that call either
+
+    # The tool face does not offer it: no clipboard function survives in the module,
+    # and the model has no `style` to ask with.
+    for name in ("set_clipboard_text", "snapshot_clipboard", "restore_clipboard", "clipboard_text"):
+        assert not hasattr(screen, name), f"{name} should have been deleted with the paste route"
+    assert "style" not in screen.SCHEMA["function"]["parameters"]["properties"]
 
 
 # ── the armed window (spec §35.2) ──────────────────────────────────────────
@@ -1385,26 +1377,24 @@ def test_three_fruitless_attempts_ask_the_user_instead_of_retrying(monkeypatch):
     assert screen._session.failures == {}  # the counter resets once the user answered
 
 
-def test_type_pastes_verifies_and_survives_its_own_side_effect(monkeypatch):
-    """`type` pastes (never types), verifies by reading the control back, and must
-    not fall over *after* the paste already happened: a leftover attribute made the
-    tool report an error while the text was already sitting in the chat box
-    (2026-09-13, found while sending a real message through QQ)."""
+def test_type_verifies_by_reading_the_control_back(monkeypatch):
+    """The verification half is unchanged by the route change: the control is read
+    back and the result says what it read, and the tool must not fall over *after*
+    the text already landed (2026-09-13: a leftover attribute made it report an error
+    while the text was already sitting in the chat box)."""
     monkeypatch.setattr(screen, "_guarded_input", lambda hwnd: (True, ""))
     monkeypatch.setattr(screen, "wake_window", lambda hwnd, via="auto": [])
     monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
     monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
     monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((200, 100)))
     monkeypatch.setattr(screen, "_read_back_settled", lambda hwnd, target: ("你好", "Edit"))
-    monkeypatch.setattr(screen, "snapshot_clipboard", lambda: screen.ClipSnapshot())
-    pasted: list[str] = []
-    monkeypatch.setattr(screen, "set_clipboard_text", lambda text: pasted.append(text) or True)
-    monkeypatch.setattr(screen, "restore_clipboard", lambda snap: None)
-    monkeypatch.setattr(screen, "send_keys", lambda names: (names, None))
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(
+        screen, "type_text", lambda text, delay=0, should_abort=None: (len(text), None)
+    )
 
     out = str(screen._action_type({"hwnd": 42, "text": "你好"}, None, None, None, None))
-    assert pasted == ["你好"]  # the paste is the side effect
-    assert "verified: read back '你好'" in out
+    assert "verified: read back '你好'" in out and "typed: 2/2 characters" in out
 
 
 def test_a_run_that_visibly_worked_is_not_counted_as_a_failed_attempt(monkeypatch):
@@ -1417,11 +1407,13 @@ def test_a_run_that_visibly_worked_is_not_counted_as_a_failed_attempt(monkeypatc
     monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
     monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
     monkeypatch.setattr(screen, "_read_back_settled", lambda hwnd, target: ("", "the focus"))
-    monkeypatch.setattr(screen, "snapshot_clipboard", lambda: screen.ClipSnapshot())
-    monkeypatch.setattr(screen, "set_clipboard_text", lambda text: True)
-    monkeypatch.setattr(screen, "restore_clipboard", lambda snap: None)
     monkeypatch.setattr(screen, "send_keys", lambda names: (names, None))
     monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    # The injection itself is never real in a unit test: a gate run must not type
+    # into whatever window happens to be focused on the machine running it.
+    monkeypatch.setattr(
+        screen, "type_text", lambda text, delay=0, should_abort=None: (len(text), None)
+    )
     monkeypatch.setattr(screen, "blocking_ask", lambda *a, **k: pytest.fail("asked the user"))
     blank, inked = _frame((200, 100)), _frame((200, 100))
     ImageDraw.Draw(inked.image).rectangle((10, 10, 120, 60), fill=(0, 0, 0))  # the text landed

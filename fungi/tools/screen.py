@@ -104,13 +104,6 @@ _gdi.GetDIBits.argtypes = [
 _k32.OpenProcess.argtypes = [ctypes.c_uint, wt.BOOL, ctypes.c_uint]
 _k32.OpenProcess.restype = ctypes.c_void_p
 _k32.CloseHandle.argtypes = [ctypes.c_void_p]
-_k32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
-_k32.GlobalAlloc.restype = ctypes.c_void_p
-_k32.GlobalLock.argtypes = [ctypes.c_void_p]
-_k32.GlobalLock.restype = ctypes.c_void_p
-_k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
-_k32.GlobalSize.argtypes = [ctypes.c_void_p]
-_k32.GlobalSize.restype = ctypes.c_size_t
 
 # Every one of these returns a window handle: left to ctypes' default (c_int) a
 # handle above 0x7FFFFFFF comes back negative, and comparing it with a window id
@@ -896,7 +889,7 @@ def _read_back(hwnd: int, target: Target | None) -> tuple[str, str]:
 
 def _read_back_settled(hwnd: int, target: Target | None) -> tuple[str, str]:
     """`_read_back` with one retry: a single empty read also happens when the app
-    is mid-repaint, and the read is what decides whether a paste is verified."""
+    is mid-repaint, and the read is what decides whether the text is verified."""
     value, where = _read_back(hwnd, target)
     if value:
         return value, where
@@ -1317,111 +1310,6 @@ def release_all_keys() -> list[str]:
             _key_event(vk, down=False)
     _held.clear()
     return sorted(f"0x{vk:02X}" for vk in stuck)
-
-
-# ── clipboard: how text gets in (and back out) ─────────────────────────────
-CF_UNICODETEXT, CF_DIB, CF_DIBV5 = 13, 8, 17
-_RESTORABLE_FORMATS = (CF_UNICODETEXT, CF_DIB, CF_DIBV5)
-GMEM_MOVEABLE_ZEROINIT = 0x0042
-
-
-def _clipboard_open() -> bool:
-    for _ in range(8):
-        if _u32.OpenClipboard(None):
-            return True
-        time.sleep(0.05)  # another process holds it for a few ms
-    return False
-
-
-def _clipboard_bytes(fmt: int) -> bytes | None:
-    handle = _u32.GetClipboardData(fmt)
-    if not handle:
-        return None
-    size = int(_k32.GlobalSize(ctypes.c_void_p(handle)))
-    pointer = _k32.GlobalLock(ctypes.c_void_p(handle))
-    if not pointer or not size:
-        return None
-    try:
-        return ctypes.string_at(pointer, size)
-    finally:
-        _k32.GlobalUnlock(ctypes.c_void_p(handle))
-
-
-def clipboard_text() -> str:
-    if not _clipboard_open():
-        return ""
-    try:
-        raw = _clipboard_bytes(CF_UNICODETEXT)
-    finally:
-        _u32.CloseClipboard()
-    if not raw:
-        return ""
-    return raw.decode("utf-16-le", errors="replace").split("\x00")[0]
-
-
-@dataclass
-class ClipSnapshot:
-    """What the clipboard held before a paste. Text and bitmaps are restored;
-    anything else (a copied file list, say) is reported instead of guessed."""
-
-    formats: dict[int, bytes] = field(default_factory=dict)
-    other: bool = False
-
-
-def snapshot_clipboard() -> ClipSnapshot:
-    snap = ClipSnapshot()
-    if not _clipboard_open():
-        return ClipSnapshot(other=True)
-    try:
-        available = set()
-        fmt = _u32.EnumClipboardFormats(0)
-        while fmt:
-            available.add(fmt)
-            fmt = _u32.EnumClipboardFormats(fmt)
-        for wanted in _RESTORABLE_FORMATS:
-            if wanted in available:
-                data = _clipboard_bytes(wanted)
-                if data:
-                    snap.formats[wanted] = data
-        snap.other = bool(available - set(_RESTORABLE_FORMATS) - {1, 2, 3, 16, 7})
-    finally:
-        _u32.CloseClipboard()
-    return snap
-
-
-def _set_clipboard_bytes(fmt: int, data: bytes) -> bool:
-    handle = _k32.GlobalAlloc(GMEM_MOVEABLE_ZEROINIT, len(data))
-    if not handle:
-        return False
-    pointer = _k32.GlobalLock(ctypes.c_void_p(handle))
-    if not pointer:
-        return False
-    ctypes.memmove(pointer, data, len(data))
-    _k32.GlobalUnlock(ctypes.c_void_p(handle))
-    return bool(_u32.SetClipboardData(fmt, ctypes.c_void_p(handle)))
-
-
-def set_clipboard_text(text: str) -> bool:
-    if not _clipboard_open():
-        return False
-    try:
-        _u32.EmptyClipboard()
-        return _set_clipboard_bytes(CF_UNICODETEXT, (text + "\x00").encode("utf-16-le"))
-    finally:
-        _u32.CloseClipboard()
-
-
-def restore_clipboard(snap: ClipSnapshot) -> None:
-    if not snap.formats:
-        return
-    if not _clipboard_open():
-        return
-    try:
-        _u32.EmptyClipboard()
-        for fmt, data in snap.formats.items():
-            _set_clipboard_bytes(fmt, data)
-    finally:
-        _u32.CloseClipboard()
 
 
 # ── the session: arming, candidates, two frames, strike counts ─────────────
@@ -2122,7 +2010,7 @@ def _action_type(args: dict, sink, should_abort, on_answer, call_id) -> str | Im
     hwnd = int(args["hwnd"])
     text = str(args.get("text") or "")
     if not text:
-        return "ERROR: type needs text=<the string to paste>"
+        return "ERROR: type needs text=<the string to enter>"
     wants = args.get("target") is not None or bool(args.get("name"))
     awake = window_state(hwnd) == "normal"
     target: Target | None = None
@@ -2144,36 +2032,27 @@ def _action_type(args: dict, sink, should_abort, on_answer, call_id) -> str | Im
         _focus_target(hwnd, target)
     _before_value, where = _read_back_settled(hwnd, target)
     before_frame = grab_window(hwnd)
-    style = str(args.get("style") or "paste").strip().lower()
-    if style not in ("paste", "type"):
-        return f"ERROR: style must be 'paste' or 'type', got {style!r}"
-    snapshot = None
-    typed = 0
-    typing_error = None
-    if style == "type":
-        # 逐字输入 (spec §37): no clipboard at all — each character is injected on its
-        # own, paced, the way the user's Typer tool does it.
-        try:
-            delay = float(args.get("char_delay") or TYPE_CHAR_DELAY_S)
-        except (TypeError, ValueError):
-            return f"ERROR: char_delay must be a number, got {args.get('char_delay')!r}"
-        typed, typing_error = type_text(text, delay=max(0.0, delay), should_abort=should_abort)
-    else:
-        snapshot = snapshot_clipboard()
-        pasted = set_clipboard_text(text)
-        if not pasted:
-            return "ERROR: could not open the clipboard (another process is holding it)"
-        _names, error = send_keys(["ctrl", "v"])
-        if error:
-            return f"ERROR: {error}"
-        typed = len(text)
+    style = str(args.get("style") or "type").strip().lower()
+    if style != "type":
+        # There is no paste route any more (user, 2026-09-14): text goes in one
+        # character at a time, and a whole text dropped in through the clipboard is
+        # not an option this tool offers. The clipboard is not ours to spend.
+        return (
+            f"ERROR: there is no {style!r} route — input is typed one character at a "
+            "time; drop style= or use style='type'"
+        )
+    # 逐字输入 (spec §37): no clipboard at all — each character is injected on its
+    # own, paced, the way the user's Typer tool does it.
+    try:
+        delay = float(args.get("char_delay") or TYPE_CHAR_DELAY_S)
+    except (TypeError, ValueError):
+        return f"ERROR: char_delay must be a number, got {args.get('char_delay')!r}"
+    typed, typing_error = type_text(text, delay=max(0.0, delay), should_abort=should_abort)
     time.sleep(SETTLE_S)
     after_value, _where = _read_back_settled(hwnd, target)
     after_frame = grab_window(hwnd)
     if after_frame is not None:
         _session.remember(after_frame)
-    if snapshot is not None:
-        restore_clipboard(snapshot)
     changed = _diff_ratio(before_frame, after_frame) if before_frame and after_frame else 0.0
     key = f"type:{hwnd}:{target.label if target else where}"
     verified = text in after_value or after_value.strip() == text.strip()
@@ -2196,29 +2075,15 @@ def _action_type(args: dict, sink, should_abort, on_answer, call_id) -> str | Im
         verdict = f"unverified: the picture changed ({changed:.2%}) but this control exposes no readable value"
     else:
         verdict = "unverified: nothing changed on screen"
-    clip = (
-        ""
-        if snapshot is None or not snapshot.other
-        else " · the clipboard also held a non-text format, which is not restored"
-    )
     lines = [
         f"TYPE {len(text)} chars into hwnd=0x{hwnd:X}"
         + (f" target {target.label}" if target else " (current focus)")
         + note,
+        f"  typed: {typed}/{len(text)} characters"
+        + (f" · {typing_error}" if typing_error else ""),
         f"  verify: {verdict}",
-        (
-            "  clipboard restored: "
-            f"{'yes' if snapshot and snapshot.formats else 'nothing to restore'}{clip}"
-            if snapshot is not None
-            else "  method: 逐字输入 (one character at a time; the clipboard was never touched)"
-        ),
+        "  method: 逐字输入 (one character at a time; the clipboard is never touched)",
     ]
-    if style == "type":
-        lines.insert(
-            1,
-            f"  typed: {typed}/{len(text)} characters"
-            + (f" · {typing_error}" if typing_error else ""),
-        )
     lines.append("  control: on (pc_control switch; no prompt for this action)")
     summary = "\n".join(lines)
     return _attach(summary, after_frame) if after_frame is not None else summary
@@ -2886,7 +2751,7 @@ SCHEMA = {
             "on a picture). Input actions: `click`, `double_click` (the open "
             "gesture for anything that is at hand on screen — a desktop icon, a "
             "document icon, a file already listed in a window that is showing), `type` "
-            "(pastes text), `key`, "
+            "(enters text one character at a time), `key`, "
             "`scroll`, plus `restore` (bring a minimized or tray-resident window back on "
             "screen, then picture it) and `label` (give a shape you recognised a name, so the "
             "next listing shows it instead of '(no text)') — every one of them takes hwnd= and names its target as "
@@ -2943,7 +2808,7 @@ SCHEMA = {
             "numbered, so pick those by the number you can see on the attached frame rather than "
             "by name; names from OCR are approximate (a rare character can be misread), numbers "
             "are not. To type into such a window, click the box you mean first and then call type "
-            "with no target: it pastes into whatever has the focus."
+            "with no target: it types into whatever has the focus."
         ),
         "parameters": {
             "type": "object",
@@ -2984,30 +2849,19 @@ SCHEMA = {
                 },
                 "text": {
                     "type": "string",
-                    "description": "type only: the text to paste at the focused control",
-                },
-                "style": {
-                    "type": "string",
-                    "enum": ["paste", "type"],
                     "description": (
-                        "type only. 'paste' (default) sets the clipboard and presses ctrl+V: one "
-                        "atomic insert, and the only way measured to work in self-drawn apps "
-                        "whose input box the a11y tree cannot address (WeChat, QQ). 'type' "
-                        "injects the text one character at a time through Unicode input — no "
-                        "clipboard involved, and the field fills visibly, character by "
-                        "character, the way a person types. Use 'type' when a human-like "
-                        "typing effect is wanted, or when a paste comes back "
-                        "unverified/nothing changed."
+                        "type only: the text to enter at the focused control. It goes in one "
+                        "character at a time, at a human pace — there is no paste route: a "
+                        "whole text dropped in through the clipboard is not something this "
+                        "tool offers (user, 2026-09-14), and the clipboard is never touched."
                     ),
                 },
                 "char_delay": {
                     "type": "number",
                     "description": (
-                        "type only, style='type': seconds between characters (default 0.15 — "
-                        "about seven a second, a pace a person can watch; the user's own "
-                        "benchmark is 5 to 10 a second). Lower it only when speed was asked "
-                        "for: below ~0.05 the text lands in a blur, which is what the paste "
-                        "style is for."
+                        "type only: seconds between characters (default 0.15 — about seven "
+                        "a second, a pace a person can watch; the user's benchmark is 5 to "
+                        "10 a second). Lower it only when speed was asked for."
                     ),
                 },
                 "keys": {
