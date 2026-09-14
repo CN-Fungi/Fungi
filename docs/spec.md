@@ -1361,13 +1361,27 @@ Typer 的做法：`pynput.keyboard.Controller().type(char)` **一个字符一次
 
 于是 `type` 增加 `style`：**默认仍是 `paste`**，另有 `style="type"` 走逐字：
 
+- **默认不动的裁决（用户 2026-09-14 第三次点名）**：「就是 paste 就好，type 本来也没在计划之中」。
+  逐字不是任何任务的默认路径，也不会被提成默认——它只服务一种需求：「人打字的效果」（本节开头 Typer 的由来）。
+  所以本节后面那些节奏 / 停止键 / strike 的改动**只作用于显式 `style="type"`**：粘贴那条路一个字节都没变
+  （唯一例外是 strike 修复，它修的是两种落字共用的判定，见下）。
+
 - **实现**：每个字符一对 `KEYEVENTF_UNICODE` 的 down/up（`wVk=0`、`wScan=UTF-16 码元`）。这样**绕开键盘布局与输入法**——
   中文是"这个字"本身，不是要 IME 翻译的键码。`\n`/`\r` 发 Enter、`\t` 发 Tab（Typer 也是这么映射的：U+000A 不是
   应用读到的"换行"）。星平面字符（emoji）按**代理对**发两个码元（Windows 一次只吃一个）。
-- **节奏**：字符之间 `char_delay`（默认 `TYPE_CHAR_DELAY_S`=0.03s，最后一个字之后不停顿）。`_held` 完全不参与：
-  一个字符不是"会被按住的键"，所以 `disarm()` 那套语义不受影响。
+- **节奏**：字符之间 `char_delay`（默认 `TYPE_CHAR_DELAY_S`，**2026-09-14 用户第二次点名后 = 0.15s**，最后一个字之后不停顿）。
+  原先 0.03s（33 字/秒）是**看不见**的——那一段落得像粘贴，正是这条路要避免的东西；用户口径「一般地，一秒 5 到 10 个字就差不多了」，
+  0.15s ≈ 6.7 字/秒落在这条带子中间，`char_delay` 仍是按次可调的旋钮（工具描述里写明：低于 ~0.05 就是一片模糊，那是 `paste` 的活）。
+  `_held` 完全不参与：一个字符不是"会被按住的键"，所以 `disarm()` 那套语义不受影响。
+- **慢下来就得能停（同一次改动的配套）**：`type_text(..., should_abort=)` 在**每个字符之前**问一次，停止键在**打字过程中**就生效
+  （延迟 ≤ 一个字符），结果是 `stopped after N of M character(s): the turn was aborted` + 已落字数——按 0.15s 算，一段 640 字的
+  前赤壁赋要 96 秒，不打断的话这一回合就锁死了。
 - **不碰剪贴板**：这一路连 `snapshot_clipboard` 都不调用——用户的剪贴板不该被我们改动。结果里改报
   `method: 逐字输入 (one character at a time; the clipboard was never touched)` 与 `typed: N/M characters`。
+- **判定（strike）不再把"画面变了"算成失败（2026-09-14 实测修正）**：自绘控件回读不到值（§40），那里唯一的证据就是帧差；
+  修前连打三次**好**字也升级成问人（实测 `ESCALATED: 3 failed attempts at type into 0x1b90ea6`，而每个字都落了）。
+  现在 `changed > DIFF_THRESHOLD` 同样清 strike，升级那行还带上「已落 N/M 字」（本条与 §37 那条"副作用已经发生要说实话"同源）。
+  **这条对 `paste` 同样生效**——微信用自绘输入框，粘贴也回读不到值，撞的是同一个判定。
 - **半路失败要说实话**：`type_text()` 返回 `(已输入字数, 错误)`；某个字被 SendInput 拒绝就停在那里，把"已经落了几个字"
   写进结果（沿用 §35.13 那条"副作用已经发生就别装作没发生"的口径）。
 
@@ -1496,6 +1510,11 @@ fungi 中的哪部分能力和这些项目有重合，再写文档」。逐一�
 即「打开文件走桌控」这条在真机上成立（此前 §35.13 只验过**应用**图标）。顺带两个老事实再次命中：`win+d` 是**开关**
 （工具自报 `frame changed 0.00% → unverified` 就是"这一下没换状态"，隔一次再按才生效），而被它最小化的窗口要靠
 **点任务栏按钮**回来（`click '文件资源管理器 - 1 个运行窗口'` → `frame changed 0.47% → verified`，`ShowWindow` 不管用）。
+**出口是有代价的，这一点也量了（2026-09-14）**：任务栏那一格里**组里有 2 个窗口时**，点按钮打开的是**缩略图飞窗**而不是恢复——
+它的 a11y 是空的（自绘，OCR 只读出行标题），真正吃点是**缩略图图片**那一行（标题文字点了 `frame changed 0.00% → unverified`），
+Escape 也不关它（`send_keys(["escape"])` 无效；`XamlExplorerHostIslandWindow` 一直占着前台）；
+`restore(hwnd=…)` 这条路能救回来（实测 `RESTORE hwnd=0x8F0D18 '…' → normal (was minimized, named controls: 27)`，
+它自己的报告里两次"clicked its 任务栏按钮 … but it stayed hidden"）。所以**关于桌面的任务用 `win+d` 之前先想好怎么还**。
 
 **落地的文字**：`fungi/agent.py::FILE_OPS_RULE`（次序 + "Opening a file is not a file operation"），追加到五个提示词
 （§39 已记装配点）；screen 工具描述的 `double_click` 与"at hand 优先"两处；回归用例

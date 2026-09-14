@@ -60,7 +60,10 @@ DOUBLE_CLICK_GAP_S = 0.06  # well inside the system's double-click time (default
 MOVE_STEPS = 14  # intermediate points on the way to a click target — a glide, not a teleport
 MOVE_DURATION_S = 0.22  # total travel time: a person's flick, and small against SETTLE_S
 MOVE_TOLERANCE_PX = 2  # measured round-trip error of the 0..65535 space: 0px, -1px at a corner
-TYPE_CHAR_DELAY_S = 0.03  # 逐字输入: the gap between characters (Typer's own knob, §37)
+TYPE_CHAR_DELAY_S = 0.15  # 逐字输入: the gap between characters — a *watchable* pace
+# (user 2026-09-14: five to ten characters a second, and 0.15 lands mid-band). 0.03 (33 a
+# second) is a blur: the text appears as if it had been pasted, which is the thing this
+# style exists to avoid. The knob stays — `char_delay` overrides it per call (spec §37).
 LAUNCH_WAIT_S = 3.0  # a gesture that starts a process: its window is not up immediately
 SHOT_MAX_DIM = 1568  # same vision sweet spot as files.IMAGE_MAX_DIM
 
@@ -1218,7 +1221,12 @@ def _char_event(unit: int, *, down: bool) -> int:
     return _send(_INPUT(INPUT_KEYBOARD, _INPUTUNION(ki=_KEYBDINPUT(0, unit, flags, 0, None))))
 
 
-def type_text(text: str, *, delay: float = TYPE_CHAR_DELAY_S) -> tuple[int, str | None]:
+def type_text(
+    text: str,
+    *,
+    delay: float = TYPE_CHAR_DELAY_S,
+    should_abort: Callable[[], bool] | None = None,
+) -> tuple[int, str | None]:
     """Type `text` one character at a time — the effect a human typing has.
 
     The user's own Typer tool is the reference (2026-09-14): pynput's
@@ -1230,12 +1238,20 @@ def type_text(text: str, *, delay: float = TYPE_CHAR_DELAY_S) -> tuple[int, str 
     `\\n`/`\\r` go out as Enter and `\\t` as Tab, exactly as Typer maps them: a raw
     U+000A character is not what an application reads as "next line".
 
+    `should_abort` is asked before every character. At a human pace a paragraph is a
+    minute of typing, so a stop press has to end the run *during* it — one character
+    of latency, not the whole text.
+
     Returns `(characters typed, error)`. A run that dies half way stops there and
     reports how far it got — the text that already landed is a fact the caller has to
     be told, not something to hide behind an exception.
     """
     typed = 0
     for index, char in enumerate(text):
+        if should_abort is not None and should_abort():
+            return typed, (
+                f"stopped after {typed} of {len(text)} character(s): the turn was aborted"
+            )
         if char in "\r\n":
             events = [_key_event(0x0D, down=True), _key_event(0x0D, down=False)]
         elif char == "\t":
@@ -2141,7 +2157,7 @@ def _action_type(args: dict, sink, should_abort, on_answer, call_id) -> str | Im
             delay = float(args.get("char_delay") or TYPE_CHAR_DELAY_S)
         except (TypeError, ValueError):
             return f"ERROR: char_delay must be a number, got {args.get('char_delay')!r}"
-        typed, typing_error = type_text(text, delay=max(0.0, delay))
+        typed, typing_error = type_text(text, delay=max(0.0, delay), should_abort=should_abort)
     else:
         snapshot = snapshot_clipboard()
         pasted = set_clipboard_text(text)
@@ -2161,10 +2177,16 @@ def _action_type(args: dict, sink, should_abort, on_answer, call_id) -> str | Im
     changed = _diff_ratio(before_frame, after_frame) if before_frame and after_frame else 0.0
     key = f"type:{hwnd}:{target.label if target else where}"
     verified = text in after_value or after_value.strip() == text.strip()
-    if verified:
+    if verified or changed > DIFF_THRESHOLD:
+        # A control that exposes no readable value is the self-drawn case (spec §40),
+        # and there the picture moving IS the effect. Counting those runs as failures
+        # asked the user after three typing calls that had all worked — measured
+        # 2026-09-14 while typing into Notepad++, whose Scintilla editor has no value.
         _clear_strikes(key)
     elif _strike(key) >= FAILURE_LIMIT:
-        detail = f"回读到 {after_value!r}；画面变化={changed:.3%}"
+        detail = (
+            f"已落 {typed}/{len(text)} 字；回读到 {after_value!r}；画面变化={changed:.3%}"
+        )
         return _escalate(
             sink, key, f"type into {where or hex(hwnd)}", detail, should_abort, on_answer, call_id
         )
@@ -2981,8 +3003,11 @@ SCHEMA = {
                 "char_delay": {
                     "type": "number",
                     "description": (
-                        "type only, style='type': seconds between characters (default 0.03). "
-                        "Longer reads as slower, more deliberate typing."
+                        "type only, style='type': seconds between characters (default 0.15 — "
+                        "about seven a second, a pace a person can watch; the user's own "
+                        "benchmark is 5 to 10 a second). Lower it only when speed was asked "
+                        "for: below ~0.05 the text lands in a blur, which is what the paste "
+                        "style is for."
                     ),
                 },
                 "keys": {

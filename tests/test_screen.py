@@ -266,6 +266,33 @@ def test_a_refused_character_stops_the_run_and_reports_what_landed(monkeypatch):
     assert screen._held == set()
 
 
+def test_the_default_pace_is_one_a_person_can_watch(monkeypatch):
+    """User 2026-09-14: 一秒 5 到 10 个字就差不多了. A default fast enough that the text
+    lands in a blur looks exactly like a paste — the thing `style='type'` exists to
+    avoid — so this measures the clock rather than echoing the constant."""
+    _char_events(monkeypatch)
+    started = time.monotonic()
+    typed, error = screen.type_text("一二三四五")  # no char_delay: the shipped default
+    elapsed = time.monotonic() - started
+    assert (typed, error) == (5, None)
+    assert elapsed >= 4 * 0.1, f"five characters landed in {elapsed:.2f}s — a blur, not typing"
+    assert elapsed <= 4 * 0.2 + 0.5, f"five characters took {elapsed:.2f}s — past the pace asked for"
+
+
+def test_a_stop_press_ends_a_typed_run_within_one_character(monkeypatch):
+    """A paragraph at a human pace is a minute of typing, so the run answers a stop
+    press *while* it runs — the 0.2s rule the shell tool already keeps."""
+    _char_events(monkeypatch)
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    abort = {"on": False}
+    typed, error = screen.type_text("一二三四五", delay=0.15, should_abort=lambda: abort["on"])
+    assert (typed, error) == (5, None)  # nobody pressed anything: all five land
+
+    abort["on"] = True
+    typed, error = screen.type_text("一二三四五", delay=0.15, should_abort=lambda: abort["on"])
+    assert typed == 0 and error and "aborted" in error
+
+
 def test_typing_mode_never_touches_the_clipboard(monkeypatch):
     """The user's Typer tool has no clipboard code at all — neither does this path:
     their clipboard is not ours to overwrite."""
@@ -280,7 +307,9 @@ def test_typing_mode_never_touches_the_clipboard(monkeypatch):
     monkeypatch.setattr(screen, "restore_clipboard", lambda snap: pytest.fail("touched the clipboard"))
     monkeypatch.setattr(screen, "send_keys", lambda names: pytest.fail(f"pressed {names}"))
     typed: list[str] = []
-    monkeypatch.setattr(screen, "type_text", lambda text, delay=0: typed.append(text) or (len(text), None))
+    monkeypatch.setattr(
+        screen, "type_text", lambda text, delay=0, should_abort=None: typed.append(text) or (len(text), None)
+    )
     monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
 
     out = str(screen._action_type({"hwnd": 42, "text": "你好", "style": "type"}, None, None, None, None))
@@ -301,7 +330,11 @@ def test_the_paste_path_is_still_the_default(monkeypatch):
     monkeypatch.setattr(screen, "set_clipboard_text", lambda text: pasted.append(text) or True)
     monkeypatch.setattr(screen, "restore_clipboard", lambda snap: None)
     monkeypatch.setattr(screen, "send_keys", lambda names: (names, None))
-    monkeypatch.setattr(screen, "type_text", lambda text, delay=0: pytest.fail("typed instead of pasting"))
+    monkeypatch.setattr(
+        screen,
+        "type_text",
+        lambda text, delay=0, should_abort=None: pytest.fail("typed instead of pasting"),
+    )
     monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
 
     out = str(screen._action_type({"hwnd": 42, "text": "你好"}, None, None, None, None))
@@ -1372,6 +1405,40 @@ def test_type_pastes_verifies_and_survives_its_own_side_effect(monkeypatch):
     out = str(screen._action_type({"hwnd": 42, "text": "你好"}, None, None, None, None))
     assert pasted == ["你好"]  # the paste is the side effect
     assert "verified: read back '你好'" in out
+
+
+def test_a_run_that_visibly_worked_is_not_counted_as_a_failed_attempt(monkeypatch):
+    """A self-drawn control exposes no value to read back (spec §40), so the picture
+    moving is the evidence there. Three such runs in a row used to escalate and ask
+    the user — measured 2026-09-14 while typing into Notepad++, where every character
+    had landed and the tool still reported 'failed attempts'."""
+    monkeypatch.setattr(screen, "_guarded_input", lambda hwnd: (True, ""))
+    monkeypatch.setattr(screen, "wake_window", lambda hwnd, via="auto": [])
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "_read_back_settled", lambda hwnd, target: ("", "the focus"))
+    monkeypatch.setattr(screen, "snapshot_clipboard", lambda: screen.ClipSnapshot())
+    monkeypatch.setattr(screen, "set_clipboard_text", lambda text: True)
+    monkeypatch.setattr(screen, "restore_clipboard", lambda snap: None)
+    monkeypatch.setattr(screen, "send_keys", lambda names: (names, None))
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(screen, "blocking_ask", lambda *a, **k: pytest.fail("asked the user"))
+    blank, inked = _frame((200, 100)), _frame((200, 100))
+    ImageDraw.Draw(inked.image).rectangle((10, 10, 120, 60), fill=(0, 0, 0))  # the text landed
+    frames = [blank, inked] * 4
+
+    def fake_grab(hwnd):
+        return frames.pop(0)
+
+    monkeypatch.setattr(screen, "grab_window", fake_grab)
+
+    outs = [
+        str(screen._action_type({"hwnd": 42, "text": "你好"}, None, None, None, None))
+        for _ in range(3)
+    ]
+    assert all("ESCALATED" not in out for out in outs)
+    assert all("the picture changed" in out for out in outs)
+    assert screen._session.failures == {}  # nothing was ever held against the target
 
 
 def test_double_click_reports_the_window_it_opened(monkeypatch):
