@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from fungi.config import Config, load_config
+from fungi.tools.files import ImageRead, image_data_url
 
 SEND_TIMEOUT_S = 20.0
 WAIT_TIMEOUT_S = 25.0  # the CLI's own read deadline; it re-arms itself after
@@ -50,7 +51,11 @@ SCHEMA = {
             "are), 'look' (what surrounds you), 'inv' (what you carry), then 'goto' or 'move' "
             "(x, y), 'say' (message) to speak to the player, 'pickup' (item_id or x,y) to take "
             "something within reach, 'turn'/'track' to face someone, 'dump_map' when something "
-            "looks wrong. The player's speech arrives by itself as a [GhostWorld] note: reply to "
+            "looks wrong. 'snapshot' renders what your character is looking at right now — "
+            "buildings, sky, ground, the player if they are in sight — into a picture that comes "
+            "back with the answer and that you actually see: use it when coordinates and lists "
+            "are not enough, and to check what your own last action did. "
+            "The player's speech arrives by itself as a [GhostWorld] note: reply to "
             "the player with 'say', and tell the user about it in your own words afterwards. "
             "If the game is not running this returns an ERROR — say so instead of retrying."
         ),
@@ -138,6 +143,40 @@ def send_command(cmd: dict, directory: str) -> str:
 def _tail(text: str) -> str:
     text = " ".join(text.split())
     return f": {text[:300]}" if text else ""
+
+
+def attach_snapshot(ack: str) -> str:
+    """Hand the model the picture the game just rendered, not only its path.
+
+    `snapshot` answers with where the PNG landed (`snapshot_done.local`); a tool
+    result that is only a filename leaves the agent guessing what the world looks
+    like, which defeats asking for a look. An ImageRead carries the pixels, so the
+    agent loop upgrades the tool message and a vision model sees the scene.
+
+    Falls back to the raw answer when the file is missing or cannot be encoded —
+    the path is still in there, so the agent can say what went wrong.
+    """
+    try:
+        info = json.loads(ack)
+    except ValueError:
+        return ack
+    path = Path(str(info.get("local") or "")) if isinstance(info, dict) else Path()
+    if not path.is_file():
+        return ack
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return f"{ack}\n(picture could not be read back: {exc})"
+    # The path is meant to be read and clicked, so it comes back as a path —
+    # not as the JSON-escaped backslashes the ack carries.
+    summary = f"snapshot saved: {path}"
+    caption = str(info.get("caption") or "").strip()
+    if caption:
+        summary += f" (caption: {caption})"
+    url, mime, dims = image_data_url(path.suffix.lower(), raw)
+    if url is None:
+        return f"{summary}\n(picture captured but could not be encoded)"
+    return ImageRead(f"{summary}\n[view attached: {dims}, {mime}]", [url])
 
 
 # ── the watcher: player speech arrives, nobody polls ──────────────────────────
@@ -319,7 +358,11 @@ def bound(cfg: Config) -> dict:
         if not action:
             return "ERROR: action is required"
         cmd = {k: v for k, v in args.items() if k != "action" and v not in (None, "")}
-        return send_command({"cmd": action, **cmd}, directory)
+        answer = send_command({"cmd": action, **cmd}, directory)
+        if action == "snapshot":
+            # A look is worth what it shows: the render rides back as an image.
+            return attach_snapshot(answer)
+        return answer
 
     return {"ghostworld": BoundTool(schema=SCHEMA, fn=ghostworld)}
 

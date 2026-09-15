@@ -1583,6 +1583,16 @@ Fungi 只是把它们接上；「实验性」留给还在长、随时会改的�
 游戏重启后 token 变了就归零，缓冲区里没读过的事件一次交出。只有 `kind=wake`（玩家发言）叫醒 Agent，
 observation（`see`/`goto_done`/`position`…）不叫醒，要用时用工具读。`room.stop()` 与 `atexit` 都 disarm。
 
+**听见就应（2026-09-15 用户要求）**：玩家的话不是进"信箱"等当前回合跑完——那等于让角色在长回合（走路、
+连着几个工具轮）里装聋。监视器收到发言先 `Clone.interrupt_turn(2.0)`，**和 WebUI 的 `/stop` 是同一套 abort**
+（`_turn_abort` 事件 → `TriLayer.should_abort`；被切断的回合已产出的内容留在 `history` 里，新回合仍知道刚才在干什么），
+然后把这条发言排成**自己的回合**；两秒宽限让一串连珠炮不至于把答案反复推倒重来。
+
+**`snapshot` 是眼睛（2026-09-15 用户要求）**：这条命令本来就把第一人称画面渲成 PNG（游戏侧 `metaverse/snapshot.py`，
+从角色自己的位置与朝向前视）并把路径回在 ack 里（`snapshot_done.local`）；这边把那张图读回来包成 `ImageRead`
+（`attach_snapshot`），Agent 循环会把它升级成多模态消息——**视觉模型真的看见**建筑/天空/地面/玩家，而不是只拿到一串坐标。
+文件读不回来就退回原样 ack（路径还在里面）。工具描述里也写明了这个用途：想"看一眼"就用它。
+
 **真机（2026-09-15 本机实测，无 LLM）**：headless 游戏 + GhostWorld 仓库自带的 `headless_player.py`（联调夹具：起服务、连一个会说活的玩家——
 无头游戏里没人说话，它就把这件事做掉），直接调用本模块：
 
@@ -1590,6 +1600,7 @@ observation（`see`/`goto_done`/`position`…）不叫醒，要用时用工具�
 - `arm()` 之后 **0.4s** 拿到玩家的真实发言（两轮实测：`--say` 那句原样到达）（`seq=1, kind=wake, from=player`，且该事件**发表于它连上之前**——没丢）；
 - `disarm()` → 监视器与子进程都消失。
 
-**验收**：`tests/test_ghostworld.py`（19 例，全用假 CLI／假子进程，不碰真游戏、不起真进程）+
+**验收**：`tests/test_ghostworld.py`（24 例，全用假 CLI／假子进程，不碰真游戏、不起真进程）+
 `tests/test_gui.py::test_the_ghostworld_switch_sits_under_experimental_and_disarms_when_off`。
-**未做**：真机 LLM 回合（要 API key，留给用户）——回合契约由既有的 FakeLLM 测试覆盖，本模块只负责"叫醒"与"命令往返"。
+**真机 LLM 回合（用户 2026-09-15 实测）**：玩家在游戏里说了一句，Agent 被叫醒后连着 `pos` → `look` → `say` → `track` 四个调用全部成功——
+「叫醒 + 命令往返」这条线在真模型下走通了。（当时文本变乱码：是游戏侧 CLI 的 stdout 用了控制台代码页，已在 GhostWorld 修掉，不是这边的契约问题。）
