@@ -329,9 +329,9 @@ agent 气泡轨道漂移 + 进度环。
 2. **`scripts/download_video_models.py`**：`HF_ENDPOINT` 默认 hf-mirror.com；`list_repo_files` 选唯一 torch 权重再 `snapshot_download(allow_patterns=...)`（CLIP 仓库另有 tf/flax 权重 ~1.8GB 必须筛）；try-import 守卫缺 huggingface_hub 打印 pip 指令 exit 1。
 3. **GUI `ConfigPage`**：状态行显示全部 8 项 ✓/✗（进场 + showEvent 自动检查）+「下载缺失模型」按钮——**仅当存在可自愈缺失（依赖/模型）时启用**；torch/ffmpeg 等缺失只提示手动装。点击 = 阶段链：缺 huggingface_hub → 先 `pip install huggingface_hub` → 再跑下载脚本；QTimer 1s 轮询（不用 Signal 传参），每步成功自动接下一步、完成后自动复检。**坑：`_check_video_models` 会覆写状态行——`_start_next_dl_step` 必须先 check 再写进度文案**。冻结 exe：`_python_cmd()` 落 `shutil.which("python")`。子进程 CREATE_NEW_CONSOLE（exe --noconsole 也会弹控制台）。
 
-（2026-09-12 用户定调：这一整块在设置页里从顶层「VidSense」标题**挪到「实验性」之下、日记下方**，
-成为小标题「视频理解」——与 Diary 并列，同为实验性能力；`ConfigPage` 里就是把它从「来信提醒」后面
-移到 `diary_hint` 之后，其余状态行/下载按钮原样。）
+（2026-09-12 用户定调：这一整块在设置页里从顶层「VidSense」标题**挪进设置页末段**，成为小标题「视频理解」；
+`ConfigPage` 里就是把它从「来信提醒」后面移到末段，其余状态行/下载按钮原样。
+2026-09-15 再定调：这个末段的标题是**「拓展」**，不是「实验性」——判据是“这个能力有没有独立项目”：VidSense 与 GhostWorld 都能单独跑，所以进拓展；「实验性」留给日记与桌面控制。末段之下是 GhostWorld 角色控制与视频理解。）
 
 测试：`tests/test_video_tool.py`（fixture 打桩 `_video_ready` 为 `_ALL_READY`；可自愈缺失指引用例；torch/ffmpeg 缺失 → 手动安装提示用例；`_model_cached` 布局/阈值单测）+ `tests/test_gui.py`（`_ready(**overrides)` 工厂：全就绪→禁用；CLIP 缺→启用；仅 hub 缺→启用（可自愈）；仅 torch/ffmpeg 缺→禁用+手动提示；缺依赖先 pip 后脚本的阶段链；exe 解释器回退）。
 

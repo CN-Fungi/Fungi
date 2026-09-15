@@ -157,9 +157,9 @@ def test_mobile_page_renders_qr_for_running_room(window):
     assert page.url_edit.text() == ""
 
 
-def test_settings_put_video_understanding_under_experimental_below_diary(window):
-    """用户定调（2026-09-12）：视频理解不再是顶层「VidSense」段，而是「实验性」之下、
-    日记下面的小标题——与 Diary 并列。"""
+def test_settings_put_the_video_understanding_under_extensions(window):
+    """用户定调（2026-09-12 / 2026-09-15）：视频理解不再是顶层「VidSense」段，
+    而是末段「拓展」之下的小标题——判据是它可以独立存在（VidSense 是个独立项目）。"""
     page = window.cfg_page
     root = page.layout()
 
@@ -182,8 +182,12 @@ def test_settings_put_video_understanding_under_experimental_below_diary(window)
     experimental = heading("实验性")
     assert experimental > -1, "「实验性」大标题不见了"
     assert heading("VidSense") == -1, "视频理解又回到顶层了"
-    assert slot(page.diary_switch) > experimental
-    assert slot(page.video_label) > slot(page.diary_switch)  # 视频理解在日记下面
+    assert slot(page.diary_switch) > experimental, "日记仍属实验性"
+
+    extensions = heading("拓展")
+    assert extensions > experimental, "「拓展」应当在「实验性」之后"
+    assert slot(page.video_label) > extensions, "视频理解属于拓展（能独立存在）"
+    assert slot(page.gw_switch) > extensions, "GhostWorld 同理"
 
 
 def test_the_desktop_control_switch_sits_under_experimental_and_disarms_when_off(
@@ -242,7 +246,7 @@ def test_the_desktop_control_switch_sits_under_experimental_and_disarms_when_off
     assert config_bytes() == before
 
 
-def test_the_ghostworld_switch_sits_under_experimental_and_disarms_when_off(
+def test_the_ghostworld_switch_sits_under_extensions_and_disarms_when_off(
     window, monkeypatch
 ):
     """设置页的角色控制开关（spec §43）：即时写盘；关掉时立刻结束监视进程。"""
@@ -260,12 +264,12 @@ def test_the_ghostworld_switch_sits_under_experimental_and_disarms_when_off(
 
     page = window.cfg_page
     root = page.layout()
-    experimental = -1
+    extensions = -1
     for i in range(root.count()):
         widget = root.itemAt(i).widget()
-        if widget is not None and getattr(widget, "text", lambda: None)() == "实验性":
-            experimental = i
-    assert experimental > -1
+        if widget is not None and getattr(widget, "text", lambda: None)() == "拓展":
+            extensions = i
+    assert extensions > -1, "「拓展」大标题不见了"
 
     def slot(target):
         for i in range(root.count()):
@@ -275,7 +279,7 @@ def test_the_ghostworld_switch_sits_under_experimental_and_disarms_when_off(
                 return i
         return -1
 
-    assert slot(page.gw_switch) > experimental
+    assert slot(page.gw_switch) > extensions
 
     # The switch starts from this machine's config, so one setChecked() only
     # fires on a real change: force a transition both ways. Nothing may touch

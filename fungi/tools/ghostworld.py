@@ -11,9 +11,11 @@ Two halves, on purpose:
   one command in, one ack out, inside a turn.
 - the watcher (armed once per room, like the courier's mail watch): supervises
   `ghostworld-wait --follow` and hands each player line to a callback, so speech
-  *wakes* the agent instead of being polled for. The child is restarted when the
-  game exits and comes back: starting the game again is enough, and no event is
-  lost meanwhile, because the game keeps a cursor for the follower.
+  *wakes* the agent instead of being polled for. It only starts that child once the
+  game is really there (its own `.channel.json` is the evidence): no game, no child
+  — just a cheap re-check. The child is restarted when the game exits and comes
+  back: starting the game again is enough, and no event is lost meanwhile, because
+  the game keeps a cursor for the follower.
 
 Both are inert until the switch is on — off means the tool is never attached, so
 the model cannot see it (same rule as `pc_control`, spec §35).
@@ -27,6 +29,7 @@ import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from fungi.config import Config, load_config
 
@@ -158,6 +161,20 @@ def is_armed() -> bool:
         return _watch.thread is not None and _watch.thread.is_alive()
 
 
+CHANNEL_REL = ("metaverse", ".channel.json")
+
+
+def game_is_up(directory: str) -> bool:
+    """Is there a game to talk to? Its channel file is the only evidence we have.
+
+    Without a checkout (console-script mode) we cannot look, so we let the child
+    find out and report exit 2 — the caller retries either way.
+    """
+    if not directory:
+        return True
+    return Path(directory).joinpath(*CHANNEL_REL).exists()
+
+
 def arm(directory: str, on_wake: Callable[[dict], None]) -> bool:
     """Start watching for player speech; returns True if it was started now.
 
@@ -217,6 +234,12 @@ def _kill(child: subprocess.Popen) -> None:
 
 def _watch_loop(directory: str, on_wake: Callable[[dict], None], stop: threading.Event) -> None:
     while not stop.is_set():
+        if not game_is_up(directory):
+            # Nothing to watch yet: launching the follower now would only buy a
+            # child that exits at once. Waiting for the game to appear costs one
+            # stat call, and its cursor means the first lines are still ours.
+            stop.wait(NO_GAME_DELAY_S)
+            continue
         child = _spawn(directory)
         if child is None:
             stop.wait(NO_GAME_DELAY_S)

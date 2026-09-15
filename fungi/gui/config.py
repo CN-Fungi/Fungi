@@ -132,7 +132,8 @@ class ConfigPage(QWidget):
         self.tone_row.setVisible(self.ring_switch.isChecked())
         root.addWidget(self.tone_row)
 
-        # 实验性功能（大标题）→ 日记 / 视频理解（小标题）——压轴
+        # 实验性（大标题）：还在长、随时会改的功能——日记 / 桌面控制。
+        # 「拓展」（下一节）装的是已经有独立项目的现成能力（GhostWorld / VidSense）。
         root.addSpacing(10)
         root.addWidget(SubtitleLabel("实验性"))
         diary_title_row = QHBoxLayout()
@@ -182,6 +183,10 @@ class ConfigPage(QWidget):
         pc_hint.setWordWrap(True)
         root.addWidget(pc_hint)
 
+        # 拓展（大标题）：已经有独立项目的现成能力搬进来——VidSense 与 GhostWorld
+        # 都是能单独跑的东西，不是还在长的实验品（用户 2026-09-15 定调）。
+        root.addSpacing(10)
+        root.addWidget(SubtitleLabel("拓展"))
         # GhostWorld 角色控制（小标题）：默认关；开着时本机 Agent 驱动游戏里的一个角色（spec §43）
         root.addSpacing(10)
         gw_row = QHBoxLayout()
@@ -211,7 +216,7 @@ class ConfigPage(QWidget):
         video_lbl = BodyLabel("视频理解")
         video_lbl.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         root.addWidget(video_lbl)
-        self.video_label = video_lbl  # tests pin its place under 实验性
+        self.video_label = video_lbl  # tests pin its place under 拓展
         self.video_status = BodyLabel()
         self.video_status.setWordWrap(True)
         root.addWidget(self.video_status)

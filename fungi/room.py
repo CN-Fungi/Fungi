@@ -206,6 +206,35 @@ class HostPoller:
                     inbox.push(env)
 
 
+def ensure_ghostworld_watch(room) -> None:
+    """GhostWorld character control (spec §43): arm the player-speech wake.
+
+    Module-level rather than a method: the two room roles that own a local clone
+    are RoomBase subclasses, but the per-turn agent is built by RoomRuntime, which
+    has no room of its own. Idempotent, and re-read live so the settings switch
+    needs no restart — off disarms at once, because an agent woken by a game it may
+    not touch is worse than no watcher. The connector owns the child process; this
+    only decides whether it should exist.
+    """
+    live = load_config()
+    module = sys.modules.get("fungi.tools.ghostworld")
+    if module is None:
+        if not live.ghostworld:
+            return
+        from fungi.tools import ghostworld as module  # noqa: PLC0415
+    elif not live.ghostworld:
+        module.disarm()
+        return
+    module.arm(
+        str(live.ghostworld_dir or ""),
+        on_wake=lambda evt: room.local.note(module.wake_text(evt), source="GhostWorld"),
+    )
+    # The clone's own tool dict drives inbox (wake) turns; the room's per-turn
+    # dict is a copy of it, so adding it there covers both.
+    if room._local is not None and "ghostworld" not in room._local.tools:
+        room._local.tools.update(module.bound(live))
+
+
 class RoomBase:
     """Shared assembly: local clone + comm clones + card asks + WebUI runtime."""
 
@@ -571,32 +600,6 @@ class RoomBase:
 
     MAIL_POLL_S = 3.0
 
-    def _ensure_ghostworld_watch(self) -> None:
-        """GhostWorld character control (spec §43): arm the player-speech wake.
-
-        Idempotent, and re-read live so the settings switch needs no restart —
-        off disarms at once, because an agent woken by a game it may not touch
-        is worse than no watcher. The connector owns the child process; this
-        only decides whether it should exist.
-        """
-        live = load_config()
-        module = sys.modules.get("fungi.tools.ghostworld")
-        if module is None:
-            if not live.ghostworld:
-                return
-            from fungi.tools import ghostworld as module  # noqa: PLC0415
-        elif not live.ghostworld:
-            module.disarm()
-            return
-        module.arm(
-            str(live.ghostworld_dir or ""),
-            on_wake=lambda evt: self.local.note(module.wake_text(evt), source="GhostWorld"),
-        )
-        # The clone's own tool dict drives inbox (wake) turns; the room's
-        # per-turn dict is a copy of it, so adding it there covers both.
-        if self._local is not None and "ghostworld" not in self._local.tools:
-            self._local.tools.update(module.bound(live))
-
     def _ensure_mail_watch(self) -> None:
         if self._mail_thread is not None:
             return
@@ -892,7 +895,7 @@ class RoomServer(RoomBase):
             LocalTransport(self.hub.relay, self.local_addr, hub=self.hub)
         )
         self._local.start()
-        self._ensure_ghostworld_watch()
+        ensure_ghostworld_watch(self)
         self._monitor = threading.Thread(
             target=self._monitor_loop, name="roster-monitor", daemon=True
         )
@@ -974,7 +977,7 @@ class RoomClient(RoomBase):
             RemoteTransport(self.client, inbox=self.poller.inbox_for(self.local_addr))
         )
         self._local.start()
-        self._ensure_ghostworld_watch()
+        ensure_ghostworld_watch(self)
         for peer in sorted(self._peers_known):
             self.add_comm_clone(peer, self._comm_transport(peer))
         self._hb = threading.Thread(target=self._heartbeat_loop, name="heartbeat", daemon=True)
@@ -1141,7 +1144,7 @@ class RoomRuntime(WebUIRuntime):
         if live.ghostworld:
             # GhostWorld character control (spec §43): arming here is what makes
             # the switch take effect on this turn instead of after a restart.
-            self._ensure_ghostworld_watch()
+            ensure_ghostworld_watch(self.room)
         return trilayer.build_clone_agent(
             sink,
             system_prompt=prompt,

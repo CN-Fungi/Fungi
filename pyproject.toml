@@ -32,7 +32,7 @@ video = [
 [tool.ruff]
 target-version = "py313"
 line-length = 100
-extend-exclude = ["web", "sessions", "docs", "vidsense"]  # vidsense = vendored upstream snapshot, never linted/reformatted
+extend-exclude = ["web", "sessions", "docs", "vidsense", "shots"]  # vidsense = vendored upstream; shots = scratch scripts
 
 [tool.ruff.lint]
 select = [

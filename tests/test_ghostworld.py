@@ -255,6 +255,7 @@ def test_only_player_speech_reaches_the_agent(monkeypatch):
 
     monkeypatch.setattr(ghostworld, "_spawn", spawn)
     monkeypatch.setattr(ghostworld, "NO_GAME_DELAY_S", 0.01)
+    monkeypatch.setattr(ghostworld, "game_is_up", lambda directory: True)
     seen: list[dict] = []
     try:
         assert ghostworld.arm(GAME_DIR, seen.append) is True
@@ -275,6 +276,7 @@ def test_arming_twice_is_a_no_op(monkeypatch):
 
     monkeypatch.setattr(ghostworld, "_spawn", spawn)
     monkeypatch.setattr(ghostworld, "NO_GAME_DELAY_S", 0.5)  # one child is enough to see
+    monkeypatch.setattr(ghostworld, "game_is_up", lambda directory: True)
     try:
         assert ghostworld.arm(GAME_DIR, lambda evt: None) is True
         assert ghostworld.arm(GAME_DIR, lambda evt: None) is False
@@ -296,6 +298,7 @@ def test_the_watcher_comes_back_when_the_game_does(monkeypatch):
 
     monkeypatch.setattr(ghostworld, "_spawn", spawn)
     monkeypatch.setattr(ghostworld, "NO_GAME_DELAY_S", 0.01)
+    monkeypatch.setattr(ghostworld, "game_is_up", lambda directory: True)
     seen: list[dict] = []
     try:
         ghostworld.arm(GAME_DIR, seen.append)
@@ -307,6 +310,29 @@ def test_the_watcher_comes_back_when_the_game_does(monkeypatch):
     assert all(child.killed for child in children), "every dead child is reaped"
 
 
+def test_nothing_is_spawned_while_the_game_is_not_there(monkeypatch, tmp_path):
+    """No game -> no child (and no spin): the channel file is the evidence."""
+    spawns: list[int] = []
+
+    def spawn(directory):
+        spawns.append(len(spawns))
+        return _FakeChild([_wake_line()], returncode=2)
+
+    monkeypatch.setattr(ghostworld, "_spawn", spawn)
+    monkeypatch.setattr(ghostworld, "NO_GAME_DELAY_S", 0.02)
+    empty = str(tmp_path)  # a checkout with no .channel.json in it
+    assert ghostworld.arm(empty, lambda evt: None) is True
+    time.sleep(0.15)
+    assert spawns == [], "a follower must not be launched with nothing to talk to"
+
+    # ...and the game turning up is what starts one
+    channel_dir = tmp_path / "metaverse"
+    channel_dir.mkdir()
+    (channel_dir / ".channel.json").write_text("{}", encoding="utf-8")
+    assert _wait_for(lambda: bool(spawns)), "the watcher must notice the game appearing"
+    ghostworld.disarm()
+
+
 def test_disarm_kills_a_running_child_and_does_not_hang(monkeypatch):
     live: list[_LiveChild] = []
 
@@ -316,6 +342,7 @@ def test_disarm_kills_a_running_child_and_does_not_hang(monkeypatch):
         return child
 
     monkeypatch.setattr(ghostworld, "_spawn", spawn)
+    monkeypatch.setattr(ghostworld, "game_is_up", lambda directory: True)
     seen: list[dict] = []
     assert ghostworld.arm(GAME_DIR, seen.append) is True
     assert _wait_for(lambda: bool(seen)), "the watcher must read the child's stream"
@@ -342,12 +369,12 @@ def test_the_room_arms_and_disarms_the_watcher(monkeypatch):
     monkeypatch.setattr(ghostworld, "disarm", lambda: disarmed.append(True))
 
     monkeypatch.setattr(room_mod, "load_config", _on)
-    room_mod.RoomBase._ensure_ghostworld_watch(stub)
+    room_mod.ensure_ghostworld_watch(stub)
     assert armed and armed[0][0] == GAME_DIR
     assert "ghostworld" in stub._local.tools, "the clone's own dict covers wake turns"
 
     monkeypatch.setattr(room_mod, "load_config", lambda: Config(ghostworld=False))
-    room_mod.RoomBase._ensure_ghostworld_watch(stub)
+    room_mod.ensure_ghostworld_watch(stub)
     assert disarmed == [True], "turning the switch off disarms at once"
 
 

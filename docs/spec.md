@@ -1571,19 +1571,23 @@ GUI 子进程**继承了 cmd 的 stdout/stderr 写端**：cmd 自己**立刻退�
 所以 Agent 不会把玩家读成主人；`note()` 从不交给 transport，对端信使也听不到。
 
 **开关即许可（照抄 §35.2）**：`config.json` 的 `ghostworld`（默认 **关**）。关 = 工具**不进**工具面、监视器不 arm、
-没有子进程；工具**调用时**再查一次（`enabled()`），关掉立刻生效。设置页「实验性」一节有开关（`gui/config.py`，
+没有子进程；工具**调用时**再查一次（`enabled()`），关掉立刻生效。设置页**「拓展」**一节有开关（`gui/config.py`，
 关掉顺手 `disarm()`），help 页有一节讲它。
+
+**为什么是「拓展」不是「实验性」**（用户 2026-09-15 定调）：VidSense 与 GhostWorld 都已经是**能独立存在的项目**，
+Fungi 只是把它们接上；「实验性」留给还在长、随时会改的东西（日记、桌面控制）。设置页因此分成两组：
+实验性 = 日记 / 桌面控制，拓展 = 视频理解 / GhostWorld。
 
 **监视器自己管子进程**：子进程退出码 **2** = 游戏没在跑 → **30s** 后再看，不是 5s 空转；游戏关掉又起来 → 子进程
 自然重启；**不会丢事件**——游标（游戏侧 `metaverse/.wait_cursor.json`，按 `seq`）存在游戏那边，重连从上次位置续上，
 游戏重启后 token 变了就归零，缓冲区里没读过的事件一次交出。只有 `kind=wake`（玩家发言）叫醒 Agent，
 observation（`see`/`goto_done`/`position`…）不叫醒，要用时用工具读。`room.stop()` 与 `atexit` 都 disarm。
 
-**真机（2026-09-15 本机实测，无 LLM）**：headless 游戏 + `C:/tmp/gw_player.py`（顶替人类客户端——无头游戏里没人说话，
-所以那个一次性脚本只做"玩家说一句"这件事），直接调用本模块：
+**真机（2026-09-15 本机实测，无 LLM）**：headless 游戏 + GhostWorld 仓库自带的 `headless_player.py`（联调夹具：起服务、连一个会说活的玩家——
+无头游戏里没人说话，它就把这件事做掉），直接调用本模块：
 
 - `send_command({"cmd": "pos"})` → `{"type": "position", "x": 7.5, "y": 1.5, "facing": 1.57, "map": "smoke.json"}`；`look` → 完整 perception；
-- `arm()` 之后 **0.4s** 拿到玩家的真实发言（`seq=1, kind=wake, from=player`，且该事件**发表于它连上之前**——没丢）；
+- `arm()` 之后 **0.4s** 拿到玩家的真实发言（两轮实测：`--say` 那句原样到达）（`seq=1, kind=wake, from=player`，且该事件**发表于它连上之前**——没丢）；
 - `disarm()` → 监视器与子进程都消失。
 
 **验收**：`tests/test_ghostworld.py`（19 例，全用假 CLI／假子进程，不碰真游戏、不起真进程）+
