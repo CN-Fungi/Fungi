@@ -171,9 +171,10 @@ def test_a_channel_note_queues_a_local_turn():
     assert env.body.get("from_owner") is None
 
 
-def test_wake_text_names_the_game_and_the_player():
+def test_wake_text_labels_the_player_once():
+    """The [GhostWorld] prefix comes from the note; naming it here would double it."""
     text = ghostworld.wake_text({"kind": "wake", "from": "player", "message": "在吗"})
-    assert text == "GhostWorld 的玩家（player）说：在吗"
+    assert text == "玩家（player）说：在吗"
 
 
 # ── the watcher ──────────────────────────────────────────────────────────────

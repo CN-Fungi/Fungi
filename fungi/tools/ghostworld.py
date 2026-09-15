@@ -291,10 +291,14 @@ def _parse(line: str) -> dict | None:
 
 
 def wake_text(event: dict) -> str:
-    """The note text for one player line — the agent reads this as the input."""
+    """The note text for one player line.
+
+    The `[GhostWorld]` label is added by the note itself (clone/base.py), so this
+    stays a plain sentence — otherwise the agent reads the game's name twice.
+    """
     who = str(event.get("from") or "player")
     message = str(event.get("message") or "").strip()
-    return f"GhostWorld 的玩家（{who}）说：{message}"
+    return f"玩家（{who}）说：{message}"
 
 
 # ── the per-turn tool ────────────────────────────────────────────────────────
