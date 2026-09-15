@@ -242,6 +242,63 @@ def test_the_desktop_control_switch_sits_under_experimental_and_disarms_when_off
     assert config_bytes() == before
 
 
+def test_the_ghostworld_switch_sits_under_experimental_and_disarms_when_off(
+    window, monkeypatch
+):
+    """设置页的角色控制开关（spec §43）：即时写盘；关掉时立刻结束监视进程。"""
+    from fungi.gui import config as config_page
+    from fungi.tools import ghostworld
+
+    saved = {}
+    disarmed = []
+    monkeypatch.setattr(
+        config_page.config_mod,
+        "save_config",
+        lambda cfg: saved.update(ghostworld=cfg.ghostworld),
+    )
+    monkeypatch.setattr(ghostworld, "disarm", lambda: disarmed.append(True))
+
+    page = window.cfg_page
+    root = page.layout()
+    experimental = -1
+    for i in range(root.count()):
+        widget = root.itemAt(i).widget()
+        if widget is not None and getattr(widget, "text", lambda: None)() == "实验性":
+            experimental = i
+    assert experimental > -1
+
+    def slot(target):
+        for i in range(root.count()):
+            item = root.itemAt(i)
+            sub = item.layout()
+            if item.widget() is target or (sub is not None and sub.indexOf(target) >= 0):
+                return i
+        return -1
+
+    assert slot(page.gw_switch) > experimental
+
+    # The switch starts from this machine's config, so one setChecked() only
+    # fires on a real change: force a transition both ways. Nothing may touch
+    # the real config.json — save_config is patched and the bytes are compared.
+    def config_bytes():
+        path = pathlib.Path("config.json")
+        return path.read_bytes() if path.is_file() else None
+
+    before = config_bytes()
+    if page.gw_switch.isChecked():
+        page.gw_switch.setChecked(False)
+        saved.clear()
+        disarmed.clear()
+
+    page.gw_switch.setChecked(True)
+    assert saved["ghostworld"] is True
+    saved.clear()
+    page.gw_switch.setChecked(False)
+    assert saved["ghostworld"] is False
+    assert disarmed == [True]
+    assert config_bytes() == before
+
+
 def test_firewall_probe_parses_the_rule_count():
     from fungi.gui import firewall
 

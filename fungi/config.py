@@ -76,6 +76,13 @@ class Config:
     # `screen` tool (see this machine's desktop, click/paste/type on it). Off =
     # the tool is never attached, so the model cannot even see it.
     pc_control: bool = False
+    # GhostWorld character control (spec §44): when on, the local agent gets the
+    # `ghostworld` tool and a watcher that wakes it when the in-game player
+    # speaks. Off = neither exists (no tool, no child process, no wakeups).
+    # `ghostworld_dir` is the game checkout — set it when the game is not
+    # installed as a package; empty means use the installed console scripts.
+    ghostworld: bool = False
+    ghostworld_dir: str = ""
 
     @property
     def configured(self) -> bool:
@@ -124,6 +131,8 @@ def load_config(path: Path | None = None) -> Config:
         cfg.ring = bool(data.get("ring", True))
         cfg.ring_tone = str(data.get("ring_tone") or "dingdong")
         cfg.pc_control = bool(data.get("pc_control"))
+        cfg.ghostworld = bool(data.get("ghostworld"))
+        cfg.ghostworld_dir = str(data.get("ghostworld_dir") or "")
     cfg.api_key = os.environ.get("OPENAI_API_KEY") or cfg.api_key
     cfg.endpoint = os.environ.get("OPENAI_ENDPOINT") or cfg.endpoint
     cfg.model = os.environ.get("OPENAI_MODEL") or cfg.model
@@ -162,6 +171,10 @@ def save_config(cfg: Config, path: Path | None = None) -> None:
         data["ring_tone"] = cfg.ring_tone
     if cfg.pc_control:
         data["pc_control"] = True
+    if cfg.ghostworld:
+        data["ghostworld"] = True
+    if cfg.ghostworld_dir:
+        data["ghostworld_dir"] = cfg.ghostworld_dir
     if cfg.display:
         data["display"] = cfg.display
     target.write_text(json.dumps(data, indent=4), encoding="utf-8")

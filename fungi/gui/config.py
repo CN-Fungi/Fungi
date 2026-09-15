@@ -182,6 +182,30 @@ class ConfigPage(QWidget):
         pc_hint.setWordWrap(True)
         root.addWidget(pc_hint)
 
+        # GhostWorld 角色控制（小标题）：默认关；开着时本机 Agent 驱动游戏里的一个角色（spec §43）
+        root.addSpacing(10)
+        gw_row = QHBoxLayout()
+        gw_lbl = BodyLabel("GhostWorld 角色控制")
+        gw_lbl.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        gw_row.addWidget(gw_lbl)
+        gw_row.addSpacing(8)
+        self.gw_switch = SwitchButton()
+        self.gw_switch.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        # setChecked BEFORE connect (checkedChanged fires on programmatic sets)
+        self.gw_switch.setChecked(config_mod.load_config().ghostworld)
+        gw_row.addWidget(self.gw_switch)
+        self.gw_switch.checkedChanged.connect(self._toggle_ghostworld)
+        gw_row.addStretch(1)
+        root.addLayout(gw_row)
+        gw_hint = BodyLabel(
+            "让本机 Agent 在本机的 GhostWorld 里控制一个角色：玩家说话它就醒过来，用角色自己的嘴回话、\n"
+            "走动、拾取东西。需要游戏正在运行（config.json 的 ghostworld_dir 指向游戏目录；"
+            "已 pip 安装的可留空）。\n"
+            "关掉开关立刻收回：工具从工具面移除，等玩家说话的监视进程也一并结束。"
+        )
+        gw_hint.setWordWrap(True)
+        root.addWidget(gw_hint)
+
         # 视频理解（小标题）：进场自动检查，缺失才给下载入口（video 工具拒绝现场下载）
         root.addSpacing(10)
         video_lbl = BodyLabel("视频理解")
@@ -403,6 +427,28 @@ class ConfigPage(QWidget):
             "桌面控制已开启：下一轮对话里 Agent 能看屏并直接动手"
             if checked
             else "桌面控制已关闭：下一轮起工具移除，已授权的动作也一并收回",
+            duration=2500,
+            parent=self.window_ref,
+        )
+
+    def _toggle_ghostworld(self, checked: bool) -> None:
+        """GhostWorld 角色控制开关（spec §43）：即时写盘；关掉时结束监视进程。
+
+        监视器是常驻子进程，所以关掉要顺手 disarm——不然"现在不许"要等到房间退出才生效。
+        开启在下一轮对话生效（工具补进 clone，监视器随之 arm）。
+        """
+        cfg = config_mod.load_config()
+        cfg.ghostworld = bool(checked)
+        config_mod.save_config(cfg)
+        if not checked:
+            from ..tools import ghostworld  # noqa: PLC0415 (character control only)
+
+            ghostworld.disarm()
+        InfoBar.success(
+            "已保存",
+            "角色控制已开启：下一轮对话里 Agent 能驱动 GhostWorld 里的角色"
+            if checked
+            else "角色控制已关闭：下一轮起工具移除，等玩家说话的监视进程也一并结束",
             duration=2500,
             parent=self.window_ref,
         )

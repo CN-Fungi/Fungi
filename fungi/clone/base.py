@@ -235,22 +235,23 @@ class Clone:
 
     # ── lifecycle ──
 
-    def note(self, text: str) -> None:
-        """Owner feedback on one of this clone's reports — a local turn.
+    def note(self, text: str, *, source: str = "owner") -> None:
+        """A local turn for this clone, labelled with where it came from.
 
-        It rides the chat path (same history, same report back to the owner) but
-        is never handed to the transport, so the counterpart hears nothing: the
-        feedback box in the friend view is between the owner and their courier
-        (2026-09-11 user instruction). `render_input` labels it as the owner's.
+        The owner's feedback on one of this clone's reports rides the chat path
+        (same history, same report back to the owner) but is never handed to the
+        transport, so the counterpart hears nothing: the feedback box in the
+        friend view is between the owner and their courier (2026-09-11 user
+        instruction). An external channel the agent watches (a game it plays)
+        takes the same path under its own label, so the agent never reads a
+        player as its owner.
         """
-        self._work.put(
-            Envelope(
-                src=f"{self.host}:owner",
-                dst=self.addr,
-                type="chat",
-                body={"text": text, "from_owner": True},
-            )
-        )
+        body: dict = {"text": text}
+        if source == "owner":
+            body["from_owner"] = True
+        else:
+            body["from_channel"] = source
+        self._work.put(Envelope(src=f"{self.host}:{source}", dst=self.addr, type="chat", body=body))
 
     def start(self) -> None:
         self._loop_thread = threading.Thread(
@@ -353,6 +354,11 @@ class Clone:
             if body.get("context"):
                 parts.append(f"Context: {body['context']}")
             return "\n".join(parts)
+        if env.body.get("from_channel"):
+            # Something outside Fungi is being watched (a game the agent
+            # plays): the label names it, so this is not mistaken for the
+            # owner's words.
+            return f"[{env.body['from_channel']}] {env.body.get('text', '')}"
         if env.body.get("from_human"):
             # A human sent this from their friend view: the courier relays
             # it faithfully instead of passing it off as the peer clone.

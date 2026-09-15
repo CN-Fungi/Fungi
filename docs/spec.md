@@ -1549,3 +1549,43 @@ GUI 子进程**继承了 cmd 的 stdout/stderr 写端**：cmd 自己**立刻退�
 跑无声复现那条命令，断言不出现 `Timed out` 且 5s 内返回。**修前跑它红**（实测 `AssertionError: 'ERROR: Timed out after 6s'`）；
 修后 0.11s 返回。
 
+## 43. GhostWorld 角色控制（2026-09-15）：一条回环通道，两半接线
+
+**接的是什么**：GhostWorld（`useful/GhostWorld`，同一台机器上的第一人称小世界）把一条**回环通道**暴露给外部程序：
+`ghostworld-send '<json>'` 一条命令一个 ack；`ghostworld-wait --follow` 阻塞着等，玩家说话才推一行。
+协议规范在游戏仓库的 `docs/PROTOCOL-agent-channel.md`（线协议 / 发现文件 / 事件对象 / 游标 / 退出码）。
+
+**只调 CLI，不 import 游戏**（`fungi/tools/ghostworld.py`，`subprocess`）：游戏内部怎么改都不关这边的事；
+这边也碰不到游戏的世界（游戏侧红线：只有它的帧循环线程能改 WorldState，通道线程只投队列）。
+`ghostworld_dir` 指向游戏检出目录（空则用安装出来的 console script）。
+
+**两半，缺一不可**：
+
+| 一半 | 形状 | 为什么 |
+|---|---|---|
+| `ghostworld` 工具 | `BoundTool`：一轮一次调用、一条命令一个 ack | Agent 动手靠它——先 `pos`/`look` 看清，再 `say`/`goto`/`pickup` |
+| 监视器 | `arm()/disarm()` + 常驻子进程 `ghostworld-wait --follow`，每行玩家发言变成一条**本地回合** | Agent 是**被叫醒的**，不是去轮询的（对齐 `_mail_watch_loop` 的既有形状） |
+
+**玩家的话长得像 `[GhostWorld] 玩家（player）说：…`**，走 `Clone.note(text, source="GhostWorld")`：`note()` 原先
+只有"主人对报告的反馈"一种来源（`from_owner`），现在多了 `from_channel` 分支（`clone/base.py::render_input`），
+所以 Agent 不会把玩家读成主人；`note()` 从不交给 transport，对端信使也听不到。
+
+**开关即许可（照抄 §35.2）**：`config.json` 的 `ghostworld`（默认 **关**）。关 = 工具**不进**工具面、监视器不 arm、
+没有子进程；工具**调用时**再查一次（`enabled()`），关掉立刻生效。设置页「实验性」一节有开关（`gui/config.py`，
+关掉顺手 `disarm()`），help 页有一节讲它。
+
+**监视器自己管子进程**：子进程退出码 **2** = 游戏没在跑 → **30s** 后再看，不是 5s 空转；游戏关掉又起来 → 子进程
+自然重启；**不会丢事件**——游标（游戏侧 `metaverse/.wait_cursor.json`，按 `seq`）存在游戏那边，重连从上次位置续上，
+游戏重启后 token 变了就归零，缓冲区里没读过的事件一次交出。只有 `kind=wake`（玩家发言）叫醒 Agent，
+observation（`see`/`goto_done`/`position`…）不叫醒，要用时用工具读。`room.stop()` 与 `atexit` 都 disarm。
+
+**真机（2026-09-15 本机实测，无 LLM）**：headless 游戏 + `C:/tmp/gw_player.py`（顶替人类客户端——无头游戏里没人说话，
+所以那个一次性脚本只做"玩家说一句"这件事），直接调用本模块：
+
+- `send_command({"cmd": "pos"})` → `{"type": "position", "x": 7.5, "y": 1.5, "facing": 1.57, "map": "smoke.json"}`；`look` → 完整 perception；
+- `arm()` 之后 **0.4s** 拿到玩家的真实发言（`seq=1, kind=wake, from=player`，且该事件**发表于它连上之前**——没丢）；
+- `disarm()` → 监视器与子进程都消失。
+
+**验收**：`tests/test_ghostworld.py`（19 例，全用假 CLI／假子进程，不碰真游戏、不起真进程）+
+`tests/test_gui.py::test_the_ghostworld_switch_sits_under_experimental_and_disarms_when_off`。
+**未做**：真机 LLM 回合（要 API key，留给用户）——回合契约由既有的 FakeLLM 测试覆盖，本模块只负责"叫醒"与"命令往返"。
