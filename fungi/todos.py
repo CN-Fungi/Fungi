@@ -84,9 +84,7 @@ def set_day(date: str, items: list[str], path: Path | None = None) -> None:
         else:
             data.pop(date, None)
         source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        source.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def upcoming(days: int = 21, today: _dt.date | None = None) -> list[tuple[str, list[str]]]:

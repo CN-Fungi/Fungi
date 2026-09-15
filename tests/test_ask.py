@@ -167,9 +167,7 @@ def test_ask_record_carries_its_tool_call_id():
     events: list = []
     sink = FnSink(lambda t, c: events.append((t, c)))
     tool = make_ask_tool(sink, on_answer=records.append)
-    thread = threading.Thread(
-        target=lambda: tool.fn({"question": "q?"}, "call-42"), daemon=True
-    )
+    thread = threading.Thread(target=lambda: tool.fn({"question": "q?"}, "call-42"), daemon=True)
     thread.start()
     content = first_ask(events)
     resolve_ask(content["id"], "ok")

@@ -133,7 +133,9 @@ def test_agent_refreshes_stored_system_message():
 
 
 def test_directory_skill_with_companion_script():
-    assert skills.save("deploy-check", "Use before releasing.", "1. Run the script.").startswith("OK")
+    assert skills.save("deploy-check", "Use before releasing.", "1. Run the script.").startswith(
+        "OK"
+    )
     d = skills.SKILLS_DIR / "deploy-check"
     (d / "scripts").mkdir(parents=True, exist_ok=True)
     (d / "scripts" / "check.py").write_text("print('ok')\n", encoding="utf-8")

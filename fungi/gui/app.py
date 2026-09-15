@@ -55,10 +55,18 @@ class FungiGui(FluentWindow):
         self.help_page = HelpPage()
         # Every page rides a scroll area (help-page style): the window keeps
         # its compact size no matter what each page's content minimum is.
-        self.addSubInterface(self._scroll(self.host_page, "hostScroll"), FluentIcon.HOME, "发起房间")
-        self.addSubInterface(self._scroll(self.join_page, "joinScroll"), FluentIcon.PEOPLE, "加入房间")
-        self.addSubInterface(self._scroll(self.mobile_page, "mobileScroll"), FluentIcon.QRCODE, "手机端")
-        self.addSubInterface(self._scroll(self.courier_page, "courierScroll"), FluentIcon.CALENDAR, "信使")
+        self.addSubInterface(
+            self._scroll(self.host_page, "hostScroll"), FluentIcon.HOME, "发起房间"
+        )
+        self.addSubInterface(
+            self._scroll(self.join_page, "joinScroll"), FluentIcon.PEOPLE, "加入房间"
+        )
+        self.addSubInterface(
+            self._scroll(self.mobile_page, "mobileScroll"), FluentIcon.QRCODE, "手机端"
+        )
+        self.addSubInterface(
+            self._scroll(self.courier_page, "courierScroll"), FluentIcon.CALENDAR, "信使"
+        )
         self.addSubInterface(self._scroll(self.cfg_page, "cfgScroll"), FluentIcon.SETTING, "设置")
         self.addSubInterface(self.help_page, FluentIcon.INFO, "帮助")
         self.resize(840, 540)  # compact default; pages scroll instead of stretching it

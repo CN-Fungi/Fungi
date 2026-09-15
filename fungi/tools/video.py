@@ -70,9 +70,7 @@ def _model_cached(repo_id: str, filenames: tuple[str, ...]) -> bool:
 
 
 def _models_ready() -> dict[str, bool]:
-    return {
-        label: _model_cached(repo, files) for label, (repo, files) in _VIDEO_MODELS.items()
-    }
+    return {label: _model_cached(repo, files) for label, (repo, files) in _VIDEO_MODELS.items()}
 
 
 def _module_available(name: str) -> bool:
@@ -91,8 +89,7 @@ def _video_ready() -> dict[str, bool]:
     Python libs, ffmpeg/ffprobe, and the HF model caches. Drives the tool gate
     AND the GUI status line, so the two can never disagree."""
     ready = {
-        "ffmpeg": shutil.which("ffmpeg") is not None
-        and shutil.which("ffprobe") is not None,
+        "ffmpeg": shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None,
         "huggingface_hub": _module_available("huggingface_hub"),
         "torch": _module_available("torch"),
         "transformers": _module_available("transformers"),
@@ -101,8 +98,6 @@ def _video_ready() -> dict[str, bool]:
     }
     ready.update(_models_ready())  # CLIP, whisper
     return ready
-
-
 
 
 def _demo_video() -> Path:
@@ -119,11 +114,23 @@ def _demo_video() -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         [
-            ffmpeg, "-y",
-            "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=10:duration=5",
-            "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-shortest",
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=10:duration=5",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=5",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
             str(dest),
         ],
         check=True,
@@ -133,9 +140,7 @@ def _demo_video() -> Path:
     return dest
 
 
-def tool_video(
-    path: str, should_abort: Callable[[], bool] | None = None
-) -> str | ImageRead:
+def tool_video(path: str, should_abort: Callable[[], bool] | None = None) -> str | ImageRead:
     """Understand a local video: transcript + scenes + attached keyframes."""
     root = PROJECT_ROOT  # vendored vidsense/ package lives at the repo root
     missing = [name for name, ok in _video_ready().items() if not ok]
@@ -155,8 +160,7 @@ def tool_video(
         steps = []
         if pip_pkgs:
             steps.append(
-                "pip install " + " ".join(pip_pkgs)
-                + " -i https://pypi.tuna.tsinghua.edu.cn/simple"
+                "pip install " + " ".join(pip_pkgs) + " -i https://pypi.tuna.tsinghua.edu.cn/simple"
             )
         if any(m in missing for m in _VIDEO_MODELS):
             steps.append(
@@ -164,22 +168,23 @@ def tool_video(
                 "(HF models via hf-mirror.com)"
             )
         return (
-            "ERROR: video not ready, missing: " + ", ".join(missing)
+            "ERROR: video not ready, missing: "
+            + ", ".join(missing)
             + ". Tell the user what is missing and offer to set it up; install "
             "ONLY after the user agrees (a few GB may be downloaded):\n"
             + "\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
             + "\nInstall into the global Python (VidSense runs under Fungi's "
-            "own interpreter), then re-verify with `video` path \"demo\" and "
+            'own interpreter), then re-verify with `video` path "demo" and '
             "report the honest result. The tool never downloads on demand."
         )
     if path == "demo":  # built-in self-test clip: one successful call proves
-        try:            # the whole pipeline (ffmpeg, VidSense, models, LLM)
+        try:  # the whole pipeline (ffmpeg, VidSense, models, LLM)
             video = _demo_video()
         except (OSError, subprocess.SubprocessError) as exc:
             return f"ERROR: could not generate the built-in demo clip: {exc}"
     else:
         video = Path(path).resolve()  # resolve against Fungi's cwd: the vidsense
-        if not video.is_file():       # subprocess runs with cwd=PROJECT_ROOT
+        if not video.is_file():  # subprocess runs with cwd=PROJECT_ROOT
             return f"ERROR: File not found: {video}"
     with tempfile.TemporaryDirectory(prefix="fungi-video-") as tmp:
         # ffmpeg on this box fails to decode inputs whose path contains CJK
@@ -191,7 +196,9 @@ def tool_video(
             work = Path(tmp) / ("video" + (video.suffix.lower() or ".mp4"))
             shutil.copyfile(video, work)
         env = dict(os.environ)
-        env.setdefault("HF_ENDPOINT", "https://hf-mirror.com")  # GFW: model HEAD checks must not hit huggingface.co
+        env.setdefault(
+            "HF_ENDPOINT", "https://hf-mirror.com"
+        )  # GFW: model HEAD checks must not hit huggingface.co
         if all(_models_ready().values()):
             # weights are fully cached; skipping the mirror's HEAD checks cuts
             # model load from minutes to seconds on CN networks (measured 150s -> 15s)
@@ -217,7 +224,8 @@ def tool_video(
                 if os.name == "nt":
                     subprocess.run(
                         ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                        check=False, capture_output=True,
+                        check=False,
+                        capture_output=True,
                         timeout=10,
                     )
                 else:
@@ -270,9 +278,24 @@ def _extract_keyframes(video: Path, timestamps: list[float], out_dir: Path) -> l
         dest = out_dir / f"kf{i:02d}.jpg"
         try:
             subprocess.run(
-                ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{t:.2f}",
-                 "-i", str(video), "-frames:v", "1", "-q:v", "3", str(dest)],
-                capture_output=True, timeout=120, check=True,
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-ss",
+                    f"{t:.2f}",
+                    "-i",
+                    str(video),
+                    "-frames:v",
+                    "1",
+                    "-q:v",
+                    "3",
+                    str(dest),
+                ],
+                capture_output=True,
+                timeout=120,
+                check=True,
             )
         except (subprocess.SubprocessError, OSError):
             paths.append(None)  # type: ignore[list-item]
@@ -298,9 +321,7 @@ def _render(card: dict, frame_paths: list[Path | None], name: str) -> str:
     summary = "\n".join(lines)
     if len(summary) > _MAX_TEXT_CHARS:
         half = _MAX_TEXT_CHARS // 2
-        summary = (
-            summary[:half] + "\n... [transcript truncated] ...\n" + summary[-half:]
-        )
+        summary = summary[:half] + "\n... [transcript truncated] ...\n" + summary[-half:]
 
     urls: list[str] = []
     for p in frame_paths:

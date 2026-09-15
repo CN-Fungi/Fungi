@@ -403,7 +403,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if url.path == "/api/transfer":
             body = self._body()
-            ok = self.hub.transfers.discard_for(str(body.get("id") or ""), str(body.get("host") or ""))
+            ok = self.hub.transfers.discard_for(
+                str(body.get("id") or ""), str(body.get("host") or "")
+            )
             self._reply({"ok": bool(ok)})
         else:
             self._reply({"error": "not found"}, 404)

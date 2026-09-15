@@ -147,7 +147,6 @@ class RemoteTransport:
     def mail(self) -> dict:
         return self.client.mail()
 
-
     def fs(self, op: str, path: str, **kw) -> dict:
         return self.client.fs(op, path, **kw)
 
@@ -162,7 +161,6 @@ class RemoteTransport:
 
     def discard_transfer(self, transfer_id: str) -> None:
         self.client.discard_transfer(transfer_id)
-
 
 
 class Clone:
@@ -341,7 +339,6 @@ class Clone:
                 body={"text": _qa_lines(questions, env.body.get("value")), "owner_answer": True},
             )
         )
-
 
     # ── turns ──
 

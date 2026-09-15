@@ -53,6 +53,7 @@ class _Rules:
     def allows(src):  # noqa: ARG004
         return False
 
+
 def _room(tmp_path):
     room = object.__new__(room_mod.RoomBase)
     room.host = "alice"
@@ -97,7 +98,9 @@ def test_comm_send_human_transfer_stages_and_sends(tmp_path):
     src = tmp_path / "plan.txt"
     src.write_text("hello")
     transport.upload_transfer = lambda path, name, to_host, progress=None: {
-        "id": "t9", "name": name, "size": src.stat().st_size
+        "id": "t9",
+        "name": name,
+        "size": src.stat().st_size,
     }
     out = room.comm_send_human("bob", file_path=str(src))
     assert out == {"ok": True, "kind": "transfer", "name": "plan.txt"}
@@ -127,12 +130,27 @@ def test_direct_download_lands_in_repo_root_even_from_foreign_cwd(tmp_path, monk
         staged[tid] = dest
         dest.write_bytes(b"payload")
 
-    room._local = type("L", (), {"transport": type("T", (), {
-        "download_transfer": staticmethod(_download),
-        "discard_transfer": staticmethod(lambda tid: staged.pop(tid, None)),
-    })()})()
-    env = Envelope(id="t1", src="bob:comm-alice", dst="alice:local", type="transfer",
-                   body={"id": "t1", "name": "报告.txt", "size": 7})
+    room._local = type(
+        "L",
+        (),
+        {
+            "transport": type(
+                "T",
+                (),
+                {
+                    "download_transfer": staticmethod(_download),
+                    "discard_transfer": staticmethod(lambda tid: staged.pop(tid, None)),
+                },
+            )()
+        },
+    )()
+    env = Envelope(
+        id="t1",
+        src="bob:comm-alice",
+        dst="alice:local",
+        type="transfer",
+        body={"id": "t1", "name": "报告.txt", "size": 7},
+    )
     out = room._direct_download(env, "bob")
     assert out["ok"] is True
     saved = Path(out["saved"])
@@ -145,16 +163,17 @@ def test_direct_download_lands_in_repo_root_even_from_foreign_cwd(tmp_path, monk
         saved.unlink(missing_ok=True)
 
 
-
-
 def test_courier_off_plain_chat_keeps_clone_prefix_and_merges(tmp_path, monkeypatch):
     monkeypatch.setattr(room_mod, "load_config", lambda: config_mod.Config(courier=False))
     room = _room(tmp_path)
-    room._comm_store.save("comm-bob", "comm: bob", [
-        {"role": "user", "content": "[bob:comm-alice] earlier"},
-    ])
-    chat = Envelope(src="bob:comm-alice", dst="alice:comm-bob", type="chat",
-                    body={"text": "hello"})
+    room._comm_store.save(
+        "comm-bob",
+        "comm: bob",
+        [
+            {"role": "user", "content": "[bob:comm-alice] earlier"},
+        ],
+    )
+    chat = Envelope(src="bob:comm-alice", dst="alice:comm-bob", type="chat", body={"text": "hello"})
     assert room._courier_direct(chat) is True
     msgs = room._comm_store.load("comm-bob")["messages"]
     assert len(msgs) == 2
@@ -173,10 +192,20 @@ def test_courier_off_human_transfer_card_names_the_human(tmp_path, monkeypatch):
             return True
 
     room.cards = _Cards()
-    env = Envelope(src="bob:comm-alice", dst="alice:comm-bob", type="transfer",
-                   body={"id": "t1", "name": "doc.md", "size": 5, "reason": "hi",
-                         "from": "bob:comm-alice", "from_human": True,
-                         "sender_name": "阿宝"})
+    env = Envelope(
+        src="bob:comm-alice",
+        dst="alice:comm-bob",
+        type="transfer",
+        body={
+            "id": "t1",
+            "name": "doc.md",
+            "size": 5,
+            "reason": "hi",
+            "from": "bob:comm-alice",
+            "from_human": True,
+            "sender_name": "阿宝",
+        },
+    )
     assert room._courier_direct(env) is True
     assert "来自 阿宝 的用户" in room.last_ask_body["question"]
 
@@ -184,11 +213,14 @@ def test_courier_off_human_transfer_card_names_the_human(tmp_path, monkeypatch):
 def test_courier_on_render_input_attributes_the_human():
     cfg = config_mod.Config()
     clone = Clone("alice:comm-bob", _FakeTransport(), cfg, sink=lambda *a, **k: None)
-    env = Envelope(src="bob:comm-alice", dst="alice:comm-bob", type="chat",
-                   body={"text": "在吗", "from_human": True, "sender_name": "阿宝"})
+    env = Envelope(
+        src="bob:comm-alice",
+        dst="alice:comm-bob",
+        type="chat",
+        body={"text": "在吗", "from_human": True, "sender_name": "阿宝"},
+    )
     assert clone.render_input(env) == "[来自 阿宝 的用户] 在吗"
-    plain = Envelope(src="bob:comm-alice", dst="alice:comm-bob", type="chat",
-                     body={"text": "在吗"})
+    plain = Envelope(src="bob:comm-alice", dst="alice:comm-bob", type="chat", body={"text": "在吗"})
     assert clone.render_input(plain) == "[bob:comm-alice] 在吗"
 
 
@@ -199,8 +231,7 @@ def test_concurrent_transcript_writers_keep_every_message(tmp_path):
 
     def _writer():
         for _ in range(n // 4):
-            room._append_comm_message("bob", {"role": "user",
-                                              "content": f"m{next(counter)}"})
+            room._append_comm_message("bob", {"role": "user", "content": f"m{next(counter)}"})
 
     threads = [threading.Thread(target=_writer) for _ in range(4)]
     for t in threads:
@@ -239,14 +270,24 @@ def _two_rooms(tmp_path, monkeypatch, courier):
     llm_alpha = _Scripted([LLMResult(content="alpha idle")])
     llm_beta = _Scripted([LLMResult(content="beta here")])
     server = RoomServer(
-        "alpha", config_mod.Config(api_key="k", endpoint="e", model="m"), NullSink(), "tok",
-        tmp_path / "d1", llm=llm_alpha, rules_path=tmp_path / "r1.json",
+        "alpha",
+        config_mod.Config(api_key="k", endpoint="e", model="m"),
+        NullSink(),
+        "tok",
+        tmp_path / "d1",
+        llm=llm_alpha,
+        rules_path=tmp_path / "r1.json",
     )
     server.start()
     client = RoomClient(
-        "beta", config_mod.Config(api_key="k", endpoint="e", model="m"), NullSink(),
-        f"http://127.0.0.1:{server.hub.port}", "tok",
-        llm=llm_beta, sessions_dir=tmp_path / "cs", rules_path=tmp_path / "r2.json",
+        "beta",
+        config_mod.Config(api_key="k", endpoint="e", model="m"),
+        NullSink(),
+        f"http://127.0.0.1:{server.hub.port}",
+        "tok",
+        llm=llm_beta,
+        sessions_dir=tmp_path / "cs",
+        rules_path=tmp_path / "r2.json",
     )
     client.start()
     return server, client, llm_beta
@@ -295,9 +336,7 @@ def test_courier_feedback_wakes_our_courier_and_never_the_peer(tmp_path, monkeyp
             )
         )
         msgs = (server._comm_store.load("comm-beta") or {})["messages"]
-        assert "[评价] 时间记错了，是 17:15 不是 17:30" in [
-            m.get("content") for m in msgs
-        ]
+        assert "[评价] 时间记错了，是 17:15 不是 17:30" in [m.get("content") for m in msgs]
         assert msgs[-1]["role"] == "assistant", msgs[-1]  # our courier answered it
         # nothing about it went out: no envelope, no mirror row, peer asleep
         assert server.hub.commlog.read("alpha", "beta") == []
@@ -328,13 +367,25 @@ def test_comm_log_mails_are_filtered_to_the_peer(tmp_path):
     mailbox = Mailbox(tmp_path / "mail")
     mailbox.deliver("alice", "bob:human", "", "for bob", peer="bob")
     mailbox.deliver("alice", "carol:human", "", "for carol", peer="carol")
-    room.hub = type("H", (), {"commlog": type("C", (), {
-        "read": staticmethod(lambda *_: []),
-    })(), "mail": mailbox})()
+    room.hub = type(
+        "H",
+        (),
+        {
+            "commlog": type(
+                "C",
+                (),
+                {
+                    "read": staticmethod(lambda *_: []),
+                },
+            )(),
+            "mail": mailbox,
+        },
+    )()
     rt = object.__new__(room_mod.RoomRuntime)
     rt.room = room
     out = rt.comm_log("bob")
     assert [m["body"] for m in out["mails"]] == ["for bob"]
+
 
 # ── courier mail wake: a human text message must reach the receiving courier ──
 #
@@ -417,6 +468,7 @@ def test_courier_on_human_mail_wakes_the_receiving_courier(tmp_path, monkeypatch
         client.stop()
         server.stop()
 
+
 def test_courier_wake_answers_the_human_end_to_end(tmp_path, monkeypatch):
     """Acceptance for the user-facing bug: with the courier ON, a human text
     message must come back answered. The answer rides send_peer — the only
@@ -468,6 +520,7 @@ def test_courier_wake_answers_the_human_end_to_end(tmp_path, monkeypatch):
     finally:
         client.stop()
         server.stop()
+
 
 def test_local_transport_mail_reads_this_host_mailbox(tmp_path):
     """Server-role rooms read mail through LocalTransport, not the HTTP client:
@@ -577,9 +630,7 @@ def test_a_failed_upload_marks_the_job(tmp_path):
     transport = _wire_clone(room)
     src = tmp_path / "x.bin"
     src.write_bytes(b"x")
-    transport.upload_transfer = lambda path, name, to_host, progress=None: {
-        "error": "hub is down"
-    }
+    transport.upload_transfer = lambda path, name, to_host, progress=None: {"error": "hub is down"}
     out = room.comm_send_human("bob", file_path=str(src), job="job-2")
     assert out == {"error": "hub is down"}
     job = room.xfer_jobs.get("job-2")

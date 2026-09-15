@@ -235,6 +235,7 @@ def test_consent_flow_wakes_blocked_write(room):
     record = hub.asks.get(comm_tools.consent_id)
     assert record is not None and record["status"] == "answered"
 
+
 def test_turn_end_hook_receives_transcript(room):
     """The room's recorder gets the full turn transcript (system + history +
     new turn) for the friend view."""
@@ -272,8 +273,9 @@ def test_courier_memory_injected_into_prompt(monkeypatch):
     from fungi import config as config_mod
 
     def fake_load(path=None):
-        return Config(api_key="k", endpoint="e", model="m",
-                      courier_memory="工作日白天在上课，没空回消息")
+        return Config(
+            api_key="k", endpoint="e", model="m", courier_memory="工作日白天在上课，没空回消息"
+        )
 
     monkeypatch.setattr(config_mod, "load_config", fake_load)
     clone = build_comm_clone("beta", "alpha", transport=None, cfg=CFG, sink=NullSink())
@@ -386,7 +388,10 @@ def test_inquire_never_blocks_the_courier_and_the_answer_arrives_as_a_turn(room)
     try:
         clients["alpha"].send(
             Envelope(
-                src="alpha:comm-beta", dst="beta:comm-alpha", type="chat", body={"text": "周六有空吗"}
+                src="alpha:comm-beta",
+                dst="beta:comm-alpha",
+                type="chat",
+                body={"text": "周六有空吗"},
             )
         )
         # The turn ends while nobody has answered: the courier is not parked.
@@ -396,7 +401,9 @@ def test_inquire_never_blocks_the_courier_and_the_answer_arrives_as_a_turn(room)
         assert ask.dst == "beta:local"  # its OWN host's card, not the peer's
         assert ask.body["questions"][0]["question"] == "周六见面吗？"
         asked = [m for m in turns[0][1] if m.get("role") == "tool"]
-        assert any("ASKED" in str(m.get("content")) for m in asked), "the tool did not return at once"
+        assert any("ASKED" in str(m.get("content")) for m in asked), (
+            "the tool did not return at once"
+        )
 
         # A peer message that arrives while the question is still open is served.
         clients["alpha"].send(
@@ -405,9 +412,9 @@ def test_inquire_never_blocks_the_courier_and_the_answer_arrives_as_a_turn(room)
             )
         )
         assert _wait(lambda: len(turns) == 2), "the unanswered ask held the next peer chat"
-        assert any(
-            e.type == "chat" and e.body.get("text") == "收到" for e in transport.sent
-        ), "the courier never reached the peer while the card waited"
+        assert any(e.type == "chat" and e.body.get("text") == "收到" for e in transport.sent), (
+            "the courier never reached the peer while the card waited"
+        )
 
         # The owner answers (what RoomBase._send_answer sends): a new turn, with
         # the question carried along so the answer stands on its own.

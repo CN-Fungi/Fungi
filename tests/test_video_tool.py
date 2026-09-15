@@ -23,10 +23,26 @@ FAKE_CARD = {
         {"id": 1, "t": 9.0, "segment_id": 1, "caption": ""},
     ],
     "segments": [
-        {"id": 0, "start": 0.0, "end": 5.0, "text": "hello world", "speaker": None,
-         "words": [], "frame_id": 2, "scene_index": 0},
-        {"id": 1, "start": 5.0, "end": 12.0, "text": "goodbye", "speaker": "host",
-         "words": [], "frame_id": 9, "scene_index": 0},
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 5.0,
+            "text": "hello world",
+            "speaker": None,
+            "words": [],
+            "frame_id": 2,
+            "scene_index": 0,
+        },
+        {
+            "id": 1,
+            "start": 5.0,
+            "end": 12.0,
+            "text": "goodbye",
+            "speaker": "host",
+            "words": [],
+            "frame_id": 9,
+            "scene_index": 0,
+        },
     ],
     "embeddings": [],
 }
@@ -109,8 +125,6 @@ def test_video_multi_image_tool_content_upgrade(vidsense_env):
     assert _tool_content("plain text") == "plain text"
 
 
-
-
 def test_video_missing_file(vidsense_env):
     root, _video = vidsense_env
     out = tool_video(str(root / "nope.mp4"))
@@ -161,9 +175,7 @@ def test_video_registered_and_dispatchable():
     assert dispatch("video", {}).startswith("ERROR: Missing required argument")
 
 
-def test_video_missing_model_refuses_and_points_to_downloader(
-    vidsense_env, monkeypatch
-):
+def test_video_missing_model_refuses_and_points_to_downloader(vidsense_env, monkeypatch):
     """The tool never downloads on demand: missing weights -> guidance ERROR."""
     _root, video = vidsense_env
     ready = dict(_ALL_READY) | {"whisper": False}
@@ -173,9 +185,7 @@ def test_video_missing_model_refuses_and_points_to_downloader(
     assert "download_video_models.py" in out and "whisper" in out
 
 
-def test_video_missing_non_healable_offers_opt_in_setup_recipe(
-    vidsense_env, monkeypatch
-):
+def test_video_missing_non_healable_offers_opt_in_setup_recipe(vidsense_env, monkeypatch):
     """torch/ffmpeg missing: opt-in recipe (user agrees first), pip + mirror,
     no model-download step when weights are all cached."""
     _root, video = vidsense_env
@@ -183,11 +193,11 @@ def test_video_missing_non_healable_offers_opt_in_setup_recipe(
     monkeypatch.setattr("fungi.tools.video._video_ready", lambda: ready)
     out = tool_video(str(video))
     assert out.startswith("ERROR: video not ready, missing: ffmpeg, torch")
-    assert "ONLY after the user agrees" in out          # 不强制装
-    assert "static-ffmpeg" in out                        # ffmpeg 经 pip 配齐
-    assert "tuna.tsinghua.edu.cn" in out                 # 镜像
-    assert "download_video_models" not in out            # 权重都在: 无脚本步骤
-    assert "faster-whisper" not in out                   # 没缺就不装
+    assert "ONLY after the user agrees" in out  # 不强制装
+    assert "static-ffmpeg" in out  # ffmpeg 经 pip 配齐
+    assert "tuna.tsinghua.edu.cn" in out  # 镜像
+    assert "download_video_models" not in out  # 权重都在: 无脚本步骤
+    assert "faster-whisper" not in out  # 没缺就不装
 
 
 def test_model_cached_reads_hf_snapshot_layout(tmp_path, monkeypatch):
@@ -220,9 +230,7 @@ def test_video_demo_path_runs_full_pipeline(vidsense_env, monkeypatch):
 def test_demo_video_generates_once_then_caches(tmp_path, monkeypatch):
     """_demo_video: ffmpeg lavfi generation is cached under PROJECT_ROOT/data."""
     monkeypatch.setattr("fungi.tools.video.PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(
-        "fungi.tools.video.shutil.which", lambda _name: "C:/ffmpeg/ffmpeg.exe"
-    )
+    monkeypatch.setattr("fungi.tools.video.shutil.which", lambda _name: "C:/ffmpeg/ffmpeg.exe")
     calls = []
 
     def fake_run(cmd, **_kw):
@@ -235,7 +243,6 @@ def test_demo_video_generates_once_then_caches(tmp_path, monkeypatch):
     assert first == second == tmp_path / "data" / "demo_video.mp4"
     assert len(calls) == 1 and calls[0][0] == "C:/ffmpeg/ffmpeg.exe"
     assert any("testsrc2" in a for a in calls[0]) and any("sine" in a for a in calls[0])
-
 
 
 class _FakeVidsenseProc:
@@ -298,7 +305,6 @@ def test_video_still_times_out_when_not_aborted(vidsense_env, monkeypatch):
     assert out.startswith("ERROR: VidSense timed out")
 
 
-
 def test_dispatch_injects_should_abort_only_when_accepted(monkeypatch):
     """Tools declaring `should_abort` get the predicate; others stay untouched."""
 
@@ -309,9 +315,7 @@ def test_dispatch_injects_should_abort_only_when_accepted(monkeypatch):
         captured["path"] = path
         return "ok"
 
-    monkeypatch.setitem(
-        TOOLS, "video", {"schema": TOOLS["video"]["schema"], "fn": fake_video}
-    )
+    monkeypatch.setitem(TOOLS, "video", {"schema": TOOLS["video"]["schema"], "fn": fake_video})
     out = dispatch("video", {"path": "x"}, should_abort=lambda: True)
     assert out == "ok" and captured["abort"]() is True
 
@@ -322,8 +326,6 @@ def test_dispatch_injects_should_abort_only_when_accepted(monkeypatch):
         captured_plain["path"] = path
         return "text"
 
-    monkeypatch.setitem(
-        TOOLS, "read", {"schema": TOOLS["read"]["schema"], "fn": fake_read}
-    )
+    monkeypatch.setitem(TOOLS, "read", {"schema": TOOLS["read"]["schema"], "fn": fake_read})
     assert dispatch("read", {"path": "x"}, should_abort=lambda: True) == "text"
     assert captured_plain == {"called": True, "path": "x"}

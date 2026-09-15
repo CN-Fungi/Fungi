@@ -246,9 +246,7 @@ def test_the_desktop_control_switch_sits_under_experimental_and_disarms_when_off
     assert config_bytes() == before
 
 
-def test_the_ghostworld_switch_sits_under_extensions_and_disarms_when_off(
-    window, monkeypatch
-):
+def test_the_ghostworld_switch_sits_under_extensions_and_disarms_when_off(window, monkeypatch):
     """设置页的角色控制开关（spec §43）：即时写盘；关掉时立刻结束监视进程。"""
     from fungi.gui import config as config_page
     from fungi.tools import ghostworld

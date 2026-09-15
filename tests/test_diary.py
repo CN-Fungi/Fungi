@@ -9,6 +9,7 @@ def test_write_then_read_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(diary, "DIARY_DIR", tmp_path / "diary")
     out = diary.diary_tool({"action": "write", "text": "今天用户夸我了，有点开心。"})
     import datetime
+
     assert datetime.date.today().isoformat() + ".md" in out
     page = tmp_path / "diary"
     files = list(page.glob("*.md"))

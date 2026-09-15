@@ -166,6 +166,7 @@ def tool_bash(
         _unlink_quietly(out_path)
         _unlink_quietly(err_path)
 
+
 # ---------------------------------------------------------------------------
 # Session bash: REPL-style read/write interaction with a child process.
 # bash_start launches with stdin=PIPE and returns at once; bash_send feeds one
@@ -238,7 +239,7 @@ class _BashSession:
         exactly what the agent needs to see."""
         with self.buf_lock:
             text = "".join(self.chunks)
-        extra = text[self.read_pos:]
+        extra = text[self.read_pos :]
         self.read_pos = len(text)
         return extra
 
@@ -297,8 +298,7 @@ def _reap_sessions_once(force_idle_check: bool = False) -> None:
         victims = [
             s
             for s in _SESSIONS.values()
-            if s.aborted()
-            or (force_idle_check and now - s.last_activity > BASH_SESSION_IDLE)
+            if s.aborted() or (force_idle_check and now - s.last_activity > BASH_SESSION_IDLE)
         ]
         for s in victims:
             _SESSIONS.pop(s.id, None)
@@ -330,7 +330,9 @@ def _start_session(
         return "ERROR: stdin_arg must be 'nul' or 'pipe'"
     bat = Path(tempfile.gettempdir()) / f"fungi-{os.getpid()}-{uuid.uuid4().hex[:8]}.bat"
     try:
-        bat.write_text(f"@echo off\r\nchcp 65001 >nul\r\n{command}\r\n", encoding="utf-8", newline="")
+        bat.write_text(
+            f"@echo off\r\nchcp 65001 >nul\r\n{command}\r\n", encoding="utf-8", newline=""
+        )
         proc = subprocess.Popen(
             ["cmd.exe", "/c", str(bat)],
             stdout=subprocess.PIPE,
@@ -362,9 +364,14 @@ def _start_session(
             break
         time.sleep(0.1)
     out, _ = s.snapshot(0)
-    kind = "interactive (bash_send can feed input)" if s.interactive else "stdin=NUL: interactive input sees EOF"
+    kind = (
+        "interactive (bash_send can feed input)"
+        if s.interactive
+        else "stdin=NUL: interactive input sees EOF"
+    )
     s.read_pos = len(out)  # what start already showed; sends return only newer output
     return f"id={sid} ({kind})\n{out.strip() or '(no output yet)'}"
+
 
 def tool_bash_start(
     command: str,
@@ -405,7 +412,7 @@ def tool_bash_send(id: str, text: str = "") -> str:
         deadline = time.monotonic() + SEND_READ_WAIT
         seen = s.read_pos  # watermark must move in-loop: comparing against
         while time.monotonic() < deadline:  # the frozen read_pos extends the
-            time.sleep(0.15)                # deadline forever once output flows
+            time.sleep(0.15)  # deadline forever once output flows
             _, total = s.snapshot(0)
             if total > seen:
                 seen = total

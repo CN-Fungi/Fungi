@@ -272,9 +272,7 @@ def test_room_turn_persists_answered_asks(server_room):
 
     out: dict = {}
     th = threading.Thread(
-        target=lambda: out.update(
-            reply=agent.extra_tools["inquire"].fn({"question": "proceed?"})
-        ),
+        target=lambda: out.update(reply=agent.extra_tools["inquire"].fn({"question": "proceed?"})),
         daemon=True,
     )
     th.start()
@@ -581,22 +579,35 @@ def test_chat_turn_after_a_clone_rebuild_keeps_the_earlier_transcript(server_roo
         asks: list = []
 
     room = server_room
-    room._record_comm_turn("beta", "chat", [
-        {"role": "system", "content": "sys"},
-        {"role": "user", "content": "[beta:comm-alpha] 早先的留言"},
-        {"role": "assistant", "content": "早先的回复"},
-    ], FakeAgent)
+    room._record_comm_turn(
+        "beta",
+        "chat",
+        [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "[beta:comm-alpha] 早先的留言"},
+            {"role": "assistant", "content": "早先的回复"},
+        ],
+        FakeAgent,
+    )
     # rebuilt clone: its history only knows this turn
-    room._record_comm_turn("beta", "chat", [
-        {"role": "system", "content": "sys"},
-        {"role": "user", "content": "[beta:comm-alpha] 新留言"},
-        {"role": "assistant", "content": "新回复"},
-    ], FakeAgent)
+    room._record_comm_turn(
+        "beta",
+        "chat",
+        [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "[beta:comm-alpha] 新留言"},
+            {"role": "assistant", "content": "新回复"},
+        ],
+        FakeAgent,
+    )
 
     msgs = room.webui_runtime().comm_log("beta")["messages"]
     assert [m["content"] for m in msgs] == [
-        "sys", "[beta:comm-alpha] 早先的留言", "早先的回复",
-        "[beta:comm-alpha] 新留言", "新回复",
+        "sys",
+        "[beta:comm-alpha] 早先的留言",
+        "早先的回复",
+        "[beta:comm-alpha] 新留言",
+        "新回复",
     ]
 
 
@@ -629,8 +640,13 @@ def test_chat_turn_with_cumulative_history_does_not_duplicate(server_room):
     )
 
     msgs = room.webui_runtime().comm_log("beta")["messages"]
-    assert [m["content"] for m in msgs] == ["sys", "[beta:comm-alpha] one", "two",
-                                            "[beta:comm-alpha] three", "four"]
+    assert [m["content"] for m in msgs] == [
+        "sys",
+        "[beta:comm-alpha] one",
+        "two",
+        "[beta:comm-alpha] three",
+        "four",
+    ]
     # the older rows kept the ts they were first stored with
     before = [m["ts"] for m in stamped if m["role"] != "system"]
     after = [m["ts"] for m in msgs if m["role"] != "system"]
@@ -719,15 +735,24 @@ def test_delegate_roundtrip_between_server_and_client(tmp_path):
     from fungi.llm import LLMResult  # noqa: F401
 
     server = RoomServer(
-        "alpha", CFG, NullSink(), "tok", tmp_path / "d1",
-        llm=_pong_llm, rules_path=tmp_path / "r1.json",
+        "alpha",
+        CFG,
+        NullSink(),
+        "tok",
+        tmp_path / "d1",
+        llm=_pong_llm,
+        rules_path=tmp_path / "r1.json",
     )
     server.start()
     try:
         client = RoomClient(
-            "beta", CFG, NullSink(),
-            f"http://127.0.0.1:{server.hub.port}", "tok",
-            llm=_pong_llm, sessions_dir=tmp_path / "cs",
+            "beta",
+            CFG,
+            NullSink(),
+            f"http://127.0.0.1:{server.hub.port}",
+            "tok",
+            llm=_pong_llm,
+            sessions_dir=tmp_path / "cs",
             rules_path=tmp_path / "r2.json",
         )
         client.start()
@@ -767,25 +792,39 @@ def test_comm_turn_streams_live_events_to_friend_view(tmp_path):
     def gated_llm(messages, _tools):
         if not calls:
             calls.append(1)
-            return LLMResult(content="", tool_calls=[{
-                "id": "t1",
-                "type": "function",
-                "function": {"name": "send_peer", "arguments": '{"text": "hi"}'},
-            }])
+            return LLMResult(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "t1",
+                        "type": "function",
+                        "function": {"name": "send_peer", "arguments": '{"text": "hi"}'},
+                    }
+                ],
+            )
         calls.append(1)
         release.wait(timeout=10)
         return LLMResult(content="done")
 
     server = RoomServer(
-        "alpha", CFG, NullSink(), "tok", tmp_path / "d1",
-        llm=gated_llm, rules_path=tmp_path / "r1.json",
+        "alpha",
+        CFG,
+        NullSink(),
+        "tok",
+        tmp_path / "d1",
+        llm=gated_llm,
+        rules_path=tmp_path / "r1.json",
     )
     server.start()
     try:
         client = RoomClient(
-            "beta", CFG, NullSink(),
-            f"http://127.0.0.1:{server.hub.port}", "tok",
-            llm=gated_llm, sessions_dir=tmp_path / "cs",
+            "beta",
+            CFG,
+            NullSink(),
+            f"http://127.0.0.1:{server.hub.port}",
+            "tok",
+            llm=gated_llm,
+            sessions_dir=tmp_path / "cs",
             rules_path=tmp_path / "r2.json",
         )
         client.start()
@@ -809,15 +848,16 @@ def test_comm_turn_streams_live_events_to_friend_view(tmp_path):
             release.set()
             th.join(timeout=25)
             assert not th.is_alive(), "delegate never returned"
-            assert _wait(
-                lambda: rt.comm_log("alpha")["live"] == [], timeout_s=10
-            ), "live tape not cleared after the turn"
+            assert _wait(lambda: rt.comm_log("alpha")["live"] == [], timeout_s=10), (
+                "live tape not cleared after the turn"
+            )
             data = client._comm_store.load("comm-alpha")
             assert data and data["messages"], "turn never reached the durable transcript"
         finally:
             client.stop()
     finally:
         server.stop()
+
 
 # ── turn persistence vs refresh/delete races ──
 
@@ -838,8 +878,13 @@ def gated_room(tmp_path):
         return LLMResult(content=f"reply-{len(calls)}")
 
     room = RoomServer(
-        "alpha", CFG, NullSink(), "tok", tmp_path / "data",
-        llm=slow_llm, rules_path=tmp_path / "rules.json",
+        "alpha",
+        CFG,
+        NullSink(),
+        "tok",
+        tmp_path / "data",
+        llm=slow_llm,
+        rules_path=tmp_path / "rules.json",
     )
     room.start()
     yield room, gate, calls
@@ -877,7 +922,9 @@ def test_turn_persists_user_message_while_streaming(gated_room):
     try:
         port = server.server_address[1]
         thread = threading.Thread(
-            target=lambda: _post(port, "/chat", {"message": "hello there", "sessionId": None}).read(),
+            target=lambda: _post(
+                port, "/chat", {"message": "hello there", "sessionId": None}
+            ).read(),
             daemon=True,
         )
         thread.start()
@@ -971,9 +1018,7 @@ def test_delete_running_session_leaves_it_deleted(gated_room):
 
 
 def _read_events(port, sid, sink_lines):
-    resp = urllib.request.urlopen(
-        f"http://127.0.0.1:{port}/events?sessionId={sid}", timeout=15
-    )
+    resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/events?sessionId={sid}", timeout=15)
     for raw in resp:
         line = raw.decode("utf-8").strip()
         if line:
@@ -997,7 +1042,9 @@ def test_events_replays_recorded_events_then_done(server_room):
             {"type": "done", "content": None},
         ]
         lines: list[dict] = []
-        reader = threading.Thread(target=_read_events, args=(port, "replay-sid", lines), daemon=True)
+        reader = threading.Thread(
+            target=_read_events, args=(port, "replay-sid", lines), daemon=True
+        )
         reader.start()
         reader.join(timeout=10)
         assert not reader.is_alive(), "reader never saw the done marker"
@@ -1076,11 +1123,13 @@ def test_events_follows_running_turn_and_reports_running_flag(gated_room):
         reader = threading.Thread(target=_read_events, args=(port, sid, lines), daemon=True)
         reader.start()
         gate.set()
+
         def flag() -> bool:
             payload = json.loads(
                 urllib.request.urlopen(f"http://127.0.0.1:{port}/sessions", timeout=10).read()
             )
             return {s["id"]: s for s in payload["sessions"]}[sid]["running"]
+
         assert _wait(lambda: not flag()), "running flag stayed set after the turn finished"
     finally:
         gate.set()
@@ -1112,8 +1161,13 @@ def test_tape_grace_pop_does_not_kill_next_turns_tape(tmp_path, monkeypatch):
         return LLMResult(content=f"reply-{len(calls)}")
 
     room = RoomServer(
-        "alpha", CFG, NullSink(), "tok", tmp_path / "data",
-        llm=slow_llm, rules_path=tmp_path / "rules.json",
+        "alpha",
+        CFG,
+        NullSink(),
+        "tok",
+        tmp_path / "data",
+        llm=slow_llm,
+        rules_path=tmp_path / "rules.json",
     )
     room.start()
     server = _webui_server(room)
@@ -1180,33 +1234,47 @@ def test_background_spawn_report_reactivates_session(tmp_path):
             return LLMResult(content="42")  # the child task agent
         orch_calls.append(1)
         if len(orch_calls) == 1:
-            return LLMResult(tool_calls=[{
-                "id": "t1",
-                "type": "function",
-                "function": {
-                    "name": "spawn",
-                    "arguments": json.dumps({"goal": "count slowly", "reply_format": "a number"}),
-                },
-            }])
+            return LLMResult(
+                tool_calls=[
+                    {
+                        "id": "t1",
+                        "type": "function",
+                        "function": {
+                            "name": "spawn",
+                            "arguments": json.dumps(
+                                {"goal": "count slowly", "reply_format": "a number"}
+                            ),
+                        },
+                    }
+                ]
+            )
         return LLMResult(content="the answer is 42")
 
     room = RoomServer(
-        "alpha", CFG, NullSink(), "tok", tmp_path / "data",
-        llm=routed_llm, rules_path=tmp_path / "rules.json",
+        "alpha",
+        CFG,
+        NullSink(),
+        "tok",
+        tmp_path / "data",
+        llm=routed_llm,
+        rules_path=tmp_path / "rules.json",
     )
     room.start()
     server = _webui_server(room)
     try:
         port = server.server_address[1]
-        body = _post(port, "/chat", {"message": "fan out", "sessionId": None}).read().decode("utf-8")
+        body = (
+            _post(port, "/chat", {"message": "fan out", "sessionId": None}).read().decode("utf-8")
+        )
         sid = next(
             json.loads(line)["content"]
             for line in body.splitlines()
             if line and json.loads(line)["type"] == "sessionId"
         )
         assert sid
-        assert _wait(lambda: len(_PENDING_SPAWNS.get(sid, [])) == 1), \
+        assert _wait(lambda: len(_PENDING_SPAWNS.get(sid, [])) == 1), (
             "finished background spawn never reached the pending registry"
+        )
 
         with urllib.request.urlopen(
             f"http://127.0.0.1:{port}/spawn-pending?sessionId={sid}", timeout=10
@@ -1217,8 +1285,11 @@ def test_background_spawn_report_reactivates_session(tmp_path):
         assert '"done"' in resume_body
 
         stored = room.webui_runtime().sessions_load(sid)
-        report = next(m for m in stored["messages"] if m["role"] == "user"
-                      and m["content"].startswith("[background report]"))
+        report = next(
+            m
+            for m in stored["messages"]
+            if m["role"] == "user" and m["content"].startswith("[background report]")
+        )
         assert "42" in report["content"]
         rec = stored["subagents"][0]
         assert rec["status"] == "done" and rec["answer"] == "42"
@@ -1232,6 +1303,7 @@ def test_background_spawn_report_reactivates_session(tmp_path):
         server.shutdown()
         server.server_close()
         room.stop()
+
 
 def test_stop_discards_pending_reports_and_aborts_running_spawn(tmp_path):
     """Stop means stop: /stop clears the pending registry (no 3s-later
@@ -1252,24 +1324,37 @@ def test_stop_discards_pending_reports_and_aborts_running_spawn(tmp_path):
             child_started.set()
             child_go.wait(timeout=15)  # hold the child until the test stops it
             return LLMResult(content="42")
-        return LLMResult(tool_calls=[{
-            "id": "t1",
-            "type": "function",
-            "function": {
-                "name": "spawn",
-                "arguments": json.dumps({"goal": "count slowly", "reply_format": "a number"}),
-            },
-        }])
+        return LLMResult(
+            tool_calls=[
+                {
+                    "id": "t1",
+                    "type": "function",
+                    "function": {
+                        "name": "spawn",
+                        "arguments": json.dumps(
+                            {"goal": "count slowly", "reply_format": "a number"}
+                        ),
+                    },
+                }
+            ]
+        )
 
     room = RoomServer(
-        "alpha", CFG, NullSink(), "tok", tmp_path / "data",
-        llm=routed_llm, rules_path=tmp_path / "rules.json",
+        "alpha",
+        CFG,
+        NullSink(),
+        "tok",
+        tmp_path / "data",
+        llm=routed_llm,
+        rules_path=tmp_path / "rules.json",
     )
     room.start()
     server = _webui_server(room)
     try:
         port = server.server_address[1]
-        body = _post(port, "/chat", {"message": "fan out", "sessionId": None}).read().decode("utf-8")
+        body = (
+            _post(port, "/chat", {"message": "fan out", "sessionId": None}).read().decode("utf-8")
+        )
         sid = next(
             json.loads(line)["content"]
             for line in body.splitlines()
@@ -1281,8 +1366,9 @@ def test_stop_discards_pending_reports_and_aborts_running_spawn(tmp_path):
         assert json.loads(stop_body)["ok"] is True
 
         child_go.set()  # let the child finish; it must NOT re-add itself
-        assert _wait(lambda: not _PENDING_SPAWNS.get(sid)), \
+        assert _wait(lambda: not _PENDING_SPAWNS.get(sid)), (
             "aborted background spawn re-registered itself after /stop"
+        )
         with urllib.request.urlopen(
             f"http://127.0.0.1:{port}/spawn-pending?sessionId={sid}", timeout=10
         ) as resp:

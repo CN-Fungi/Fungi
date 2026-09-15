@@ -61,6 +61,7 @@ def build_local_clone(
     # Room-mode WebUI turns are built from these clone tools (not
     # build_orchestrator) — the todo tool must live here to be visible.
     from .. import todos  # noqa: PLC0415 (deferred like the other extras)
+
     tools.update(todos.bound())
     # GhostWorld character control (spec §43): attached here (not per turn) so
     # the clone's own inbox turns — the ones a player's speech starts — carry
@@ -69,9 +70,16 @@ def build_local_clone(
         from ..tools import ghostworld  # noqa: PLC0415
 
         tools.update(ghostworld.bound(cfg))
-    prompt = (system_prompt or LOCAL_SYSTEM_PROMPT.format(
-        host=host, store_hint=STORE_LOCAL if local_store else STORE_REMOTE
-    )) + todos.RULES + FILE_OPS_RULE
+    prompt = (
+        (
+            system_prompt
+            or LOCAL_SYSTEM_PROMPT.format(
+                host=host, store_hint=STORE_LOCAL if local_store else STORE_REMOTE
+            )
+        )
+        + todos.RULES
+        + FILE_OPS_RULE
+    )
     clone = Clone(
         addr,
         transport,

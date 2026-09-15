@@ -182,17 +182,20 @@ def test_the_modal_renders_one_labelled_step_per_hop(page):
     )
     assert drawn == "512 B / 1.0 KB · 50%|50%"
     page.evaluate("() => Xfer.progress(1, 3 * 1024 * 1024, 6 * 1024 * 1024)")
-    assert page.evaluate(
-        "() => document.querySelectorAll('#xfer-steps .xf-note')[1].textContent"
-    ) == "3.0 MB / 6.0 MB · 50%"
+    assert (
+        page.evaluate("() => document.querySelectorAll('#xfer-steps .xf-note')[1].textContent")
+        == "3.0 MB / 6.0 MB · 50%"
+    )
 
     page.evaluate("() => Xfer.finish('已发出，等待对方接收')")
-    assert page.evaluate(
-        "() => document.querySelectorAll('#xfer-steps .xf-step')[1].className"
-    ) == "xf-step done"
-    assert page.evaluate(
-        "() => document.querySelectorAll('#xfer-steps .xf-bar > i')[1].style.width"
-    ) == "100%"
+    assert (
+        page.evaluate("() => document.querySelectorAll('#xfer-steps .xf-step')[1].className")
+        == "xf-step done"
+    )
+    assert (
+        page.evaluate("() => document.querySelectorAll('#xfer-steps .xf-bar > i')[1].style.width")
+        == "100%"
+    )
     page.evaluate("() => Xfer.close()")
 
 

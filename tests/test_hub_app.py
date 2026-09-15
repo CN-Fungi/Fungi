@@ -271,7 +271,9 @@ def test_send_rejects_hosts_that_would_become_file_names(room):
             {
                 "token": "room-token",
                 "envelope": Envelope(
-                    src="alpha:local", dst=dst, type="mail",
+                    src="alpha:local",
+                    dst=dst,
+                    type="mail",
                     body={"from": "alpha:human", "text": "hi"},
                 ).serialize(),
             },

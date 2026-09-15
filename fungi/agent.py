@@ -48,7 +48,8 @@ FILE_OPS_RULE = """\
   with the tools above: read / write / edit.
 """
 
-SYSTEM_PROMPT = """\
+SYSTEM_PROMPT = (
+    """\
 You are a coding assistant. You have tools to read, write, edit files, run
 shell commands, search code, and access the web. Core rules:
 
@@ -71,7 +72,9 @@ shell commands, search code, and access the web. Core rules:
   running instead of staying silent.
 - To edit: use `edit`. NEVER `bash echo >` to overwrite files.
 - `bash` is ONLY for: running programs, builds, tests, git, pip, npm, python, etc.
-""" + FILE_OPS_RULE + """\
+"""
+    + FILE_OPS_RULE
+    + """\
 - When editing, match the existing code style. Use the edit tool (old_string /
   new_string) for surgical changes, not rewrite the whole file.
 - When you need up-to-date information, use `web_search` to find sources,
@@ -85,6 +88,7 @@ shell commands, search code, and access the web. Core rules:
 
 - When answering in the browser, use full markdown: code blocks, lists, bold, etc.
 """
+)
 
 
 @dataclass
@@ -284,9 +288,7 @@ class Agent:
         name = tc["function"]["name"]
         if self._aborted():  # stop already pressed: don't launch another tool
             self.sink.emit("tool_result", {"content": "(Aborted)", "id": tc["id"]})
-            messages.append(
-                {"role": "tool", "tool_call_id": tc["id"], "content": "(Aborted)"}
-            )
+            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": "(Aborted)"})
             return
         raw_args = tc["function"]["arguments"]
         args, parse_error = parse_tool_args(raw_args)

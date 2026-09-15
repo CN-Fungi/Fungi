@@ -32,12 +32,15 @@ def test_upcoming_orders_overdue_first(tmp_path, monkeypatch):
     today = dt.date(2026, 9, 10)
     orig = todos.load
     monkeypatch.setattr(todos, "load", lambda path=None: orig(p))
-    _write(p, {
-        "2026-09-09": ["yesterday"],
-        "2026-09-10": ["today"],
-        "2026-09-24": ["later"],
-        "2026-08-20": ["recently overdue"],
-    })
+    _write(
+        p,
+        {
+            "2026-09-09": ["yesterday"],
+            "2026-09-10": ["today"],
+            "2026-09-24": ["later"],
+            "2026-08-20": ["recently overdue"],
+        },
+    )
     got = todos.upcoming(today=today)
     assert [d for d, _ in got] == ["2026-08-20", "2026-09-09", "2026-09-10", "2026-09-24"]
 
@@ -50,7 +53,9 @@ def test_todo_tool_add_list_remove(tmp_path, monkeypatch):
     assert "added" in todos.todo_tool({"action": "add", "date": "2026-09-12", "text": "去看牙"})
     assert "error" in todos.todo_tool({"action": "add", "date": "not-a-date", "text": "x"})
     assert "2026-09-12" in todos.todo_tool({"action": "list"})
-    assert "removed" in todos.todo_tool({"action": "remove", "date": "2026-09-12", "text": "去看牙"})
+    assert "removed" in todos.todo_tool(
+        {"action": "remove", "date": "2026-09-12", "text": "去看牙"}
+    )
     assert "no items" in todos.todo_tool(
         {"action": "remove", "date": "2026-09-12", "text": "去看牙"}
     )

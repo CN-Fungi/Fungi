@@ -30,9 +30,7 @@ def test_public_docs_write_needs_consent_read_free(store):
         store.resolve("alpha", "public/docs/manual.md", mutating=True)
     ask = store.asks.open("alpha", {"action": "write", "path": "public/docs/manual.md"})
     store.asks.resolve(ask["ask_id"], value="yes")
-    p = store.resolve(
-        "alpha", "public/docs/manual.md", consent_id=ask["ask_id"], mutating=True
-    )
+    p = store.resolve("alpha", "public/docs/manual.md", consent_id=ask["ask_id"], mutating=True)
     store.write(p, "v1")
     assert store.read(store.resolve("beta", "public/docs/manual.md")) == "v1"
     # plain public/ files stay free for the transfer protocol

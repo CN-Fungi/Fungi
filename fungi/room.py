@@ -49,12 +49,11 @@ HEARTBEAT_INTERVAL_S = 10.0
 MAX_TRANSCRIPT_MESSAGES = 400  # friend-view transcript cap (messages per peer)
 
 
-
 def _card_conv(src: str) -> str:
     """Friend conversation an ask envelope belongs to: the envelope src is
     the raising comm clone ("<host>:comm-<peer>"); its agent suffix names it."""
     host_part, _, agent_part = str(src).partition(":")
-    return agent_part[len("comm-"):] if agent_part.startswith("comm-") else host_part
+    return agent_part[len("comm-") :] if agent_part.startswith("comm-") else host_part
 
 
 def _is_consent(body: dict) -> bool:
@@ -150,15 +149,26 @@ def merge_comm_history(prev: list[dict], fresh: list[dict], ts: float | None = N
             j += 1  # a row only the store has (reasoning / tool call): it keeps its place
         if j == len(stored_c):
             continue  # the clone has it, the store does not (yet)
-        merged[j] = {**row, **{k: v for k, v in stored[j].items() if k != "ts"},
-                     "ts": stored[j].get("ts", now)}
+        merged[j] = {
+            **row,
+            **{k: v for k, v in stored[j].items() if k != "ts"},
+            "ts": stored[j].get("ts", now),
+        }
         si, last_claim = j + 1, ci
-    return merged + [{**m, "ts": now} for m in carried[last_claim + 1:]]
+    return merged + [{**m, "ts": now} for m in carried[last_claim + 1 :]]
 
 
 MAX_LIVE_EVENTS = 400  # per-peer live turn tape cap (friend-view spectating)
-_LIVE_EVENT_KINDS = {"text", "reasoning", "reasoning_start", "reasoning_end",
-                     "tool", "tool_result", "status", "error"}
+_LIVE_EVENT_KINDS = {
+    "text",
+    "reasoning",
+    "reasoning_start",
+    "reasoning_end",
+    "tool",
+    "tool_result",
+    "status",
+    "error",
+}
 
 
 class HostPoller:
@@ -462,7 +472,6 @@ class RoomBase:
                 asks=prev.get("asks") or [],
             )
 
-
     # ── incoming asks: auto-allow -> cards + notification ──
 
     def _on_ask(self, env: Envelope) -> None:
@@ -579,9 +588,16 @@ class RoomBase:
     def _direct_download(self, env: Envelope, src_host: str) -> dict:
         """Courier-off accepted transfer: land the bytes like receive_transfer."""
         body = env.body
-        dest_dir = Path(self.cfg.inbox_dir) / src_host if self.cfg.inbox_dir else PROJECT_ROOT / "inbox" / src_host
+        dest_dir = (
+            Path(self.cfg.inbox_dir) / src_host
+            if self.cfg.inbox_dir
+            else PROJECT_ROOT / "inbox" / src_host
+        )
         dest_dir.mkdir(parents=True, exist_ok=True)
-        stem, suffix = Path(safe_name(str(body.get("name") or "file"))).stem, Path(safe_name(str(body.get("name") or "file"))).suffix
+        stem, suffix = (
+            Path(safe_name(str(body.get("name") or "file"))).stem,
+            Path(safe_name(str(body.get("name") or "file"))).suffix,
+        )
         dest = dest_dir / f"{stem}{suffix}"
         n = 1
         while dest.exists():
@@ -875,9 +891,7 @@ class RoomServer(RoomBase):
         display="",
         port: int = 0,
     ):
-        super().__init__(
-            host, cfg, sink, llm=llm, rules_path=rules_path, display=display
-        )
+        super().__init__(host, cfg, sink, llm=llm, rules_path=rules_path, display=display)
         self.hub = Hub(host, token, data_root, max_file_mb=cfg.max_file_mb, port=port)
         self._monitor: threading.Thread | None = None
         # Friend-view transcripts live next to the hub's own sessions.
@@ -953,9 +967,7 @@ class RoomClient(RoomBase):
         display="",
         sessions_dir: Path | None = None,
     ):
-        super().__init__(
-            host, cfg, sink, llm=llm, rules_path=rules_path, display=display
-        )
+        super().__init__(host, cfg, sink, llm=llm, rules_path=rules_path, display=display)
         self.client = HubClient(server_url, token, host, display)
         self.poller = HostPoller(self.client, host)
         self._peers_known: set[str] = set()
@@ -965,9 +977,8 @@ class RoomClient(RoomBase):
         # single-host location); never staged on the hub's disk.
         self._sessions = ClientSessions(sessions_dir or SESSIONS_DIR)
         # Friend-view transcripts: local disk, next to the client sessions.
-        self._comm_store = SessionStore(
-            (sessions_dir or SESSIONS_DIR).parent / "comm-sessions"
-        )
+        self._comm_store = SessionStore((sessions_dir or SESSIONS_DIR).parent / "comm-sessions")
+
     def start(self) -> None:
         out = self.client.join()
         self._peers_known = set(out.get("peers") or [])
@@ -1184,7 +1195,11 @@ class RoomRuntime(WebUIRuntime):
                 questions = body.get("questions")
                 if not isinstance(questions, list) or not questions:
                     questions = [
-                        {"question": body.get("question") or "(ask)", "options": [], "allow_custom": True}
+                        {
+                            "question": body.get("question") or "(ask)",
+                            "options": [],
+                            "allow_custom": True,
+                        }
                     ]
                 asks = list(data.get("asks") or [])
                 asks.append(
@@ -1214,7 +1229,15 @@ class RoomRuntime(WebUIRuntime):
             src = body.get("from") or card["src"]
             questions = body.get("questions")
             if isinstance(questions, list) and questions:
-                out.append({"id": card["id"], "from": src, "kind": "ask", "conv": conv, "questions": questions})
+                out.append(
+                    {
+                        "id": card["id"],
+                        "from": src,
+                        "kind": "ask",
+                        "conv": conv,
+                        "questions": questions,
+                    }
+                )
             elif body.get("question"):
                 out.append(
                     {
@@ -1273,8 +1296,12 @@ class RoomRuntime(WebUIRuntime):
         messages + subagent/ask records), hub-side envelope events, and the
         unified mail thread with this host (both directions)."""
         out: dict = {
-            "messages": [], "subagents": [], "asks": [], "events": [],
-            "mails": [], "live": [],
+            "messages": [],
+            "subagents": [],
+            "asks": [],
+            "events": [],
+            "mails": [],
+            "live": [],
         }
         store = self.room._comm_store
         if store is not None:

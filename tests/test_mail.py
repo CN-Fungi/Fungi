@@ -5,8 +5,6 @@ The mail contract the WebUI relies on: mail envelopes are consumed by the hub
 off chat/transfer envelopes never wake the receiving agent.
 """
 
-
-
 from fungi import config as config_mod
 from fungi import room as room_mod
 from fungi.clone.base import Clone
@@ -17,6 +15,7 @@ from fungi.pending import PendingAsks
 from fungi.protocol import Envelope, deserialize
 
 # ── Mailbox ──
+
 
 def test_deliver_list_mark_read(tmp_path):
     box = Mailbox(tmp_path / "mail")
@@ -51,13 +50,16 @@ def test_persistence_across_instances(tmp_path):
     assert Mailbox(tmp_path / "mail").list("a")["unread"] == 1
 
 
-
 def test_mail_envelope_survives_the_wire():
     """Regression: TYPES did not include "mail", so any mail envelope sent
     over the hub HTTP API (/api/send) was rejected with 400 bad type -- the
     in-process hub.send tests never exercised deserialization."""
-    env = Envelope(src="alice:comm-bob", dst="bob:mail", type="mail",
-                   body={"from": "alice:human", "subject": "", "text": "hi"})
+    env = Envelope(
+        src="alice:comm-bob",
+        dst="bob:mail",
+        type="mail",
+        body={"from": "alice:human", "subject": "", "text": "hi"},
+    )
     back = deserialize(env.serialize())
     assert back.type == "mail" and back.dst == "bob:mail" and back.body["text"] == "hi"
 
@@ -80,14 +82,21 @@ def test_hub_consumes_mail_envelope_into_both_boxes(tmp_path):
     hub = Hub(tmp_path, "tok", data_root, max_file_mb=10)
     hub.join("alice", "127.0.0.1:1")
     hub.join("bob", "127.0.0.1:2")
-    out = hub.send(Envelope(src="alice:comm-bob", dst="bob:mail", type="mail",
-                            body={"from": "alice:human", "subject": "", "text": "hi"}))
+    out = hub.send(
+        Envelope(
+            src="alice:comm-bob",
+            dst="bob:mail",
+            type="mail",
+            body={"from": "alice:human", "subject": "", "text": "hi"},
+        )
+    )
     assert out.get("ok") and out["status"] == "mailed"
     assert hub.mail.list("bob")["mails"][0]["body"] == "hi"
     assert hub.mail.list("alice")["mails"][0]["mine"] is True
 
 
 # ── amail tool ──
+
 
 def _comm_tools(tmp_path):
     sent = []
@@ -121,6 +130,7 @@ def test_amail_validation(tmp_path):
 
 # ── courier-off direct delivery ──
 
+
 class _FakeTransport:
     def __init__(self):
         self.sent = []
@@ -140,23 +150,26 @@ class _FakeTransport:
 
 def _clone(on_direct):
     cfg = config_mod.Config()
-    return Clone("alice:comm-bob", _FakeTransport(), cfg, sink=lambda *a, **k: None,
-                 on_direct=on_direct)
+    return Clone(
+        "alice:comm-bob", _FakeTransport(), cfg, sink=lambda *a, **k: None, on_direct=on_direct
+    )
 
 
 def test_dispatch_courier_off_direct_eats_chat():
     seen = []
     c = _clone(lambda env: seen.append(env) or True)
-    c.dispatch(Envelope(src="bob:comm-alice", dst="alice:comm-bob", type="chat",
-                        body={"text": "hello"}))
+    c.dispatch(
+        Envelope(src="bob:comm-alice", dst="alice:comm-bob", type="chat", body={"text": "hello"})
+    )
     assert len(seen) == 1
     assert c._work.empty()  # no LLM turn queued
 
 
 def test_dispatch_courier_on_queues_turn():
     c = _clone(lambda env: False)
-    c.dispatch(Envelope(src="bob:comm-alice", dst="alice:comm-bob", type="chat",
-                        body={"text": "hello"}))
+    c.dispatch(
+        Envelope(src="bob:comm-alice", dst="alice:comm-bob", type="chat", body={"text": "hello"})
+    )
     assert not c._work.empty()
 
 
@@ -186,9 +199,12 @@ def test_direct_transfer_answer_downloads_without_agent(tmp_path, monkeypatch):
     room.cards = _Cards()
     room._direct_transfers = {}
     room._local = _Local()  # RoomBase.local reads this
-    env = Envelope(src="bob:comm-alice", dst="alice:comm-bob", type="transfer",
-                   body={"id": "t1", "name": "doc.md", "size": 5, "reason": "hi",
-                         "from": "bob:comm-alice"})
+    env = Envelope(
+        src="bob:comm-alice",
+        dst="alice:comm-bob",
+        type="transfer",
+        body={"id": "t1", "name": "doc.md", "size": 5, "reason": "hi", "from": "bob:comm-alice"},
+    )
     assert room._courier_direct(env) is True
     assert env.id in room._direct_transfers  # ask reached the pipeline, awaiting user
 

@@ -26,17 +26,12 @@ def test_lan_client_without_token_is_rejected():
 
 
 def test_lan_client_with_wrong_token_is_rejected():
-    assert (
-        YesSirHandler._authorized(_fake_handler("192.168.1.7", "/sessions?t=nope"))
-        is False
-    )
+    assert YesSirHandler._authorized(_fake_handler("192.168.1.7", "/sessions?t=nope")) is False
 
 
 def test_lan_client_with_qr_token_passes():
     assert (
-        YesSirHandler._authorized(
-            _fake_handler("192.168.1.7", f"/sessions?t={WEBUI_TOKEN}")
-        )
+        YesSirHandler._authorized(_fake_handler("192.168.1.7", f"/sessions?t={WEBUI_TOKEN}"))
         is True
     )
 
@@ -50,20 +45,14 @@ def test_static_shell_is_open_to_lan_clients():
 
 
 def test_vendor_traversal_is_not_exempt():
-    assert (
-        YesSirHandler._authorized(_fake_handler("192.168.1.7", "/vendor/../secret.txt"))
-        is False
-    )
+    assert YesSirHandler._authorized(_fake_handler("192.168.1.7", "/vendor/../secret.txt")) is False
 
 
 def test_upload_endpoint_is_token_gated():
     """Files land on the PC: a LAN client must present the QR token to upload."""
     assert YesSirHandler._authorized(_fake_handler("192.168.1.7", "/upload")) is False
     assert (
-        YesSirHandler._authorized(
-            _fake_handler("192.168.1.7", f"/upload?t={WEBUI_TOKEN}")
-        )
-        is True
+        YesSirHandler._authorized(_fake_handler("192.168.1.7", f"/upload?t={WEBUI_TOKEN}")) is True
     )
 
 

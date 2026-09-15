@@ -52,7 +52,6 @@ def tool_call(name: str, args_json: str, call_id: str = "t1") -> dict:
 
 
 def spawn_call(call_id: str, goal: str, reply_format: str, layer: int = 2) -> dict:
-
     args = json.dumps({"goal": goal, "reply_format": reply_format, "layer": layer})
     return {"id": call_id, "type": "function", "function": {"name": "spawn", "arguments": args}}
 
@@ -213,7 +212,6 @@ def test_missing_args():
 
 
 def test_task_brief_contains_all_sections():
-
     spec = TaskSpec(
         id="a1", layer=2, goal="do X", reply_format="yes/no", context="ctx", constraints="c"
     )
@@ -334,7 +332,9 @@ def test_background_runs_command_directly_without_an_llm():
 
     got: list = []
     tl = TriLayer(
-        CFG, FnSink(lambda _t, _c: None), llm=counting_llm,
+        CFG,
+        FnSink(lambda _t, _c: None),
+        llm=counting_llm,
         spawn_done=lambda rec: got.append(rec),
     )
     out = tl.bound_background(1).fn({"command": "echo bg-direct"})

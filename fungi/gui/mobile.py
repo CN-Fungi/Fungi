@@ -59,9 +59,7 @@ class MobilePage(QWidget):
         self.url_edit = LineEdit()
         self.url_edit.setReadOnly(True)
         copy_btn = _copy_button()
-        copy_btn.clicked.connect(
-            lambda: _copy(self.url_edit.text(), self.window_ref, "手机端地址")
-        )
+        copy_btn.clicked.connect(lambda: _copy(self.url_edit.text(), self.window_ref, "手机端地址"))
         root.addWidget(_row("手机端地址", self.url_edit, copy_btn))
 
         self.refresh_btn = PushButton(FluentIcon.SYNC, "刷新二维码")

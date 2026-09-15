@@ -3,6 +3,7 @@
 Compatible with DeepSeek's `reasoning_content` deltas and incremental
 tool_call argument assembly (same protocol as the PowerShell original).
 """
+
 import json
 import tempfile
 import urllib.error
@@ -102,7 +103,12 @@ def stream_chat(
         # so a provider-side "Invalid API parameter" can be replayed offline.
         try:
             dump = Path(tempfile.gettempdir()) / "fungi-llm-error-payload.json"
-            dump.write_text(json.dumps({"endpoint": endpoint, "payload": payload}, ensure_ascii=False, indent=2), encoding="utf-8")
+            dump.write_text(
+                json.dumps(
+                    {"endpoint": endpoint, "payload": payload}, ensure_ascii=False, indent=2
+                ),
+                encoding="utf-8",
+            )
         except OSError:
             pass
         raise LLMError(f"HTTP {exc.code}: {detail}") from exc

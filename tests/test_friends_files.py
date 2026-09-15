@@ -480,9 +480,7 @@ def test_local_delegate_wakes_on_abort():
 
     transport = OkTransport()
     stop = threading.Event()
-    tools = DelegateTools(
-        "alpha:local", transport, PendingAsks(), lambda: ["beta"], timeout_s=60
-    )
+    tools = DelegateTools("alpha:local", transport, PendingAsks(), lambda: ["beta"], timeout_s=60)
     tools.abort_fn = stop.is_set
     out: list[str] = []
 

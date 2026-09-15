@@ -153,7 +153,9 @@ class SessionStore:
             created = _now()
             if path.is_file():
                 with contextlib.suppress(OSError, json.JSONDecodeError):
-                    created = json.loads(path.read_text(encoding="utf-8-sig")).get("created", created)
+                    created = json.loads(path.read_text(encoding="utf-8-sig")).get(
+                        "created", created
+                    )
             payload = {
                 "id": session_id,
                 "title": title,

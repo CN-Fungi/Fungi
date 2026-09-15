@@ -193,7 +193,10 @@ def test_a_click_is_not_pressed_when_the_pointer_never_arrived(monkeypatch):
     monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
     assert screen.click_at(-185, 345) is False
     assert not [f for _x, _y, f in moves if f & screen.MOUSEEVENTF_LEFTDOWN]
-    assert all(f == screen.MOUSEEVENTF_MOVE | screen.MOUSEEVENTF_ABSOLUTE | screen.MOUSEEVENTF_VIRTUALDESK for _x, _y, f in moves)
+    assert all(
+        f == screen.MOUSEEVENTF_MOVE | screen.MOUSEEVENTF_ABSOLUTE | screen.MOUSEEVENTF_VIRTUALDESK
+        for _x, _y, f in moves
+    )
 
     monkeypatch.setattr(screen, "cursor_pos", lambda: (700, 400))  # a pixel off is fine
     assert screen.click_at(701, 399) is True
@@ -204,9 +207,9 @@ def _char_events(monkeypatch):
     """Record every injected event as (wVk, wScan, dwFlags)."""
     events: list[tuple[int, int, int]] = []
     monkeypatch.setattr(
-        screen, "_send", lambda payload: events.append(
-            (payload.ki.wVk, payload.ki.wScan, payload.ki.dwFlags)
-        ) or 1
+        screen,
+        "_send",
+        lambda payload: events.append((payload.ki.wVk, payload.ki.wScan, payload.ki.dwFlags)) or 1,
     )
     return events
 
@@ -217,10 +220,15 @@ def test_typing_sends_one_unicode_pair_per_character_in_order(monkeypatch):
     monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
     typed, error = screen.type_text("A你", delay=0.01)
     assert (typed, error) == (2, None)
-    unicode_down, unicode_up = screen.KEYEVENTF_UNICODE, screen.KEYEVENTF_UNICODE | screen.KEYEVENTF_KEYUP
+    unicode_down, unicode_up = (
+        screen.KEYEVENTF_UNICODE,
+        screen.KEYEVENTF_UNICODE | screen.KEYEVENTF_KEYUP,
+    )
     assert events == [
-        (0, ord("A"), unicode_down), (0, ord("A"), unicode_up),
-        (0, ord("你"), unicode_down), (0, ord("你"), unicode_up),
+        (0, ord("A"), unicode_down),
+        (0, ord("A"), unicode_up),
+        (0, ord("你"), unicode_down),
+        (0, ord("你"), unicode_up),
     ]
     assert screen._held == set()  # a character is not a key that can be left down
 
@@ -276,7 +284,9 @@ def test_the_default_pace_is_one_a_person_can_watch(monkeypatch):
     elapsed = time.monotonic() - started
     assert (typed, error) == (5, None)
     assert elapsed >= 4 * 0.1, f"five characters landed in {elapsed:.2f}s — a blur, not typing"
-    assert elapsed <= 4 * 0.2 + 0.5, f"five characters took {elapsed:.2f}s — past the pace asked for"
+    assert elapsed <= 4 * 0.2 + 0.5, (
+        f"five characters took {elapsed:.2f}s — past the pace asked for"
+    )
 
 
 def test_a_stop_press_ends_a_typed_run_within_one_character(monkeypatch):
@@ -607,7 +617,9 @@ def test_at_hand_prefers_the_running_window_over_the_desktop_icon(monkeypatch):
     """The entry is looked for on the taskbar and in the tray first: that click
     *activates* the window that is already running, while a desktop icon is a
     double-click that may launch another instance (user decision 2026-09-13)."""
-    button = _cand(1, "QQ - 1 个运行窗口", "Taskbar.TaskListButtonAutomationPeer", (1000, 1330, 1060, 1398))
+    button = _cand(
+        1, "QQ - 1 个运行窗口", "Taskbar.TaskListButtonAutomationPeer", (1000, 1330, 1060, 1398)
+    )
     icon = _cand(1, "QQ", "", (117, 5, 233, 96))
     _shell_env(monkeypatch, {900: [(button, object())], 800: [(icon, object())]})
     entry = screen.at_hand(_qq())
@@ -648,9 +660,11 @@ def test_a_container_row_is_not_an_entry(monkeypatch):
 
 
 def test_a_pinned_button_is_not_a_way_to_a_window(monkeypatch):
-    """"已固定" is the form Windows shows while the application is *not* running, so
+    """ "已固定" is the form Windows shows while the application is *not* running, so
     clicking it would launch something rather than open the window we hold."""
-    pinned = _cand(1, "Everything 已固定", "Taskbar.TaskListButtonAutomationPeer", (900, 1330, 960, 1398))
+    pinned = _cand(
+        1, "Everything 已固定", "Taskbar.TaskListButtonAutomationPeer", (900, 1330, 960, 1398)
+    )
     _shell_env(monkeypatch, {900: [(pinned, object())]})
     assert screen._surface_rows(900) == []
     assert screen.at_hand(_qq()) is None
@@ -681,11 +695,27 @@ def test_the_flyout_counts_as_open_only_while_it_is_shown(monkeypatch):
     """It is not created on demand: measured, the island window already exists hidden
     before the arrow is ever clicked — so an Escape sent on *existence* would go to
     whatever window has the focus instead of closing a flyout."""
-    hidden = screen.Win(31, "", "TopLevelWindowForOverflowXamlIsland", (1700, 1180, 2040, 1330), 5, "explorer.exe", "hidden")
+    hidden = screen.Win(
+        31,
+        "",
+        "TopLevelWindowForOverflowXamlIsland",
+        (1700, 1180, 2040, 1330),
+        5,
+        "explorer.exe",
+        "hidden",
+    )
     _shell_env(monkeypatch, {}, wins=[hidden, _qq()])
     monkeypatch.setattr(screen, "send_keys", lambda keys: pytest.fail(f"sent {keys}"))
     screen._close_tray_flyout()
-    shown = screen.Win(31, "", "TopLevelWindowForOverflowXamlIsland", (1700, 1180, 2040, 1330), 5, "explorer.exe", "normal")
+    shown = screen.Win(
+        31,
+        "",
+        "TopLevelWindowForOverflowXamlIsland",
+        (1700, 1180, 2040, 1330),
+        5,
+        "explorer.exe",
+        "normal",
+    )
     assert screen._tray_flyout() is None
     monkeypatch.setattr(screen, "list_windows", lambda include_hidden=False: [shown, _qq()])
     assert screen._tray_flyout() is shown
@@ -700,13 +730,21 @@ def test_the_tray_icon_is_looked_for_behind_the_arrow(monkeypatch):
     icons, then single-click the one that belongs to the window."""
     arrow = _cand(1, "显示隐藏的图标", "SystemTray.NormalButton", (1829, 1328, 1877, 1400))
     hidden_icon = _cand(1, " QQ: 3754901636", "SystemTray.NormalButton", (1944, 1183, 2029, 1327))
-    flyout = screen.Win(31, "", "TopLevelWindowForOverflowXamlIsland", (1700, 1180, 2040, 1330), 5, "explorer.exe")
+    flyout = screen.Win(
+        31, "", "TopLevelWindowForOverflowXamlIsland", (1700, 1180, 2040, 1330), 5, "explorer.exe"
+    )
     state = {"open": False}
     clicked: list[tuple[int, int]] = []
 
     def _wins(include_hidden=False):
         island = screen.Win(
-            31, "", flyout.cls, flyout.rect, 5, "explorer.exe", "normal" if state["open"] else "hidden"
+            31,
+            "",
+            flyout.cls,
+            flyout.rect,
+            5,
+            "explorer.exe",
+            "normal" if state["open"] else "hidden",
         )
         return [island, _qq()]
 
@@ -736,7 +774,9 @@ def test_a_tray_click_that_opens_another_window_says_which(monkeypatch):
     the window we hold stays a hidden balloon host. The click did something, so the
     report has to name what appeared instead of 'stayed hidden'."""
     icon = _cand(1, " OneDrive - 个人", "SystemTray.NormalButton", (1764, 1216, 1824, 1275))
-    held = screen.Win(5, "OneDrive - 个人", "SkyDrive", (0, 0, 194, 56), 7, "OneDrive.exe", "hidden")
+    held = screen.Win(
+        5, "OneDrive - 个人", "SkyDrive", (0, 0, 194, 56), 7, "OneDrive.exe", "hidden"
+    )
     _shell_env(monkeypatch, {900: [(icon, object())]}, wins=[_PROGMAN, _qq(), held])
     state = {"clicked": False}
 
@@ -759,7 +799,10 @@ def test_a_tray_click_that_opens_another_window_says_which(monkeypatch):
     monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
     monkeypatch.setattr(screen, "click_at", _click)
     monkeypatch.setattr(screen, "_await_state", lambda hwnd, want, timeout: False)
-    assert screen.shell_wake(5) == "clicked its 托盘图标 'OneDrive - 个人' and it opened 'Activity Center' instead"
+    assert (
+        screen.shell_wake(5)
+        == "clicked its 托盘图标 'OneDrive - 个人' and it opened 'Activity Center' instead"
+    )
 
 
 def test_the_window_already_in_front_is_never_clicked(monkeypatch):
@@ -991,7 +1034,11 @@ def test_the_listing_says_it_is_self_drawn_before_listing_the_pixels(monkeypatch
     monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((200, 200)))
     monkeypatch.setattr(screen, "_mark_targets", lambda frame, targets: frame.image)
     monkeypatch.setattr(screen, "_ocr_targets", lambda frame, start=0: [])
-    monkeypatch.setattr(screen, "_visual_targets", lambda frame, start=0: [_cand(start + 1, "", "", (10, 10, 40, 40))])
+    monkeypatch.setattr(
+        screen,
+        "_visual_targets",
+        lambda frame, start=0: [_cand(start + 1, "", "", (10, 10, 40, 40))],
+    )
     monkeypatch.setattr(screen, "inside_client", lambda hwnd, target: True)
     monkeypatch.setattr(screen, "_class_name", lambda hwnd: "Qt5152QWindowIcon")
     monkeypatch.setattr(screen, "_window_text", lambda hwnd: "微信")

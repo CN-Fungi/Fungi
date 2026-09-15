@@ -52,7 +52,7 @@ def test_extract_upload_picks_the_file_part_not_text_fields():
 
 
 def test_extract_upload_returns_none_without_file_part():
-    body = b"--b\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nhi\r\n--b--\r\n"
+    body = b'--b\r\nContent-Disposition: form-data; name="note"\r\n\r\nhi\r\n--b--\r\n'
     assert webui._extract_upload(body, b"b") is None
 
 
@@ -63,9 +63,7 @@ def upload_env(tmp_path, monkeypatch):
     monkeypatch.setattr(
         webui,
         "load_config",
-        lambda: Config(
-            api_key="k", endpoint="e", model="m", inbox_dir=str(inbox), max_file_mb=1
-        ),
+        lambda: Config(api_key="k", endpoint="e", model="m", inbox_dir=str(inbox), max_file_mb=1),
     )
 
     class _TouchRuntime(webui.WebUIRuntime):
@@ -117,7 +115,7 @@ def test_upload_numbers_colliding_names(upload_env):
 
 def test_upload_without_file_part_is_rejected(upload_env):
     base, _ = upload_env
-    body = b"--b\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nhi\r\n--b--\r\n"
+    body = b'--b\r\nContent-Disposition: form-data; name="note"\r\n\r\nhi\r\n--b--\r\n'
     req = urllib.request.Request(
         base + "/upload",
         data=body,
@@ -133,9 +131,7 @@ def test_upload_over_max_file_mb_is_413(upload_env):
     base, inbox = upload_env  # cap = 1 MiB
     big = b"\x00" * (1024 * 1024 + 1)
     with pytest.raises(urllib.error.HTTPError) as err:
-        urllib.request.urlopen(
-            _post_upload(base, _multipart({"big": big}), "testboundary123")
-        )
+        urllib.request.urlopen(_post_upload(base, _multipart({"big": big}), "testboundary123"))
     assert err.value.code == 413
     assert not inbox.exists() or not any(inbox.iterdir())
 
@@ -143,7 +139,9 @@ def test_upload_over_max_file_mb_is_413(upload_env):
 def test_upload_rejects_non_multipart_bodies(upload_env):
     base, _ = upload_env
     req = urllib.request.Request(
-        base + "/upload", data=b"{}", headers={"Content-Type": "application/json"},
+        base + "/upload",
+        data=b"{}",
+        headers={"Content-Type": "application/json"},
         method="POST",
     )
     with pytest.raises(urllib.error.HTTPError) as err:

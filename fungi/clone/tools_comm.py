@@ -262,7 +262,6 @@ class CommTools:
             "grep_files": BoundTool(schema=_SCHEMA_GREP, fn=self.grep_files),
         }
 
-
     def amail(self, args: dict) -> str:
         """Send a text mail to the peer host's mailbox on the hub.
 

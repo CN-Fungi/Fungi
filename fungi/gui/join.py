@@ -67,14 +67,18 @@ class JoinPage(QWidget):
         self.token_edit = LineEdit()
         self.token_edit.setFixedWidth(360)
         self.token_edit.setPlaceholderText("房主发给你的 Token")
-        self.token_edit.setToolTip("加入前：回车＝加入房间；加入后房主换了 Token，在这里按回车即可更新（会先校验）")
+        self.token_edit.setToolTip(
+            "加入前：回车＝加入房间；加入后房主换了 Token，在这里按回车即可更新（会先校验）"
+        )
         self.token_edit.setFixedWidth(360)
         root.addWidget(_row("Token", self.token_edit))
 
         self.nick_edit = LineEdit()
         self.nick_edit.setFixedWidth(360)
         self.nick_edit.setPlaceholderText("你的昵称（中文/emoji 均可，仅用于展示）")
-        self.nick_edit.setToolTip("加入前：回车＝加入房间；加入后：回车即时改名（对面立刻看到新昵称）")
+        self.nick_edit.setToolTip(
+            "加入前：回车＝加入房间；加入后：回车即时改名（对面立刻看到新昵称）"
+        )
         self.nick_edit.setFixedWidth(360)
         root.addWidget(_row("昵称", self.nick_edit))
 
@@ -248,7 +252,9 @@ class JoinPage(QWidget):
             )
             return
         self.ip_refresh_btn.setEnabled(False)
-        self.status.setText(f"正在扫描局域网（{net.lan_ip().rsplit('.', 1)[0]}.*，房间端口 8899 起）…")
+        self.status.setText(
+            f"正在扫描局域网（{net.lan_ip().rsplit('.', 1)[0]}.*，房间端口 8899 起）…"
+        )
 
         def scan():
             try:

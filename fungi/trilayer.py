@@ -62,7 +62,8 @@ answer, so ask only when it truly matters — do not ask for permission to do
 obvious work.
 """
 
-L2_SYSTEM = """\
+L2_SYSTEM = (
+    """\
 You are a Task Agent (layer 2 of a three-layer system). An orchestrator has
 dispatched a task to you with an explicit goal and a required reply format.
 
@@ -80,9 +81,12 @@ Discipline (mandatory):
   the only thing the orchestrator sees. No preamble, no meta commentary.
 - If the task cannot be completed, say so inside the required reply format
   rather than improvising something else.
-""" + FILE_OPS_RULE
+"""
+    + FILE_OPS_RULE
+)
 
-L3_SYSTEM = """\
+L3_SYSTEM = (
+    """\
 You are a basic Worker (layer 3, the lowest layer of a three-layer system).
 A Task Agent has dispatched a small, concrete job to you.
 
@@ -95,7 +99,9 @@ Discipline (mandatory):
 - Your FINAL message must follow the required reply_format exactly — it is
   the only thing the dispatcher sees.
 - If the job cannot be done, report that inside the required reply format.
-""" + FILE_OPS_RULE
+"""
+    + FILE_OPS_RULE
+)
 
 BACKGROUND_SCHEMA = {
     "type": "function",
@@ -298,9 +304,7 @@ class TriLayer:
                         "reply_format": "command output",
                     },
                 )
-                self.sink.emit(
-                    "agent_status", {"id": record["id"], "status": "running"}
-                )
+                self.sink.emit("agent_status", {"id": record["id"], "status": "running"})
 
             def _bg() -> None:
                 started = time.monotonic()
@@ -330,9 +334,7 @@ class TriLayer:
                 record["status"] = status
                 record["answer"] = answer
                 with contextlib.suppress(Exception):
-                    self.sink.emit(
-                        "agent_status", {"id": record["id"], "status": status}
-                    )
+                    self.sink.emit("agent_status", {"id": record["id"], "status": status})
                 with self._lock:
                     self._active -= 1
                 if status != "aborted" and self._spawn_done is not None:
@@ -346,9 +348,7 @@ class TriLayer:
                             }
                         )
 
-            threading.Thread(
-                target=_bg, daemon=True, name=f"background-{record['id']}"
-            ).start()
+            threading.Thread(target=_bg, daemon=True, name=f"background-{record['id']}").start()
             return (
                 f"dispatched (id={record['id']}). The command runs in the"
                 " BACKGROUND - do not wait for it and do not run it again; its"

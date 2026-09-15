@@ -97,12 +97,14 @@ class Mailbox:
         box (unread) and the sender's own box (pre-read, marked mine), so
         both WebUIs can render the same thread. Returns the recipient id."""
         sender_host = sender_addr.split(":")[0]
-        out = self.deliver(recipient_host, sender_addr, subject, body,
-                           peer=sender_host, mine=False, read=False)
+        out = self.deliver(
+            recipient_host, sender_addr, subject, body, peer=sender_host, mine=False, read=False
+        )
         if out.get("error"):
             return out
-        self.deliver(sender_host, sender_addr, subject, body,
-                     peer=recipient_host, mine=True, read=True)
+        self.deliver(
+            sender_host, sender_addr, subject, body, peer=recipient_host, mine=True, read=True
+        )
         return out
 
     def list(self, host: str) -> dict:

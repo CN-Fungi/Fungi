@@ -46,17 +46,22 @@ class HostPage(QWidget):
 
         self.name_edit = LineEdit()
         self.name_edit.setFixedWidth(360)
-        self.name_edit.setText(str(self.settings.value("last_host_name", "") or "")
-                              or net.default_host_name())
+        self.name_edit.setText(
+            str(self.settings.value("last_host_name", "") or "") or net.default_host_name()
+        )
         self.name_edit.setPlaceholderText("本机主机名（房间内的 wire 身份）")
-        self.name_edit.setToolTip("开房前：回车＝发起房间；开房后该身份固定（地址/文件名/对面信使都以它为准），改名需先离开房间")
+        self.name_edit.setToolTip(
+            "开房前：回车＝发起房间；开房后该身份固定（地址/文件名/对面信使都以它为准），改名需先离开房间"
+        )
         root.addWidget(_row("主机名", self.name_edit))
 
         self.nick_edit = LineEdit()
         self.nick_edit.setFixedWidth(360)
         self.nick_edit.setText(str(self.settings.value("last_nick", "") or ""))
         self.nick_edit.setPlaceholderText("你的昵称（中文/emoji 均可，留空用主机名）")
-        self.nick_edit.setToolTip("开房前：回车＝发起房间；开房后：回车即时改名（对面立刻看到新昵称）")
+        self.nick_edit.setToolTip(
+            "开房前：回车＝发起房间；开房后：回车即时改名（对面立刻看到新昵称）"
+        )
         root.addWidget(_row("昵称", self.nick_edit))
 
         # Enter in either field: launch when idle (both are read only at
@@ -85,8 +90,9 @@ class HostPage(QWidget):
         # Remember the token: a fresh random one on every visit meant the user
         # had to re-send it to every friend (and 离开房间 regenerated it again).
         saved_token = str(self.settings.value("last_token", "") or "")
-        self.token_edit.setText(saved_token if net._valid_token(saved_token) else
-                               secrets.token_urlsafe(12))
+        self.token_edit.setText(
+            saved_token if net._valid_token(saved_token) else secrets.token_urlsafe(12)
+        )
         self.token_btn = _copy_button()
         self.token_btn.clicked.connect(lambda: _copy(self.token_edit.text(), window, "房间 Token"))
         self.token_row = _row("Token", self.token_edit, self.token_btn)

@@ -54,7 +54,7 @@ GUIDE = (
     " Diary tool calls are deliberately invisible to the user (no card in the"
     " chat, nothing in the transcript). Because of that, never go silent: if"
     " you open your diary mid-conversation, tell the user in your own words"
-    " (\"翻了下我的日记…\") before or while answering."
+    ' ("翻了下我的日记…") before or while answering.'
 )
 DIARY_SCHEMA = {
     "type": "function",

@@ -2063,9 +2063,7 @@ def _action_type(args: dict, sink, should_abort, on_answer, call_id) -> str | Im
         # 2026-09-14 while typing into Notepad++, whose Scintilla editor has no value.
         _clear_strikes(key)
     elif _strike(key) >= FAILURE_LIMIT:
-        detail = (
-            f"已落 {typed}/{len(text)} 字；回读到 {after_value!r}；画面变化={changed:.3%}"
-        )
+        detail = f"已落 {typed}/{len(text)} 字；回读到 {after_value!r}；画面变化={changed:.3%}"
         return _escalate(
             sink, key, f"type into {where or hex(hwnd)}", detail, should_abort, on_answer, call_id
         )
@@ -2079,8 +2077,7 @@ def _action_type(args: dict, sink, should_abort, on_answer, call_id) -> str | Im
         f"TYPE {len(text)} chars into hwnd=0x{hwnd:X}"
         + (f" target {target.label}" if target else " (current focus)")
         + note,
-        f"  typed: {typed}/{len(text)} characters"
-        + (f" · {typing_error}" if typing_error else ""),
+        f"  typed: {typed}/{len(text)} characters" + (f" · {typing_error}" if typing_error else ""),
         f"  verify: {verdict}",
         "  method: 逐字输入 (one character at a time; the clipboard is never touched)",
     ]
@@ -2424,9 +2421,7 @@ def _tray_overflow_entry(win: Win, tray_rows: list[Target]) -> Entry | None:
     than the click), and closes it again when the application is not in there. Left
     open when it is — the caller clicks the icon it returns.
     """
-    chevron = next(
-        (c for c in tray_rows if any(h in c.name for h in TRAY_OVERFLOW_HINTS)), None
-    )
+    chevron = next((c for c in tray_rows if any(h in c.name for h in TRAY_OVERFLOW_HINTS)), None)
     if chevron is None:
         return None
     # The arrow is a *toggle*, measured the hard way: an earlier attempt that left the

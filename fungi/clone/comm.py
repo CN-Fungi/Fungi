@@ -96,9 +96,11 @@ def build_comm_clone(
         return (
             base_prompt
             + "\n本机主人的长期备忘（用户在 GUI 里写给你的背景记忆，回答时可用它代为说明或转达）:\n"
-            + memory + "\n"
+            + memory
+            + "\n"
             + calendar
-            + "\n" + todos.RULES
+            + "\n"
+            + todos.RULES
             + FILE_OPS_RULE
         )
 

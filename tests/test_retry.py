@@ -92,10 +92,14 @@ def test_repair_synthesizes_missing_tool_result() -> None:
     explicit failure result (the API would otherwise 400 forever)."""
     msgs = [
         {"role": "user", "content": "hi"},
-        {"role": "assistant", "content": None, "tool_calls": [
-            {"id": "t1", "function": {"name": "read"}},
-            {"id": "t2", "function": {"name": "bash"}},
-        ]},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "t1", "function": {"name": "read"}},
+                {"id": "t2", "function": {"name": "bash"}},
+            ],
+        },
         {"role": "tool", "tool_call_id": "t1", "content": "ok"},
     ]
     out = repair_tool_gaps(msgs)
@@ -109,9 +113,13 @@ def test_repair_closes_gap_before_next_user_message() -> None:
     first so the history stays API-valid."""
     msgs = [
         {"role": "user", "content": "hi"},
-        {"role": "assistant", "content": "checking", "tool_calls": [
-            {"id": "t1", "function": {"name": "inquire"}},
-        ]},
+        {
+            "role": "assistant",
+            "content": "checking",
+            "tool_calls": [
+                {"id": "t1", "function": {"name": "inquire"}},
+            ],
+        },
         {"role": "user", "content": "hello?"},
     ]
     out = repair_tool_gaps(msgs)
@@ -122,9 +130,13 @@ def test_repair_closes_gap_before_next_user_message() -> None:
 def test_repair_leaves_clean_history_alone() -> None:
     msgs = [
         {"role": "user", "content": "hi"},
-        {"role": "assistant", "content": None, "tool_calls": [
-            {"id": "t1", "function": {"name": "read"}},
-        ]},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "t1", "function": {"name": "read"}},
+            ],
+        },
         {"role": "tool", "tool_call_id": "t1", "content": "ok"},
         {"role": "assistant", "content": "done"},
     ]

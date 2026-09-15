@@ -82,6 +82,7 @@ def lan_payload(port: int, loopback: bool) -> dict:
         payload["url"] = f"http://{payload['ip']}:{payload['port']}/m?t={WEBUI_TOKEN}"
     return payload
 
+
 _TAPE_GRACE_S = 60.0  # how long a sealed (done) tape stays for late reattach
 
 
@@ -652,12 +653,16 @@ class YesSirHandler(BaseHTTPRequestHandler):
         )
         return (
             "[background report] Subagent task(s) you dispatched have finished. "
-            "This note is for you - the user sees your reply, not this note.\n"
-            + rows
+            "This note is for you - the user sees your reply, not this note.\n" + rows
         )
 
-    def _run_turn(self, session_id: str | None, user_msg: str | None, messages=None,
-                  resume_items: list[dict] | None = None) -> None:
+    def _run_turn(
+        self,
+        session_id: str | None,
+        user_msg: str | None,
+        messages=None,
+        resume_items: list[dict] | None = None,
+    ) -> None:
         if messages is None and not session_id:
             # Generate before registering: /stop keys on the real session id.
             session_id = self.runtime.new_session_id()
@@ -684,13 +689,17 @@ class YesSirHandler(BaseHTTPRequestHandler):
                     if stored:
                         messages = list(stored["messages"])
                     else:
-                        messages = [{"role": "system", "content": self.runtime.new_session_prompt()}]
+                        messages = [
+                            {"role": "system", "content": self.runtime.new_session_prompt()}
+                        ]
                     if user_msg is not None:
                         messages.append({"role": "user", "content": user_msg})
                 if resume_items:
                     # Patch the persisted spawn records with their final
                     # status/answer, then inject the report as this turn's input.
-                    for rec in (stored or {}).get("subagents", []) if isinstance(stored, dict) else []:
+                    for rec in (
+                        (stored or {}).get("subagents", []) if isinstance(stored, dict) else []
+                    ):
                         for item in resume_items:
                             if rec.get("id") == item["id"]:
                                 rec["status"] = item["status"]
@@ -796,7 +805,9 @@ class YesSirHandler(BaseHTTPRequestHandler):
                     idx += len(fresh)
                 try:
                     for ev in fresh:
-                        self.wfile.write((json.dumps(ev, ensure_ascii=False) + "\n").encode("utf-8"))
+                        self.wfile.write(
+                            (json.dumps(ev, ensure_ascii=False) + "\n").encode("utf-8")
+                        )
                     if fresh:
                         self.wfile.flush()
                         if any(ev.get("type") == "done" for ev in fresh):
@@ -810,7 +821,6 @@ class YesSirHandler(BaseHTTPRequestHandler):
                 time.sleep(0.2)
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
-
 
     def _handle_upload(self) -> None:
         """Phone -> PC file upload: multipart/form-data with a "file" field.

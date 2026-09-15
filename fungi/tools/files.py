@@ -99,8 +99,7 @@ def _read_image(file: Path) -> str:
         return f"ERROR: {exc}"
     if len(raw) > IMAGE_MAX_BYTES:
         return (
-            f"ERROR: {file.name} is {len(raw)} bytes — too large to attach "
-            f"(cap {IMAGE_MAX_BYTES})"
+            f"ERROR: {file.name} is {len(raw)} bytes — too large to attach (cap {IMAGE_MAX_BYTES})"
         )
     url, mime, dims = image_data_url(file.suffix.lower(), raw)
     if url is None:
@@ -135,9 +134,7 @@ def _read_ooxml(file: Path) -> str:
         return f"ERROR: unreadable OOXML package: {exc}"
     try:
         if suffix == ".pptx":
-            names = sorted(
-                n for n in zf.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)
-            )
+            names = sorted(n for n in zf.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n))
         else:
             names = _OOXML_PARTS[suffix]
         lines = []
@@ -236,8 +233,7 @@ def tool_read(path: str) -> str:
         content = raw.decode("utf-16", errors="replace")  # BOM: real text
     elif b"\x00" in raw[:8192]:  # git's null-byte heuristic
         return (
-            f"BINARY: {file.name} — {_human_size(len(raw))}, "
-            f"detected {_sniff(raw)}. {_BINARY_HINT}"
+            f"BINARY: {file.name} — {_human_size(len(raw))}, detected {_sniff(raw)}. {_BINARY_HINT}"
         )
     else:
         content = raw.decode("utf-8-sig", errors="replace")

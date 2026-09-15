@@ -65,6 +65,7 @@ def test_read_binary_pdf_reports_not_mojibake(tmp_path):
 
 def test_read_docx_extracts_text_directly(tmp_path):
     import zipfile
+
     file = tmp_path / "report.docx"
     doc = (
         "<w:document><w:body>"
@@ -273,11 +274,21 @@ def test_agent_upgrades_image_tool_result_to_multimodal(tmp_path):
     img = tmp_path / "photo.png"
     img.write_bytes(_png_bytes())
     results = [
-        LLMResult(content=None, tool_calls=[{"id": "t1", "function": {"name": "read", "arguments": json.dumps({"path": str(img)})}}]),
+        LLMResult(
+            content=None,
+            tool_calls=[
+                {
+                    "id": "t1",
+                    "function": {"name": "read", "arguments": json.dumps({"path": str(img)})},
+                }
+            ],
+        ),
         LLMResult(content="it is red"),
     ]
     fake = FakeLLM(results)
-    agent = Agent(Config(api_key="k", endpoint="e", model="m"), FnSink(lambda _t, _c: None), llm=fake)
+    agent = Agent(
+        Config(api_key="k", endpoint="e", model="m"), FnSink(lambda _t, _c: None), llm=fake
+    )
     agent.run([{"role": "user", "content": "看这张图"}])
     tool_msg = fake.calls[1][3]  # system, user, assistant(tool_calls), tool
     assert tool_msg["role"] == "tool"
@@ -304,6 +315,7 @@ def test_bash_abort_kills_running_command_quickly():
     out = tool_bash("ping -n 30 127.0.0.1 >nul", should_abort=lambda: flag["on"])
     assert out == "ERROR: cancelled by user"
     assert time.time() - start < 5, "abort waited out the command instead of killing it"
+
 
 def test_read_truncates_large_files_with_head_and_tail(tmp_path):
     """A file larger than TRUNCATE_READ must come back as head + tail with a

@@ -110,9 +110,7 @@ def test_send_rejects_nul_session():
 
 def test_abort_kills_session():
     flag = {"on": False}
-    out = tool_bash_start(
-        "ping -n 30 127.0.0.1 >nul", should_abort=lambda: flag["on"]
-    )
+    out = tool_bash_start("ping -n 30 127.0.0.1 >nul", should_abort=lambda: flag["on"])
     sid = _sid(out)
     assert _alive(sid)
     flag["on"] = True  # /stop pressed

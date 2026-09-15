@@ -66,9 +66,12 @@ class DelegateTools:
         if missing:
             hint = ""
             if "host" in missing:
-                hint = " — pick one of: " + ", ".join(known) if known else " — no peers are connected"
+                hint = (
+                    " — pick one of: " + ", ".join(known) if known else " — no peers are connected"
+                )
             return (
-                "ERROR: missing required argument(s): " + ", ".join(missing)
+                "ERROR: missing required argument(s): "
+                + ", ".join(missing)
                 + f" (received keys: {sorted(args) or 'none'})"
                 + hint
                 + " — re-issue the tool call with the complete JSON arguments."
@@ -182,7 +185,10 @@ _SCHEMA_DELEGATE = {
         "parameters": {
             "type": "object",
             "properties": {
-                "host": {"type": "string", "description": "target host name (omit only when exactly one peer is connected — it is then filled in automatically)"},
+                "host": {
+                    "type": "string",
+                    "description": "target host name (omit only when exactly one peer is connected — it is then filled in automatically)",
+                },
                 "goal": {"type": "string", "description": "what to do"},
                 "reply_format": {"type": "string", "description": "expected reply shape"},
                 "context": {"type": "string", "description": "background material"},

@@ -48,12 +48,17 @@ TOOLS: dict[str, dict] = {
             "video",
             "Understand a local video file: returns the timestamped transcript, "
             "scene structure, and keyframe images attached for vision models. "
-            "path \"demo\" runs a built-in test clip - one successful call "
+            'path "demo" runs a built-in test clip - one successful call '
             "proves the whole pipeline (ffmpeg, VidSense, HF models) is ready; "
             "do NOT promise video analysis before a call has succeeded. If any "
             "runtime part is missing the tool returns an ERROR with setup "
             "guidance and never downloads on demand.",
-            {"path": {"type": "string", "description": "Video file path (mp4/mov/mkv…) or \"demo\" for the built-in test clip"}},
+            {
+                "path": {
+                    "type": "string",
+                    "description": 'Video file path (mp4/mov/mkv…) or "demo" for the built-in test clip',
+                }
+            },
             ["path"],
         ),
         "fn": tool_video,
@@ -88,7 +93,7 @@ TOOLS: dict[str, dict] = {
             "reads EOF and exits at once — it cannot wait for your input. "
             "Inner double quotes get eaten by cmd: use single quotes inside, e.g. "
             "date/time via: powershell -Command (Get-Date).ToString('yyyy-MM-dd dddd HH:mm') "
-            "(output is GBK-encoded). Unix-style flags like date \"+%Y\" are NOT valid here.",
+            '(output is GBK-encoded). Unix-style flags like date "+%Y" are NOT valid here.',
             {
                 "command": {"type": "string"},
                 "cwd": {"type": "string", "description": "Working directory (optional)"},
