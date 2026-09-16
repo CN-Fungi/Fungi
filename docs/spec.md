@@ -1648,6 +1648,8 @@ follower 照常连上、`pos`/`say` 拿真 ack。（在 bash 里跑 python 永�
 **横幅**（每次运行一段）：版本 / python / 平台 / frozen / 根目录 / argv / config 路径与存在性 /
 模型与 endpoint / **api_key 有没有（绝不写它本身）** / ghostworld 开关与目录。
 
+**日志里不放凭据**：api_key 只写「有没有」；房间 token 一律不进文件——连「拿错 token 的敲门」那行也只记路径、不记 query（GET 的 query 就是 token），因为这个文件会被贴进公开仓库的 issue。
+
 **最值钱的一条**：`sys.excepthook` + `threading.excepthook` 的 traceback。窗口版 exe 崩掉是**无声**的，
 而 PyQt5 在 `qFatal` 之前会走 `sys.excepthook`，所以打包版的崩溃现在也留痕。
 

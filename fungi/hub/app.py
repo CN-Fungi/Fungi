@@ -331,14 +331,16 @@ class _Handler(BaseHTTPRequestHandler):
         """Someone knocked with the wrong token — the host's half of "I cannot join".
 
         Throttled per caller: a client holding a stale token polls once a second,
-        and the log is worth reading only if this is one line a minute.
+        and the log is worth reading only if this is one line a minute. The route
+        is logged without its query: on a GET the query *is* the token, and this
+        file gets attached to bug reports (the repo is public).
         """
         peer = self.client_address[0]
         runlog.warn_once(
             f"hub-bad-token:{peer}",
-            "hub: %s used the wrong token (%s) — a friend holding an old token?",
+            "hub: %s used the wrong token on %s — a friend holding an old token?",
             peer,
-            self.path,
+            self.path.split("?", 1)[0],
         )
         self._reply({"error": "bad token"}, 403)
 
