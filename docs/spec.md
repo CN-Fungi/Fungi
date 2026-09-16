@@ -1558,6 +1558,8 @@ GUI 子进程**继承了 cmd 的 stdout/stderr 写端**：cmd 自己**立刻退�
 **只调 CLI，不 import 游戏**（`fungi/tools/ghostworld.py`，`subprocess`）：游戏内部怎么改都不关这边的事；
 这边也碰不到游戏的世界（游戏侧红线：只有它的帧循环线程能改 WorldState，通道线程只投队列）。
 `ghostworld_dir` 指向游戏检出目录（空则用安装出来的 console script）。
+（填哪个目录不用猜：游戏那侧跑一次 `ghostworld --where`（或 `python -m metaverse.launch --where`）会直接打印这一行，
+并把装到哪儿、运行时写哪儿、哪不可写一并列出来。）
 
 **两半，缺一不可**：
 
