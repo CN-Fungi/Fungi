@@ -4,6 +4,8 @@ import sys
 from collections.abc import Callable
 from typing import Any, ClassVar, Protocol
 
+from . import runlog
+
 EmitFn = Callable[[str, Any], None]
 
 
@@ -39,6 +41,11 @@ class ConsoleSink:
     _RESET = "\033[0m"
 
     def emit(self, event_type: str, content: Any = None) -> None:
+        if sys.stdout is None:
+            # The packaged exe is windowed: no terminal at all. Writing would
+            # raise, and the turn would lose its trace on the way out.
+            self._log(event_type, content)
+            return
         if event_type == "text":
             sys.stdout.write(str(content))
             sys.stdout.flush()
@@ -74,3 +81,20 @@ class ConsoleSink:
         elif event_type == "error":
             print(f"\n[ERROR: {content}]")
         # newline / reasoning_start / reasoning_end: console-only cosmetics, ignored here
+
+    @staticmethod
+    def _log(event_type: str, content: Any = None) -> None:
+        """No console: keep what the agent did and what it got back in the log.
+
+        Answers and reasoning stay out — the WebUI already streams those — while
+        the two lines a "it does not do anything" report needs are the tool call
+        and its result.
+        """
+        if event_type == "error":
+            runlog.problem("agent error: %s", runlog.short(content))
+        elif event_type == "tool" and isinstance(content, dict):
+            runlog.note("tool %s %s", content.get("name"), runlog.short(content.get("args")))
+        elif event_type == "tool_result":
+            text = content.get("content") if isinstance(content, dict) else content
+            if isinstance(text, str) and text.strip():
+                runlog.note("tool result: %s", runlog.short(text[:800]))

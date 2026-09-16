@@ -77,11 +77,11 @@ class Config:
     # `screen` tool (see this machine's desktop, click/paste/type on it). Off =
     # the tool is never attached, so the model cannot even see it.
     pc_control: bool = False
-    # GhostWorld character control (spec §44): when on, the local agent gets the
+    # GhostWorld character control (spec §43): when on, the local agent gets the
     # `ghostworld` tool and a watcher that wakes it when the in-game player
     # speaks. Off = neither exists (no tool, no child process, no wakeups).
-    # `ghostworld_dir` is the game checkout — set it when the game is not
-    # installed as a package; empty means use the installed console scripts.
+    # `ghostworld_dir` is the game's own folder — a checkout, or the unpacked
+    # release (spec §44); empty means use what PATH gives (console scripts).
     ghostworld: bool = False
     ghostworld_dir: str = ""
 
@@ -103,10 +103,18 @@ _warned: set[str] = set()
 
 
 def _warn_once(key: str, message: str) -> None:
-    """Say it once per process: `load_config` runs on every tool call."""
+    """Say it once per process: `load_config` runs on every tool call.
+
+    Both ways out are needed: the console keeps its warning, and the log keeps it
+    for the windowed exe — which has no stderr at all to print to.
+    """
     if key not in _warned:
         _warned.add(key)
-        print(message, file=sys.stderr)
+        from . import runlog  # noqa: PLC0415 (deferred: runlog reads this module)
+
+        runlog.problem("%s", message)
+        if sys.stderr is not None:
+            print(message, file=sys.stderr)
 
 
 def _parse_config(text: str, source: Path) -> dict:

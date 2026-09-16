@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from fungi import session
+from fungi import runlog, session
 from fungi.agent import SYSTEM_PROMPT, Agent, public_messages
 from fungi.config import PROJECT_ROOT, RESOURCE_ROOT, load_config, save_config
 from fungi.events import Sink
@@ -912,4 +912,8 @@ class WebUIServer(ThreadingHTTPServer):
 def make_webui_server(port: int | None, runtime: WebUIRuntime) -> WebUIServer:
     """Build (not start) the WebUI server; room mode embeds this in-process."""
     handler = type("BoundHandler", (YesSirHandler,), {"runtime": runtime})
-    return WebUIServer(("0.0.0.0", _free_port(port)), handler)
+    server = WebUIServer(("0.0.0.0", _free_port(port)), handler)
+    # The one fact a phone-shaped report is missing: which port the page is on
+    # (the room picks upward from the anchor, so it is not always 8899).
+    runlog.note("WebUI listening on 0.0.0.0:%d", server.server_address[1])
+    return server

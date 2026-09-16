@@ -8,9 +8,12 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel,
+    PushButton,
     SubtitleLabel,
     TitleLabel,
 )
+
+from .. import runlog
 
 HELP_SECTIONS = [
     (
@@ -118,6 +121,18 @@ class HelpPage(QScrollArea):
             label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
             lay.addWidget(label)
             lay.addSpacing(8)
+        lay.addWidget(SubtitleLabel("连不上、不听话的时候"))
+        hint = BodyLabel(
+            "往外连的每一次尝试都写进了运行日志：程序目录下的 logs/ 里，一天一个文件，"
+            "保留两周。模型连上没有、房间找到没有、游戏通道有没有反应，里面一行行记着——"
+            "报问题的时候带上这个文件（或截几行），比描述快得多。"
+        )
+        hint.setWordWrap(True)
+        hint.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        lay.addWidget(hint)
+        open_log = PushButton("打开日志目录")
+        open_log.clicked.connect(runlog.open_folder)
+        lay.addWidget(open_log, 0, Qt.AlignLeft)
         lay.addStretch(1)
 
         self.setWidget(body)

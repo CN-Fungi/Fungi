@@ -16,6 +16,7 @@ import socket
 import sys
 from pathlib import Path
 
+from fungi import runlog
 from fungi.config import PROJECT_ROOT, local_version
 
 
@@ -43,7 +44,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    runlog.setup()  # what a bug report gets attached to (logs/ beside config.json)
     args = build_parser().parse_args(argv)
+    runlog.environment(_mode(args), sys.argv)
     if args.query:
         from fungi.cli import run_single_shot  # noqa: PLC0415 (lazy: keep --help dependency-free)
 
@@ -61,6 +64,14 @@ def main(argv: list[str] | None = None) -> int:
         return run_room(args)
     build_parser().print_help()
     return 0
+
+
+def _mode(args: argparse.Namespace) -> str:
+    """Which entry the log's banner is for: the first one that fits."""
+    for flag in ("gui", "web", "server", "join"):
+        if getattr(args, flag):
+            return flag
+    return "cli" if args.query else "help"
 
 
 def _lan_ip() -> str:

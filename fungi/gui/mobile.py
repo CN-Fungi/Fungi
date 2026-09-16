@@ -24,6 +24,7 @@ from qfluentwidgets import (
     SubtitleLabel,
 )
 
+from .. import runlog
 from . import firewall
 from .widgets import _copy, _copy_button, _row
 
@@ -144,6 +145,7 @@ class MobilePage(QWidget):
             return
         self.qr_dep_btn.setVisible(False)
         mobile_url = self.url_edit.text()
+        runlog.note("mobile page: %s", mobile_url)
 
         buf = io.BytesIO()
         segno.make(mobile_url, error="m").save(
@@ -233,9 +235,13 @@ class MobilePage(QWidget):
             return
         name = firewall.program_label()
         if allowed:
+            runlog.note("firewall: %s is allowed inbound", name)
             self.fw_label.setText(f"Windows 防火墙已放行 {name} 的入站连接，手机可以直接连。")
             self.fw_btn.setVisible(False)
         else:
+            # "The phone cannot get in" is this line more often than anything
+            # else, so the log keeps the verdict (and the exe it is about).
+            runlog.problem("firewall: %s is NOT allowed inbound — a phone cannot reach it", name)
             self.fw_label.setText(
                 f"手机连不上多半是这个原因：Windows 防火墙还没有放行 {name} 的入站连接"
                 "（源码版早就放行过 python.exe，打包版通常没人放行）。"

@@ -12,9 +12,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import runlog
+
 READ_TIMEOUT = 600  # socket inactivity timeout per read, seconds
 
 DeltaCallback = Callable[[str, str], None]  # (kind, text) with kind in {"text", "reasoning"}
+_reached: set[str] = set()  # endpoints that answered once: one line, not one per turn
 
 
 @dataclass
@@ -34,6 +37,22 @@ class LLMAbortedError(Exception):
     def __init__(self, partial: LLMResult) -> None:
         super().__init__("Aborted by user")
         self.partial = partial
+
+
+def _fail(endpoint: str, message: str) -> LLMError:
+    """One failure, two audiences: the caller gets the error, the log gets the fact.
+
+    "The agent says nothing" and "the model never answered" look identical from
+    the outside; this is the line that tells them apart in a test report.
+    """
+    runlog.problem("model call to %s failed: %s", endpoint, message)
+    return LLMError(message)
+
+
+def _reachable(endpoint: str, model: str) -> None:
+    if endpoint not in _reached:
+        _reached.add(endpoint)
+        runlog.note("model reachable: %s (%s)", endpoint, model)
 
 
 def _apply_delta(tool_acc: dict[int, dict], delta: dict) -> None:
@@ -111,9 +130,10 @@ def stream_chat(
             )
         except OSError:
             pass
-        raise LLMError(f"HTTP {exc.code}: {detail}") from exc
+        raise _fail(endpoint, f"HTTP {exc.code}: {detail}") from exc
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        raise LLMError(f"Connection failed: {getattr(exc, 'reason', exc)}") from exc
+        raise _fail(endpoint, f"Connection failed: {getattr(exc, 'reason', exc)}") from exc
+    _reachable(endpoint, model)
 
     result = LLMResult()
     tool_acc: dict[int, dict] = {}
@@ -161,20 +181,22 @@ def stream_chat(
                 if delta.get("tool_calls"):
                     _apply_delta(tool_acc, delta)
     except OSError as exc:
-        raise LLMError(f"Stream interrupted: {exc}") from exc
+        raise _fail(endpoint, f"Stream interrupted: {exc}") from exc
 
     if finish_reason == "length" and not result.content and not result.tool_calls:
-        raise LLMError(
+        raise _fail(
+            endpoint,
             "Output token cap hit (finish_reason=length): the model's reasoning consumed "
-            'the budget before producing a reply. Set "max_tokens" in config.json to raise it.'
+            'the budget before producing a reply. Set "max_tokens" in config.json to raise it.',
         )
     result.tool_calls = [tool_acc[i] for i in sorted(tool_acc)]
     # Connection closed before the finish signal. A text-only partial is still
     # worth keeping (killing the turn loses it for nothing); a partial tool call
     # is NOT usable — its arguments are truncated.
     if finish_reason is None and not saw_done and (result.tool_calls or not result.content):
-        raise LLMError(
+        raise _fail(
+            endpoint,
             "Stream ended without a finish signal: the connection closed before the model "
-            "finished generating (partial output only)."
+            "finished generating (partial output only).",
         )
     return result

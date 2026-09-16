@@ -16,6 +16,7 @@ from qfluentwidgets import (
     SystemTrayMenu,
 )
 
+from .. import runlog
 from ..tray import make_icon
 
 FLASH_MS = 500  # unread-mail flash: half a second per phase, like a ringing icon
@@ -40,6 +41,7 @@ class _Tray(QSystemTrayIcon):
         self._menu = SystemTrayMenu(title="Fungi")  # keep referenced: the tray does not own it
         self._menu.addAction(Action("显示主界面", triggered=window.show_and_raise))
         self._menu.addAction(Action("打开 WebUI", triggered=window.open_webui_from_tray))
+        self._menu.addAction(Action("打开日志", triggered=runlog.open_folder))
         self._menu.addSeparator()
         self._menu.addAction(Action("退出", triggered=window.quit_from_tray))
         self.activated.connect(self._on_activated)

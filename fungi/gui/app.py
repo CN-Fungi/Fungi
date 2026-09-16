@@ -19,6 +19,7 @@ from qfluentwidgets import (
 )
 
 from .. import config as config_mod
+from .. import runlog
 from ..config import RESOURCE_ROOT
 from ..tray import make_icon
 from . import ring
@@ -249,6 +250,10 @@ def _app_icon() -> QIcon:
 
 
 def run_gui() -> int:
+    # The exe's entry point (start.py) comes straight here, so this is where its
+    # run log is opened — before Qt, so a Qt-era crash still has a file to land in.
+    runlog.setup()
+    runlog.environment("gui", sys.argv)
     # QT_SCALE_FACTOR grows fonts, widgets and the window together (must be set
     # before QApplication exists); AA_EnableHighDpiScaling lets Qt5 honor it.
     os.environ.setdefault("QT_SCALE_FACTOR", str(GUI_SCALE))
@@ -263,7 +268,7 @@ def run_gui() -> int:
     # had the same guard).
     if _singleton_taken():
         if _activate_running_instance():
-            print("Fungi GUI 已在运行：已唤起主界面。")
+            runlog.say("Fungi GUI 已在运行：已唤起主界面。")
         else:
             QMessageBox.warning(None, "Fungi", "Fungi GUI 已在运行。")
         return 0

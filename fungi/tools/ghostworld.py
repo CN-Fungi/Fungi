@@ -39,6 +39,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from fungi import runlog
 from fungi.config import Config, load_config
 from fungi.tools.files import ImageRead, image_data_url
 
@@ -46,6 +47,7 @@ SEND_TIMEOUT_S = 20.0
 WAIT_TIMEOUT_S = 25.0  # the CLI's own read deadline; it re-arms itself after
 RESTART_DELAY_S = 5.0  # the game went away mid-stream: this is a restart, not a fault
 NO_GAME_DELAY_S = 30.0  # exit 2 = nothing to talk to; re-check rather than spin
+IDLE_LOG_S = 600.0  # ...and say so once every ten minutes, not once every re-check
 STOP_JOIN_S = 2.0
 MAX_LINE = 1 << 20
 
@@ -163,8 +165,9 @@ def _cli(verb: str, directory: str) -> list[str]:
 def _run_cli(
     verb: str, args: list[str], directory: str, timeout: float
 ) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [*_cli(verb, directory), *args],
+    argv = [*_cli(verb, directory), *args]
+    proc = subprocess.run(
+        argv,
         cwd=directory or None,
         capture_output=True,
         text=True,
@@ -174,6 +177,24 @@ def _run_cli(
         check=False,
         creationflags=NO_WINDOW,  # silent: a console window of its own would flash
     )
+    # Every trip to the game, on the record: "the agent did not answer" and "the
+    # CLI never got there" look the same from the chat window, and this is the
+    # line that separates them (the tester's report is usually this file).
+    runlog.note(
+        "channel --%s %s (cwd=%s) -> exit %s%s",
+        verb,
+        runlog.short(" ".join(argv), 300),
+        directory or ".",
+        proc.returncode,
+        _stderr_note(proc),
+    )
+    return proc
+
+
+def _stderr_note(proc: subprocess.CompletedProcess) -> str:
+    """The child's own last words, if it had any."""
+    err = (proc.stderr or "").strip()
+    return f" stderr{_tail(err)}" if err else ""
 
 
 def send_command(cmd: dict, directory: str) -> str:
@@ -181,18 +202,26 @@ def send_command(cmd: dict, directory: str) -> str:
     try:
         proc = _run_cli("send", [json.dumps(cmd, ensure_ascii=False)], directory, SEND_TIMEOUT_S)
     except FileNotFoundError:
+        runlog.problem("no GhostWorld channel CLI found (ghostworld_dir=%r)", directory)
         return (
             "ERROR: the GhostWorld channel CLI was not found — install the game "
             "(pip install -e <repo>), unpack the release and set ghostworld_dir to its folder, "
             "or put that folder on PATH"
         )
     except subprocess.TimeoutExpired:
+        runlog.problem("channel send timed out after %.0fs", SEND_TIMEOUT_S)
         return f"ERROR: GhostWorld did not answer within {SEND_TIMEOUT_S:.0f}s"
     out = (proc.stdout or "").strip()
     err = (proc.stderr or "").strip()
     if proc.returncode == 0:
         return out or "(no output)"
     if proc.returncode == 2:
+        channel = _channel_file(directory)
+        runlog.problem(
+            "channel send: nothing listening (channel file %s %s)",
+            channel,
+            "exists" if channel.exists() else "missing",
+        )
         return (
             "ERROR: no GhostWorld channel — the game is not running (the user may need to start it)"
         )
@@ -251,6 +280,7 @@ class _Watch:
     stop: threading.Event | None = None
     thread: threading.Thread | None = None
     child: subprocess.Popen | None = None
+    directory: str = ""  # what it is watching: the log says which game
 
 
 _watch = _Watch()
@@ -284,6 +314,7 @@ def arm(directory: str, on_wake: Callable[[dict], None]) -> bool:
         if _watch.thread is not None and _watch.thread.is_alive():
             return False
         _watch.stop = threading.Event()
+        _watch.directory = directory
         _watch.thread = threading.Thread(
             target=_watch_loop,
             args=(directory, on_wake, _watch.stop),
@@ -291,6 +322,12 @@ def arm(directory: str, on_wake: Callable[[dict], None]) -> bool:
             daemon=True,
         )
         _watch.thread.start()
+    runlog.note(
+        "watching for player speech (dir=%r channel=%s cli=%s)",
+        directory or ".",
+        _channel_file(directory),
+        _cli("wait", directory)[0],
+    )
     return True
 
 
@@ -298,30 +335,38 @@ def disarm() -> None:
     """Stop watching and kill the child; safe to call when never armed."""
     with _watch.lock:
         stop, thread, child = _watch.stop, _watch.thread, _watch.child
-        _watch.stop, _watch.thread, _watch.child = None, None, None
+        directory = _watch.directory
+        _watch.stop, _watch.thread, _watch.child, _watch.directory = None, None, None, ""
     if stop is not None:
         stop.set()
     if child is not None:
         _kill(child)
     if thread is not None:
+        runlog.note("stopped watching for player speech (dir=%r)", directory or ".")
         thread.join(timeout=STOP_JOIN_S)
 
 
 def _spawn(directory: str) -> subprocess.Popen | None:
     """The follower child. A seam: tests replace this instead of a real process."""
+    argv = [*_cli("wait", directory), "--timeout", str(int(WAIT_TIMEOUT_S)), "--follow"]
     try:
-        return subprocess.Popen(
-            [*_cli("wait", directory), "--timeout", str(int(WAIT_TIMEOUT_S)), "--follow"],
+        child = subprocess.Popen(
+            argv,
             cwd=directory or None,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            # Merged, not discarded: the follower is the half of this channel
+            # that fails in silence, and its complaint is the log's job now.
+            stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
             creationflags=NO_WINDOW,  # the follower lives for minutes: no window, ever
         )
     except OSError:
+        runlog.problem("could not start the follower: %s", runlog.short(" ".join(argv), 300))
         return None
+    runlog.note("follower started: %s", runlog.short(" ".join(argv), 300))
+    return child
 
 
 def _kill(child: subprocess.Popen) -> None:
@@ -332,11 +377,18 @@ def _kill(child: subprocess.Popen) -> None:
 
 
 def _watch_loop(directory: str, on_wake: Callable[[dict], None], stop: threading.Event) -> None:
+    idle_key = f"gw:no-game:{directory}"
     while not stop.is_set():
         if not game_is_up(directory):
             # Nothing to watch yet: launching the follower now would only buy a
             # child that exits at once. Waiting for the game to appear costs one
             # stat call, and its cursor means the first lines are still ours.
+            runlog.warn_once(
+                idle_key,
+                "no GhostWorld channel at %s — waiting for the game to start",
+                _channel_file(directory),
+                interval=IDLE_LOG_S,
+            )
             stop.wait(NO_GAME_DELAY_S)
             continue
         child = _spawn(directory)
@@ -358,6 +410,17 @@ def _watch_loop(directory: str, on_wake: Callable[[dict], None], stop: threading
         # quickly once the game was really there. Either way no event is lost —
         # the game holds the follower's cursor, so a reconnect resumes where the
         # last session stopped.
+        if child.returncode == 2:
+            # The same "no game" condition as above, on the same throttle: an
+            # idle machine must not fill the day's file with this one line.
+            runlog.warn_once(
+                idle_key,
+                "the follower found no game (exit 2); re-checking every %.0fs",
+                NO_GAME_DELAY_S,
+                interval=IDLE_LOG_S,
+            )
+        else:
+            runlog.note("follower exited %s: the stream ended, reconnecting", child.returncode)
         delay = NO_GAME_DELAY_S if child.returncode == 2 else RESTART_DELAY_S
         stop.wait(delay)
 
@@ -373,7 +436,12 @@ def _read_events(
             continue
         event = _parse(line)
         if event is not None:
+            runlog.note("player speech: %s", runlog.short(wake_text(event)))
             on_wake(event)
+        elif line.strip() and not line.lstrip().startswith("{"):
+            # The follower's own words (its stderr is merged in here): a channel
+            # that dies on startup says why on this line, and nowhere else.
+            runlog.note("channel: %s", runlog.short(line, 300))
 
 
 def _parse(line: str) -> dict | None:

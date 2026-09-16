@@ -7,6 +7,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from .. import runlog
 from ..protocol import Envelope, ProtocolError, deserialize
 
 POLL_CAP = 25.0
@@ -22,6 +23,7 @@ class HubClient:
         self.token = token
         self.host = host
         self.display = display
+        self._trouble = False  # hub stopped answering: the log's throttling edge
 
     # ── plumbing ──
 
@@ -37,16 +39,30 @@ class HubClient:
         req = urllib.request.Request(url, data=data, method=method)
         try:
             with urllib.request.urlopen(req, timeout=40) as resp:
-                return json.loads(resp.read())
+                out = json.loads(resp.read())
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             try:
                 detail = json.loads(body).get("error", body)
             except json.JSONDecodeError:
                 detail = body
+            self._note_trouble(f"{path}: HTTP {exc.code}: {detail}")
             raise HubError(f"{path}: HTTP {exc.code}: {detail}") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            self._note_trouble(f"{path}: {exc}")
             raise HubError(f"{path}: {exc}") from exc
+        if self._trouble:
+            self._trouble = False
+            runlog.forget(f"hub:{self.base}")
+            runlog.note("hub %s is answering again", self.base)
+        return out
+
+    def _note_trouble(self, why: str) -> None:
+        """The hub stopped answering. A room polls every second, so the log gets
+        one line a minute — and one line when it comes back, which is how you
+        tell a flapping link from a room that never came up."""
+        self._trouble = True
+        runlog.warn_once(f"hub:{self.base}", "hub %s request failed: %s", self.base, why)
 
     # ── room ops ──
 

@@ -13,6 +13,8 @@ from PyQt5.QtGui import QColor, QCursor, QIcon, QPainter, QPixmap
 from PyQt5.QtWidgets import QApplication, QSystemTrayIcon
 from qfluentwidgets import Action, MenuAnimationType, SystemTrayMenu
 
+from . import runlog
+
 _ACCENT = "#e07a5f"
 _ALERT = "#e5484d"
 
@@ -73,6 +75,7 @@ class TrayController(QSystemTrayIcon):
         menu = SystemTrayMenu(title="Fungi")
         menu.addAction(Action("打开 WebUI", triggered=self._on_open_webui))
         menu.addAction(Action("打开数据目录", triggered=self._open_data_dir))
+        menu.addAction(Action("打开日志", triggered=runlog.open_folder))
         menu.addSeparator()
         menu.addAction(Action("退出", triggered=QApplication.quit))
         self._menu = menu  # keep referenced: the tray does not own it

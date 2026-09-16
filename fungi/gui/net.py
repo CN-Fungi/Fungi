@@ -8,6 +8,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 from .. import config as config_mod
+from .. import runlog
 from ..config import (
     PROJECT_ROOT,
 )
@@ -97,6 +98,12 @@ def discover_room(token: str) -> tuple[str, int] | None:
     hosts (parallel): the common case (room at the 8899 anchor) lands in the
     first round instead of walking a 32-port window per host."""
     hosts = local_subnet_hosts()
+    runlog.note(
+        "sweeping %s.* ports %d..%d for a room",
+        lan_ip().rsplit(".", 1)[0],
+        GUI_PORT,
+        GUI_PORT + PORT_SCAN_LIMIT - 1,
+    )
     with ThreadPoolExecutor(max_workers=128) as pool:
         for offset in range(PORT_SCAN_LIMIT):
             port = GUI_PORT + offset
@@ -104,7 +111,15 @@ def discover_room(token: str) -> tuple[str, int] | None:
                 hosts, pool.map(lambda h, p=port: _port_open(h, p), hosts), strict=True
             ):
                 if ok and _room_accepts(ip, port, token):
+                    runlog.note("room found: %s:%d accepted the token", ip, port)
                     return ip, port
+    runlog.problem(
+        "no room answered on this subnet (%s.*, ports %d..%d) — the host may not have "
+        "started one, the token may differ, or the two machines are not on one LAN",
+        lan_ip().rsplit(".", 1)[0],
+        GUI_PORT,
+        GUI_PORT + PORT_SCAN_LIMIT - 1,
+    )
     return None
 
 
@@ -121,13 +136,25 @@ def probe_room_port(ip: str, token: str, start: int = GUI_PORT, limit: int = POR
         try:
             with urllib.request.urlopen(url, timeout=PROBE_TIMEOUT) as resp:
                 if resp.status == 200:  # valid token and "probe" listed: our room
+                    runlog.note("room found: %s:%d accepted the token", ip, port)
                     return port
         except urllib.error.HTTPError as exc:
             if exc.code == 404:  # token OK, host "probe" just unknown: our room
+                runlog.note("room found: %s:%d accepted the token", ip, port)
                 return port
+            runlog.problem(
+                "%s:%d answered HTTP %d — wrong token, or another room", ip, port, exc.code
+            )
             continue  # 403: different room / wrong token
-        except (urllib.error.URLError, OSError, TimeoutError):
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            runlog.problem("%s:%d answered but not as a hub: %s", ip, port, exc)
             continue
+    runlog.problem(
+        "no room at %s (ports %d..%d): nothing listening, or the token differs",
+        ip,
+        start,
+        start + limit - 1,
+    )
     return None
 
 
@@ -136,6 +163,7 @@ def start_server_room(host: str, display: str, token: str, port: int):
     from ..events import ConsoleSink  # noqa: PLC0415 (Qt-free, cheap)
     from ..room import RoomServer  # noqa: PLC0415
 
+    runlog.note("hosting a room as %r on port %d (LAN %s)", host, port, lan_ip())
     room = RoomServer(
         host,
         config_mod.load_config(),
@@ -154,8 +182,10 @@ def start_client_room(host: str, display: str, url: str, token: str):
     from ..events import ConsoleSink  # noqa: PLC0415
     from ..room import RoomClient  # noqa: PLC0415
 
+    runlog.note("joining the room at %s as %r", url, host)
     room = RoomClient(host, config_mod.load_config(), ConsoleSink(), url, token, display=display)
     room.start()
+    runlog.note("joined %s", url)
     return room
 
 

@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
+from .. import runlog
 from ..protocol import (
     BAD_NAME_MSG,
     Envelope,
@@ -193,6 +194,7 @@ class Hub:
         handler = type("HubHandler", (_Handler,), {"hub": self})
         self._server = ThreadingHTTPServer(("0.0.0.0", self._bind_port), handler)
         self._server.daemon_threads = True
+        runlog.note("hub listening on 0.0.0.0:%d as %r", self.port, self.name)
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="fungi-hub", daemon=True
         )
@@ -203,6 +205,7 @@ class Hub:
     def stop(self) -> None:
         self._stop.set()
         if self._server is not None:
+            runlog.note("hub on port %d stopped", self._server.server_address[1])
             self._server.shutdown()
             self._server.server_close()
             self._server = None
@@ -324,6 +327,21 @@ class _Handler(BaseHTTPRequestHandler):
             # time; a gone reader is routine, not an error worth a traceback.
             self.close_connection = True
 
+    def _bad_token(self) -> None:
+        """Someone knocked with the wrong token — the host's half of "I cannot join".
+
+        Throttled per caller: a client holding a stale token polls once a second,
+        and the log is worth reading only if this is one line a minute.
+        """
+        peer = self.client_address[0]
+        runlog.warn_once(
+            f"hub-bad-token:{peer}",
+            "hub: %s used the wrong token (%s) — a friend holding an old token?",
+            peer,
+            self.path,
+        )
+        self._reply({"error": "bad token"}, 403)
+
     def _body(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
         if length > MAX_BODY:
@@ -344,7 +362,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             body = self._body()
             if body.get("token") != self.hub.token:
-                self._reply({"error": "bad token"}, 403)
+                self._bad_token()
                 return
             path = url.path
             if path == "/api/join":
@@ -375,7 +393,7 @@ class _Handler(BaseHTTPRequestHandler):
         params = parse_qs(url.query)
         token = (params.get("token") or [""])[0]
         if token != self.hub.token:
-            self._reply({"error": "bad token"}, 403)
+            self._bad_token()
             return
         if url.path == "/api/mail":
             self._mail(params)
@@ -399,7 +417,7 @@ class _Handler(BaseHTTPRequestHandler):
         params = parse_qs(url.query)
         token = (params.get("token") or [""])[0]
         if token != self.hub.token:
-            self._reply({"error": "bad token"}, 403)
+            self._bad_token()
             return
         if url.path == "/api/transfer":
             body = self._body()
@@ -551,7 +569,7 @@ class _Handler(BaseHTTPRequestHandler):
         params = parse_qs(url.query)
         token = (params.get("token") or [""])[0]
         if token != self.hub.token:
-            self._reply({"error": "bad token"}, 403)
+            self._bad_token()
             return
         host = (params.get("host") or [""])[0]
         to_host = (params.get("to") or [""])[0]
