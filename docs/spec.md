@@ -1606,3 +1606,72 @@ observation（`see`/`goto_done`/`position`…）不叫醒，要用时用工具�
 `tests/test_gui.py::test_the_ghostworld_switch_sits_under_experimental_and_disarms_when_off`。
 **真机 LLM 回合（用户 2026-09-15 实测）**：玩家在游戏里说了一句，Agent 被叫醒后连着 `pos` → `look` → `say` → `track` 四个调用全部成功——
 「叫醒 + 命令往返」这条线在真模型下走通了。（当时文本变乱码：是游戏侧 CLI 的 stdout 用了控制台代码页，已在 GhostWorld 修掉，不是这边的契约问题。）
+
+## 44. 三种安装形状与「窗口」这一课（2026-09-16）
+
+**同一个游戏，三种装法，通道文件在哪**（`ghostworld.py` 的 `packed_cli`/`_cli`/`_channel_file`）：
+
+| 装法 | 怎么起通道 CLI | 通道发现文件 |
+|---|---|---|
+| 源码检出 | `python -m metaverse.cli_channel <verb>`（`ghostworld_dir` 指向检出根） | `<检出>/metaverse/.channel.json` |
+| pip 安装 | console script `ghostworld-<verb>`（`ghostworld_dir` 可留空） | 装到哪就写在哪旁边 |
+| 解压出来的 exe 发行包 | `GhostWorldCLI.exe <verb>`：先看 `ghostworld_dir` 那一层，再看 PATH | `%LOCALAPPDATA%\GhostWorld\.channel.json` |
+
+发行包写不了自己那一层（可能只读、也随时会被清掉），所以通道与地图落在用户数据目录；`ghostworld_dir` 填的就是
+**解压出来那一层**（`GhostWorld.exe` 与 `GhostWorldCLI.exe` 的旁边）。选哪条不用猜：游戏那侧跑一次
+`ghostworld --where`，会把「装在哪 / 运行时写哪 / 哪不可写」直接打印出来。
+
+**控制台窗口这一课（2026-09-16 用户报「发送信息后弹出 cli」）**：Fungi 的 exe 是 `--noconsole`，自己**没有**控制台；
+Windows 会给它启动的**任何控制台程序**（`GhostWorldCLI.exe` 就是）分配一个**新的控制台窗口**。修法 =
+`_run_cli` 与 `_spawn` 两处 spawn 都带 `getattr(subprocess, "CREATE_NO_WINDOW", 0)`。真机 A/B（父进程自己也没有控制台，
+按窗口类名 `ConsoleWindowClass` 比 spawn 前后的窗口集合）：旧写法 +**2** 个可见控制台窗口，新写法 **0** 个，
+follower 照常连上、`pos`/`say` 拿真 ack。（在 bash 里跑 python 永远量不到这种弹窗——子进程会继承 bash 的控制台。）
+
+**硬杀游戏留下的 stale `.channel.json`**：`game_is_up()` 只看文件在不在（这是不连线就能拿到的唯一证据），
+所以硬杀之后监视器每 **30s** 起一个注定退 **2** 的子进程——事件不会丢（游标在游戏那边），窗口也不再弹，
+但这是纯空转。彻底修法要确认「这通道真有人在听」（查文件里的 `pid` 是否活着，或对 `port` 做一次短连接）。
+
+## 45. 运行日志（2026-09-16 用户点名）：打包版没有终端，所以留一个文件
+
+**用户原话**：「给 fungi 加个测试日志，方便 release 测试连接不上的问题」。Fungi 的 exe 是 `--noconsole`：
+既没有终端可以回翻，`sys.stdout`/`sys.stderr` 也是 `None`——一次「连不上」的测试**什么都不留下**，
+而报告最需要的恰恰是「试了哪个地址、谁试的、对方回了什么」。
+
+**文件在哪**（`fungi/runlog.py`）：`logs/fungi-YYYYMMDD.log`，就在 `config.json` 与 `data/` 旁边（exe 的目录）；
+按天追加、保留 **14 天**（启动时清掉过期文件）。程序目录不可写（比如解压进 Program Files）时，
+退到 `%LOCALAPPDATA%\Fungi\logs`。`logs/` 进 `.gitignore`；文件是追加打开的，
+所以测试**可以在程序还开着的时候**直接打开它看。
+
+**谁写**：只有入口调 `setup()`——`__main__.main()` 与 `gui/app.py::run_gui()`（exe 从 `start.py` 直达后者），
+其它模块只调 `runlog.note` / `problem` / `warn_once`。导入 Fungi 或跑测试**不写任何文件**（模块默认挂 `NullHandler`）。
+
+**横幅**（每次运行一段）：版本 / python / 平台 / frozen / 根目录 / argv / config 路径与存在性 /
+模型与 endpoint / **api_key 有没有（绝不写它本身）** / ghostworld 开关与目录。
+
+**最值钱的一条**：`sys.excepthook` + `threading.excepthook` 的 traceback。窗口版 exe 崩掉是**无声**的，
+而 PyQt5 在 `qFatal` 之前会走 `sys.excepthook`，所以打包版的崩溃现在也留痕。
+
+**「连不上」清单**（每条出站尝试一行）：
+
+| 段 | 记什么 |
+|---|---|
+| 模型 | 失败原因（endpoint + HTTP / 连接失败 / 流中断 / 没有 finish 信号）；**首次连通**写一行 `model reachable` ——「模型没答」与「模型没连上」从此分得开 |
+| 房间 | hub 每次请求失败（按 key **60s 节流**）+ 恢复一行 `is answering again`；房主侧 `hub listening on 0.0.0.0:<port>`；**拿错 token 的敲门**（`used the wrong token`，按来客节流） |
+| 找房 | 扫的网段与端口区间、找到的 `ip:port`、没找到时三种可能（房主没起 / token 不同 / 不在同一网段），以及每个有响应但不是 hub 的端口 |
+| WebUI / 手机 | `WebUI listening on 0.0.0.0:<port>`（端口从 8899 往上找，不是固定的）、手机页 URL、**Windows 防火墙判定**（未放行＝手机连不上最常见的一因） |
+| GhostWorld | 每次 CLI 调用（命令、cwd、退出码、**stderr 尾**）、follower 起停与退出码、通道文件在不在、玩家发言、follower 自己合并进来的输出 |
+
+**打包版的三个静默点一并修掉**（同源：`sys.stdout is None`）：`runlog.say()` 让「给用户看的一句话」在没有控制台时进日志；
+`config._warn_once` 不再对 `None` 的 stderr 执行 `print`；`ConsoleSink` 在没有 stdout 时把 `tool`/`tool_result`/`error`
+写进日志——以前这三行**直接消失**，连「Agent 到底调没调工具」都无从查起。
+
+**音量**：`warn_once(key, interval)` 按 key 节流（默认 60s；GhostWorld 空转 600s），连上后 `forget(key)` 让下一次失败立刻可写。
+一个闲着但开着开关的进程一天几十行，不是每 30s 一行。
+
+**用户怎么拿到它**：房间托盘与 GUI 托盘菜单都有「打开日志」；帮助页最后一节「连不上、不听话的时候」带「打开日志目录」按钮。
+
+**验收**：`tests/test_runlog.py`（12 例）钉住一天一个文件、每键节流、横幅不写 key、traceback 落地、无 stdout 时 sink 仍留痕、
+14 天清理、只读目录回落。**真机探针**（真 hub + 真 RoomServer/RoomClient + 真 GhostWorld CLI，无 LLM）跑出的日志里逐条对上了
+`hub listening on 0.0.0.0:53994`、`used the wrong token`、`WebUI listening on 0.0.0.0:53999`、
+`hub http://127.0.0.1:9 request failed: … [WinError 10061]`（连打 5 次只 1 行）、
+`channel --send ghostworld-send {"cmd": "pos"} (cwd=.) -> exit 2 stderr: … channel unreachable on port 60740`。
