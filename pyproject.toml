@@ -1,6 +1,6 @@
 [project]
 name = "fungi"
-version = "0.6.2"
+version = "0.7.0"
 description = "Fungi — LAN multi-host Orchestrator network built on the YESIR TriLayer agent harness"
 requires-python = ">=3.13"
 # comtypes drives UI Automation for the screen tool (spec §35): pure Python, and
@@ -73,7 +73,7 @@ testpaths = ["tests"]
 "fungi/tools/ask.py" = ["RUF001"]
 # …and the screen tool's ask cards + tray hints (spec §35) are Chinese too
 "fungi/tools/screen.py" = ["RUF001"]
-# …and the ghostworld connector's player-facing labels + error lines (spec §44)
+# …and the ghostworld connector's player-facing labels + error lines (spec §43)
 "fungi/tools/ghostworld.py" = ["RUF001", "RUF002", "RUF003"]
 # …and the warning a hand-edited config.json gets when it does not parse
 "fungi/config.py" = ["RUF001"]
