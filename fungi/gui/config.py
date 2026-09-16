@@ -204,12 +204,26 @@ class ConfigPage(QWidget):
         root.addLayout(gw_row)
         gw_hint = BodyLabel(
             "让本机 Agent 在本机的 GhostWorld 里控制一个角色：玩家说话它就醒过来，用角色自己的嘴回话、\n"
-            "走动、拾取东西。需要游戏正在运行（config.json 的 ghostworld_dir 指向游戏目录；"
-            "已 pip 安装的可留空）。\n"
+            "走动、拾取东西。需要游戏正在运行（config.json 的 ghostworld_dir 指向游戏目录——\n"
+            "源码检出或解压出来的 exe 发行包那一层都行；已 pip 安装的可留空）。\n"
             "关掉开关立刻收回：工具从工具面移除，等玩家说话的监视进程也一并结束。"
         )
         gw_hint.setWordWrap(True)
         root.addWidget(gw_hint)
+
+        # 游戏目录：发行包/源码检出那一层（spec §44）。粘进来的是 Windows 原样路径，
+        # 回车时规范化成正斜杠再写盘——config.json 里就不会出现非法转义（2026-09-16 用户要求）。
+        self.gw_dir_edit = LineEdit()
+        self.gw_dir_edit.setPlaceholderText(
+            "例如 C:/Users/me/GhostWorld（留空 = 用 PATH 上的 GhostWorldCLI.exe / ghostworld-send）"
+        )
+        self.gw_dir_edit.setText(config_mod.load_config().ghostworld_dir)
+        # 路径都长：让它撑满这一行，整条读得出来，而不是只露尾巴
+        self.gw_dir_edit.setMinimumWidth(420)
+        self.gw_dir_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.gw_dir_edit.setClearButtonEnabled(True)
+        self.gw_dir_edit.returnPressed.connect(self._save_ghostworld_dir)
+        root.addWidget(_row("游戏目录", self.gw_dir_edit))
 
         # 视频理解（小标题）：进场自动检查，缺失才给下载入口（video 工具拒绝现场下载）
         root.addSpacing(10)
@@ -250,6 +264,14 @@ class ConfigPage(QWidget):
 
     def showEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         super().showEvent(event)
+        # config.json 读不出来（单反斜杠那类）就当场改写成合法 JSON，并把这件事说到
+        # 右上角。放在 showEvent 里而不是构造里：页面跟着窗口一起造，模块级的窗口
+        # fixture 先于函数级的 config 路径重定向建立 —— 构造期写盘会绕过重定向，
+        # 直接写到用户的真配置上（conftest 里那条 2026-09-10 的教训）。
+        note = config_mod.repair_config_file()
+        if note:
+            InfoBar.warning("配置文件已修正", note, duration=5000, parent=self.window_ref)
+            self.gw_dir_edit.setText(config_mod.load_config().ghostworld_dir)
         # 模型可能在别处（命令行/WebUI）改了：进页就照当前配置刷新三个框
         self._load_fields()
         # 模型可能在别处（命令行）补装了；下载中则保持进度文案不动
@@ -457,6 +479,34 @@ class ConfigPage(QWidget):
             duration=2500,
             parent=self.window_ref,
         )
+
+    def _save_ghostworld_dir(self) -> None:
+        """游戏目录：回车即写盘；路径当场规范成 config.json 认得的样子。
+
+        右键"复制文件地址"给的是 `"C:\\…\\GhostWorld"`（带引号、单反斜杠），手打的路径也
+        是单反斜杠。原样写进 JSON 就是非法转义，整份配置会读不出来（连 api key 一起），
+        所以这里统一换成不含转义问题的正斜杠，并告诉用户改了什么。
+        """
+        raw = self.gw_dir_edit.text()
+        value, changed = config_mod.normalize_dir(raw)
+        cfg = config_mod.load_config()
+        cfg.ghostworld_dir = value
+        config_mod.save_config(cfg)
+        self.gw_dir_edit.setText(value)  # 框里显示的就是写进去的那份
+        if changed:
+            InfoBar.success(
+                "路径已规范化",
+                f"引号和 \\ 已经换成正斜杠：{value or '（已清空：改用 PATH 上的 CLI）'}",
+                duration=3000,
+                parent=self.window_ref,
+            )
+        else:
+            InfoBar.success(
+                "已保存",
+                f"游戏目录：{value or '（留空 = 用 PATH 上的 CLI）'}",
+                duration=2500,
+                parent=self.window_ref,
+            )
 
     def _toggle_ring(self, checked: bool) -> None:
         """来信铃声开关：即时写盘（下一次响铃就按新设置来）。"""

@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import sys
 import tomllib
 from dataclasses import dataclass, field
@@ -93,14 +94,115 @@ class Config:
         return self.layer_models.get(layer) or self.model
 
 
+# Explorer's "Copy as path" hands over `C:\Users\me\GhostWorld`, and a lone
+# backslash is not a legal JSON escape — so a config edited that way failed to
+# parse whole, taking the api key and every switch down with it.
+_NOT_AN_ESCAPE = re.compile(r'\\(?!["\\/bfnrtu])')
+
+_warned: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """Say it once per process: `load_config` runs on every tool call."""
+    if key not in _warned:
+        _warned.add(key)
+        print(message, file=sys.stderr)
+
+
+def _parse_config(text: str, source: Path) -> dict:
+    """Parse the file, repairing the one mistake Windows users keep making.
+
+    Only backslashes JSON itself rejects are doubled, so `\\`, `\\n`, `\\"` and
+    `\\u00e9` keep their meaning. The repair is in memory: the user's file is read
+    and reported on, never rewritten behind their back.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        repaired = _NOT_AN_ESCAPE.sub(r"\\\\", text)
+        if repaired != text:
+            try:
+                data = json.loads(repaired)
+            except json.JSONDecodeError:
+                pass
+            else:
+                _warn_once(
+                    f"repaired:{source}",
+                    f"[config] {source} 里的 Windows 路径没转义（\\U 这类）：已按字面读进来，文件没改",
+                )
+                return data
+        # Falling back to defaults is silent for the user and total in effect:
+        # the api key, the model and every switch they just set are discarded.
+        _warn_once(
+            f"broken:{source}",
+            f"[config] {source} 不是合法 JSON（{exc}）→ 本次按默认值运行，你的设置没有生效",
+        )
+        return {}
+
+
+def normalize_dir(value: str) -> tuple[str, bool]:
+    """A folder as a person hands it over, in the one shape this program stores.
+
+    Explorer's "Copy as path" gives `"C:\\Users\\me\\GhostWorld"` — quotes included —
+    and a hand-typed path keeps its backslashes. Stored as-is inside config.json,
+    those backslashes are an invalid JSON escape that made the whole file
+    unreadable (api key and every switch with it). Forward slashes, no quotes, is
+    what goes in; the second half of the pair is "did we have to change it".
+    """
+    cleaned = value.strip().strip('"').strip("'").strip()
+    cleaned = cleaned.replace("\\", "/")
+    return cleaned, cleaned != value
+
+
+def repair_config_file(path: Path | None = None) -> str | None:
+    """Rewrite a config.json that cannot be read, in the correct format.
+
+    Returns a sentence for the user (the settings page shows it top-right) or None
+    when there was nothing to do: a file that already parses, a missing file, or
+    damage that is not the mistake we can fix without guessing.
+
+    Nothing but the backslashes JSON rejects is touched, and the file is rewritten
+    from the *parsed* document — so keys this version knows nothing about survive.
+    """
+    source = path if path is not None else CONFIG_PATH
+    try:
+        original = source.read_text(encoding="utf-8-sig")
+    except OSError:
+        return None
+    try:
+        json.loads(original)
+    except json.JSONDecodeError:
+        pass
+    else:
+        return None
+    repaired = _NOT_AN_ESCAPE.sub(r"\\\\", original)
+    if repaired == original:
+        return None
+    try:
+        data = json.loads(repaired)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if isinstance(data.get("ghostworld_dir"), str):
+        data["ghostworld_dir"], _ = normalize_dir(data["ghostworld_dir"])
+    try:
+        source.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+    except OSError:
+        return None
+    return (
+        f"{source.name} 里的 Windows 路径没转义，已改写成合法 JSON（路径换成正斜杠，其它内容没动）"
+    )
+
+
 def load_config(path: Path | None = None) -> Config:
     """Load config from JSON file, then apply env overrides."""
     cfg = Config()
     source = path if path is not None else CONFIG_PATH
     if source.is_file():
         try:
-            data = json.loads(source.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError):
+            data = _parse_config(source.read_text(encoding="utf-8-sig"), source)
+        except OSError:
             data = {}
         if data.get("api_key"):
             cfg.api_key = data["api_key"]

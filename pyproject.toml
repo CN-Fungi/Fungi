@@ -75,6 +75,8 @@ testpaths = ["tests"]
 "fungi/tools/screen.py" = ["RUF001"]
 # …and the ghostworld connector's player-facing labels + error lines (spec §44)
 "fungi/tools/ghostworld.py" = ["RUF001", "RUF002", "RUF003"]
+# …and the warning a hand-edited config.json gets when it does not parse
+"fungi/config.py" = ["RUF001"]
 # Tests: Chinese docstrings and test data (RUF00x), deferred imports of optional
 # deps and fixtures (PLC0415), unused fixture/lambda arguments (ARG*), and
 # class-level lookup tables (RUF012) are all deliberate test idioms here.

@@ -1,5 +1,6 @@
 """GUI launcher smoke: three pages construct offscreen; validation logic holds."""
 
+import json
 import os
 import pathlib
 import time
@@ -299,6 +300,80 @@ def test_the_ghostworld_switch_sits_under_extensions_and_disarms_when_off(window
     assert saved["ghostworld"] is False
     assert disarmed == [True]
     assert config_bytes() == before
+
+
+def test_the_ghostworld_dir_box_normalizes_a_pasted_path(window, monkeypatch):
+    """游戏目录输入框：右键"复制文件地址"给的就是带引号、单反斜杠的字符串。
+
+    它得照用，而且写进 config.json 的必须是合法 JSON —— 单反斜杠是非法转义，
+    会让整份配置（连 api key）读不出来，所以回车时当场规范成正斜杠。
+    """
+    from fungi.gui import config as config_page
+
+    saved = {}
+    monkeypatch.setattr(
+        config_page.config_mod,
+        "save_config",
+        lambda cfg: saved.update(dir=cfg.ghostworld_dir),
+    )
+
+    page = window.cfg_page
+    root = page.layout()
+    extensions = -1
+    for i in range(root.count()):
+        widget = root.itemAt(i).widget()
+        if widget is not None and getattr(widget, "text", lambda: None)() == "拓展":
+            extensions = i
+    assert extensions > -1, "「拓展」大标题不见了"
+
+    def slot(target, layout=None):
+        """Top-level index of the item holding `target` — rows nest inside a holder."""
+        layout = root if layout is None else layout
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item.widget() is target:
+                return i
+            holder = item.widget()
+            inner = item.layout() or (holder.layout() if holder is not None else None)
+            if inner is not None and slot(target, inner) != -1:
+                return i
+        return -1
+
+    assert slot(page.gw_dir_edit) > extensions, "游戏目录框要在「拓展」一节里"
+    assert "\\" not in page.gw_dir_edit.text(), "框里显示的是规范化之后的值"
+
+    page.gw_dir_edit.setText('"C:\\Users\\me\\GhostWorld"')  # 原样粘贴
+    QTest.keyClick(page.gw_dir_edit, Qt.Key_Return)
+
+    assert saved["dir"] == "C:/Users/me/GhostWorld", "写进去的是不含转义问题的形式"
+    assert page.gw_dir_edit.text() == "C:/Users/me/GhostWorld", "框里显示的就是存下来的那份"
+
+
+def test_opening_the_settings_page_repairs_an_unreadable_config(window):
+    """读不出来的 config.json（单反斜杠那类）在进页面时就改写成合法 JSON。
+
+    同时也钉住写盘只落在重定向后的路径上：真 config.json 一个字节都不许动
+    （模块级窗口 fixture 先于函数级重定向建立，构造期写盘的写法会打穿它）。
+    """
+    from PyQt5.QtGui import QShowEvent
+
+    from fungi.gui import config as config_page
+
+    target = config_page.config_mod.CONFIG_PATH
+    target.write_text(
+        '{"api_key": "k", "ghostworld": true, "ghostworld_dir": "C:\\Users\\me\\GhostWorld"}',
+        encoding="utf-8",
+    )
+    real = pathlib.Path("config.json")
+    real_before = real.read_bytes() if real.is_file() else None
+
+    window.cfg_page.showEvent(QShowEvent())
+
+    data = json.loads(target.read_text(encoding="utf-8"))
+    assert data["api_key"] == "k" and data["ghostworld"] is True
+    assert data["ghostworld_dir"] == "C:/Users/me/GhostWorld"
+    assert window.cfg_page.gw_dir_edit.text() == "C:/Users/me/GhostWorld", "框里跟着刷新"
+    assert (real.read_bytes() if real.is_file() else None) == real_before, "真 config 不许被碰"
 
 
 def test_firewall_probe_parses_the_rule_count():
