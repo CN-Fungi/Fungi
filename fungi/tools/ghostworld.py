@@ -19,11 +19,19 @@ Two halves, on purpose:
 
 Both are inert until the switch is on — off means the tool is never attached, so
 the model cannot see it (same rule as `pc_control`, spec §35).
+
+Three installs are spoken to the same way: a packed release (`GhostWorldCLI.exe`
+in a release folder or on PATH), a checkout named by `ghostworld_dir`, and the
+console scripts the package installs. Only the *discovery* differs — a checkout
+writes its channel file beside its code, a packed release under the user's app
+data — so both places are looked at rather than assumed.
 """
 
 import atexit
 import contextlib
 import json
+import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -40,6 +48,12 @@ RESTART_DELAY_S = 5.0  # the game went away mid-stream: this is a restart, not a
 NO_GAME_DELAY_S = 30.0  # exit 2 = nothing to talk to; re-check rather than spin
 STOP_JOIN_S = 2.0
 MAX_LINE = 1 << 20
+
+# A packed GhostWorld release (the exe download) ships this console exe; the verbs
+# are the same the console scripts take.
+CLI_EXE = "GhostWorldCLI.exe"
+APP_DATA = ("GhostWorld", ".channel.json")  # where a packed game advertises itself
+CHANNEL_REL = ("metaverse", ".channel.json")  # ...and a checkout, beside its code
 
 SCHEMA = {
     "type": "function",
@@ -89,13 +103,50 @@ def enabled(cfg: Config | None = None) -> bool:
     return bool((cfg or load_config()).ghostworld)
 
 
+def packed_cli(directory: str) -> str | None:
+    """The packed release's console exe, beside the game or on PATH, or None.
+
+    A release folder is a whole install on its own: no Python, no pip, just
+    `GhostWorld.exe` (windows) and `GhostWorldCLI.exe` (the channel). Its folder
+    may live anywhere, so it is found either by `ghostworld_dir` or by PATH.
+    """
+    if directory:
+        beside = Path(directory) / CLI_EXE
+        if beside.is_file():
+            return str(beside)
+    return shutil.which(CLI_EXE)
+
+
+def _channel_file(directory: str) -> Path:
+    """Where the game advertises its channel: the location differs by install.
+
+    A checkout (and a pip install) writes beside its code, which is the directory
+    `ghostworld_dir` names. A packed release cannot — its own folder may be
+    read-only or wiped — so it writes under the user's app data and keeps the map
+    files there too (the game's `metaverse/_paths.runtime_dir()`).
+    """
+    if packed_cli(directory):
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(base).joinpath(*APP_DATA)
+    return Path(directory).joinpath(*CHANNEL_REL)
+
+
 def _cli(verb: str, directory: str) -> list[str]:
     """How to reach the channel CLI.
 
-    With `ghostworld_dir` set we run the game's module directly, which needs no
-    PATH entry and no installed package — the state every fresh checkout is in.
-    Without it we fall back to the console scripts the package installs.
+    Three installs, one contract:
+
+    * a packed release — `GhostWorldCLI.exe <verb>`, found beside the game or on PATH;
+    * a checkout named by `ghostworld_dir` — the game's own module, which needs no
+      PATH entry and no installed package, the state a fresh checkout is in;
+    * otherwise — the console scripts the package installs.
+
+    A packed release is checked first: `ghostworld_dir` pointing at one is the
+    intent to use it, and on such a machine the module form cannot run at all.
     """
+    packed = packed_cli(directory)
+    if packed:
+        return [packed, verb]
     if directory:
         return [sys.executable, "-m", "metaverse.cli_channel", verb]
     return [f"ghostworld-{verb}"]
@@ -122,8 +173,9 @@ def send_command(cmd: dict, directory: str) -> str:
         proc = _run_cli("send", [json.dumps(cmd, ensure_ascii=False)], directory, SEND_TIMEOUT_S)
     except FileNotFoundError:
         return (
-            "ERROR: the GhostWorld CLI was not found — install the game "
-            "(pip install -e <repo>) or set ghostworld_dir in config.json"
+            "ERROR: the GhostWorld channel CLI was not found — install the game "
+            "(pip install -e <repo>), unpack the release and set ghostworld_dir to its folder, "
+            "or put that folder on PATH"
         )
     except subprocess.TimeoutExpired:
         return f"ERROR: GhostWorld did not answer within {SEND_TIMEOUT_S:.0f}s"
@@ -200,18 +252,16 @@ def is_armed() -> bool:
         return _watch.thread is not None and _watch.thread.is_alive()
 
 
-CHANNEL_REL = ("metaverse", ".channel.json")
-
-
 def game_is_up(directory: str) -> bool:
     """Is there a game to talk to? Its channel file is the only evidence we have.
 
-    Without a checkout (console-script mode) we cannot look, so we let the child
-    find out and report exit 2 — the caller retries either way.
+    Which file that is depends on the install (see `_channel_file`). Without a
+    directory *and* without a release exe there is nothing to look at, so the
+    child finds out instead and reports exit 2 — the caller retries either way.
     """
-    if not directory:
+    if not directory and not packed_cli(""):
         return True
-    return Path(directory).joinpath(*CHANNEL_REL).exists()
+    return _channel_file(directory).exists()
 
 
 def arm(directory: str, on_wake: Callable[[dict], None]) -> bool:

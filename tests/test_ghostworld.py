@@ -73,6 +73,7 @@ def test_the_ack_comes_back_verbatim(monkeypatch):
     cli = _Cli(_done(0, '{"type": "position", "x": 7.5, "y": 1.5}\n'))
     monkeypatch.setattr(ghostworld.subprocess, "run", cli)
     monkeypatch.setattr(ghostworld, "load_config", _on)
+    monkeypatch.setattr(ghostworld.shutil, "which", lambda name: None)  # a checkout, not a release
 
     out = _tool(_on())({"action": "pos"})
 
@@ -97,6 +98,7 @@ def test_console_scripts_are_used_when_no_checkout_is_configured(monkeypatch):
     cli = _Cli(_done(0, "{}"))
     monkeypatch.setattr(ghostworld.subprocess, "run", cli)
     monkeypatch.setattr(ghostworld, "load_config", lambda: Config(ghostworld=True))
+    monkeypatch.setattr(ghostworld.shutil, "which", lambda name: None)  # no release on PATH either
 
     _tool(Config(ghostworld=True))({"action": "pos"})
 
@@ -396,8 +398,82 @@ def test_the_watcher_child_is_started_with_the_follow_contract(monkeypatch):
         return _Proc()
 
     monkeypatch.setattr(ghostworld.subprocess, "Popen", popen)
+    monkeypatch.setattr(ghostworld.shutil, "which", lambda name: None)
     child = ghostworld._spawn(GAME_DIR)
     assert child is not None
     argv = started[0]
     assert argv[:4] == [sys.executable, "-m", "metaverse.cli_channel", "wait"]
     assert "--follow" in argv and "--timeout" in argv
+
+
+# ── a packed release: no Python, an exe, and its own app data ────────────────
+
+
+def _release(tmp_path) -> str:
+    """A folder shaped like the one a release zip unpacks to."""
+    (tmp_path / ghostworld.CLI_EXE).write_bytes(b"")
+    return str(tmp_path)
+
+
+def test_a_packed_release_is_driven_through_its_console_exe(tmp_path, monkeypatch):
+    """The exe download has no Python and no pip: its channel CLI is an exe whose
+    verbs are the console scripts' — `GhostWorldCLI.exe send <json>`."""
+    cli = _Cli(_done(0, '{"type": "position"}'))
+    monkeypatch.setattr(ghostworld.subprocess, "run", cli)
+    monkeypatch.setattr(ghostworld, "load_config", _on)
+    directory = _release(tmp_path)
+    cfg = Config(api_key="k", endpoint="e", model="m", ghostworld=True, ghostworld_dir=directory)
+
+    _tool(cfg)({"action": "pos"})
+
+    argv, cwd = cli.calls[0]
+    assert argv[:2] == [str(tmp_path / ghostworld.CLI_EXE), "send"]
+    assert json.loads(argv[2]) == {"cmd": "pos"}
+    assert cwd == directory
+
+
+def test_the_follower_is_started_with_the_packed_exe_too(tmp_path, monkeypatch):
+    started: list[list[str]] = []
+
+    class _Proc:
+        stdout = None
+
+        def kill(self) -> None:
+            return None
+
+        def wait(self, timeout=None) -> int:
+            return 0
+
+    def popen(argv, **kwargs):
+        started.append(list(argv))
+        return _Proc()
+
+    monkeypatch.setattr(ghostworld.subprocess, "Popen", popen)
+    assert ghostworld._spawn(_release(tmp_path)) is not None
+    argv = started[0]
+    assert argv[:2] == [str(tmp_path / ghostworld.CLI_EXE), "wait"]
+    assert "--follow" in argv and "--timeout" in argv
+
+
+def test_the_packed_game_is_found_in_the_users_app_data(tmp_path, monkeypatch):
+    """A release may sit in a read-only folder, so it advertises its channel under
+    the user's app data — and that is the file the watcher must wait for. Looking
+    only beside the code would mean the watcher never starts for a release."""
+    directory = _release(tmp_path)
+    appdata = tmp_path / "appdata"
+    monkeypatch.setenv("LOCALAPPDATA", str(appdata))
+    assert ghostworld.game_is_up(directory) is False, "nothing running yet"
+
+    channel = appdata / "GhostWorld" / ".channel.json"
+    channel.parent.mkdir(parents=True)
+    channel.write_text("{}", encoding="utf-8")
+
+    assert ghostworld.game_is_up(directory) is True
+
+
+def test_a_checkout_still_answers_beside_its_code(tmp_path, monkeypatch):
+    """The release's location must not become the only place that counts."""
+    monkeypatch.setattr(ghostworld.shutil, "which", lambda name: None)
+    (tmp_path / "metaverse").mkdir()
+    (tmp_path / "metaverse" / ".channel.json").write_text("{}", encoding="utf-8")
+    assert ghostworld.game_is_up(str(tmp_path)) is True
