@@ -5,6 +5,7 @@ Nothing here starts a game or a real child process — the CLI seam
 replaced, which is the same way the screen tests keep off the real desktop.
 """
 
+import base64
 import json
 import subprocess
 import sys
@@ -146,6 +147,43 @@ def test_the_clone_carries_the_tool_only_when_the_switch_is_on():
     assert "ghostworld" in _local_clone(_on()).tools
     assert "ghostworld" not in _local_clone(CFG).tools
     assert "inquire" in _local_clone(CFG).tools, "other extras are untouched"
+
+
+# ── snapshot: a look comes back as a picture ─────────────────────────────────
+
+_PNG_1PX = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+)
+
+
+def _snapshot_reply(path) -> subprocess.CompletedProcess:
+    return _done(0, json.dumps({"type": "snapshot_done", "caption": "看看", "local": str(path)}))
+
+
+def test_a_snapshot_answer_carries_the_picture(tmp_path, monkeypatch):
+    """The agent asked to look at the world: it gets the pixels, not a filename."""
+    png = tmp_path / "agent_1.png"
+    png.write_bytes(_PNG_1PX)
+    monkeypatch.setattr(ghostworld.subprocess, "run", _Cli(_snapshot_reply(png)))
+    monkeypatch.setattr(ghostworld, "load_config", _on)
+
+    out = _tool(_on())({"action": "snapshot"})
+
+    assert isinstance(out, ghostworld.ImageRead), "a look must reach the model as an image"
+    assert out.data_url.startswith("data:image/")
+    assert str(png) in out, "the path rides along so the user can open it too"
+
+
+def test_a_snapshot_without_a_readable_file_is_still_an_answer(tmp_path, monkeypatch):
+    """No picture to attach: the ack and its path must survive, not vanish."""
+    missing = tmp_path / "gone.png"
+    monkeypatch.setattr(ghostworld.subprocess, "run", _Cli(_snapshot_reply(missing)))
+    monkeypatch.setattr(ghostworld, "load_config", _on)
+
+    out = _tool(_on())({"action": "snapshot"})
+
+    assert isinstance(out, str) and not isinstance(out, ghostworld.ImageRead)
+    assert "gone.png" in out
 
 
 # ── the note the watcher injects ─────────────────────────────────────────────
