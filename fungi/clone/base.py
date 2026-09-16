@@ -9,6 +9,7 @@ to a single worker thread, keeping turns serial per clone.
 import queue
 import shutil
 import threading
+import time
 from pathlib import Path
 
 from .. import tools
@@ -228,6 +229,11 @@ class Clone:
         self._cursor = 0
         self._stop = threading.Event()
         self._work: queue.Queue[Envelope] = queue.Queue()
+        # The turn this clone is in the middle of, so that something which just
+        # heard the user can cut it short the way the WebUI's /stop does. Only the
+        # worker thread assigns them; anyone may read the event and set it.
+        self._turn_abort: threading.Event | None = None
+        self._turn_started = 0.0
         self._loop_thread: threading.Thread | None = None
         self._worker_thread: threading.Thread | None = None
 
@@ -293,10 +299,41 @@ class Clone:
             env = self._work.get()
             if env is None or self._stop.is_set():
                 return
+            # One abort per turn, exactly like the WebUI's /stop: whoever hears
+            # the user mid-turn sets it and the turn stops where it stands.
+            self._turn_abort = threading.Event()
+            self._turn_started = time.monotonic()
             try:
                 self.run_turn(env)
             except Exception as exc:  # a turn must never kill the worker
                 self.sink.emit("error", f"{self.addr}: turn failed: {exc}")
+            finally:
+                self._turn_abort = None
+
+    def turn_aborted(self) -> bool:
+        """Is the turn now running already told to stop?"""
+        abort = self._turn_abort
+        return abort is not None and abort.is_set()
+
+    def interrupt_turn(self, min_age_s: float = 0.0) -> bool:
+        """Cut the turn this clone is in the middle of, if it is worth cutting.
+
+        A watched channel uses this the way the user's stop button does: the
+        player has just spoken, and a line that has to wait for a long turn
+        (walking somewhere, several tool rounds) is a line the character never
+        heard. Whatever the turn already produced stays in the history, so the
+        turn that the new line starts still knows what was going on.
+
+        `min_age_s` spares a turn that has only just begun — a burst of speech
+        must not restart the answer over and over. Returns True when it cut one.
+        """
+        abort = self._turn_abort
+        if abort is None or abort.is_set():
+            return False
+        if min_age_s > 0 and time.monotonic() - self._turn_started < min_age_s:
+            return False
+        abort.set()
+        return True
 
     def dispatch(self, env: Envelope) -> None:
         """Control envelopes wake blocked tools inline; turns are queued."""
@@ -385,6 +422,7 @@ class Clone:
             self.cfg,
             self.sink,
             llm=self.llm,
+            should_abort=self.turn_aborted,
             child_tool_names=self.child_tool_names,
             child_extra_tools=self.child_extra_tools,
             skill_save=self.skill_save,

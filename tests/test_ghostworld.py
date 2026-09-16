@@ -17,7 +17,8 @@ from fungi import room as room_mod
 from fungi.clone.base import Clone, Envelope
 from fungi.clone.local import build_local_clone
 from fungi.config import Config
-from fungi.events import NullSink
+from fungi.events import FnSink, NullSink
+from fungi.llm import LLMResult
 from fungi.tools import ghostworld
 
 CFG = Config(api_key="k", endpoint="e", model="m")
@@ -177,6 +178,103 @@ def test_wake_text_labels_the_player_once():
     """The [GhostWorld] prefix comes from the note; naming it here would double it."""
     text = ghostworld.wake_text({"kind": "wake", "from": "player", "message": "在吗"})
     assert text == "玩家（player）说：在吗"
+
+
+# ── the player is heard *during* a turn, not after it ────────────────────────
+
+
+class _IdleTransport:
+    """Enough transport for a started clone: polls empty, never sends."""
+
+    def poll(self, cursor, timeout):
+        time.sleep(0.01)
+        return [], cursor
+
+
+class _SlowRoundLLM:
+    """Keeps a turn in flight: every round asks for one more (bogus) tool call.
+
+    A bogus tool is answered with an error string, so the turn stays in its
+    tool loop — which is where a turn is long, and where the abort has to land.
+    """
+
+    def __init__(self, per_round_s: float = 0.2) -> None:
+        self.rounds = 0
+        self.per_round_s = per_round_s
+
+    def __call__(self, _messages, _tool_defs):
+        self.rounds += 1
+        time.sleep(self.per_round_s)
+        return LLMResult(
+            tool_calls=[
+                {
+                    "id": "t1",
+                    "type": "function",
+                    "function": {"name": "no_such_tool", "arguments": "{}"},
+                }
+            ]
+        )
+
+
+def _eventually(pred, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return pred()
+
+
+def test_a_player_line_cuts_a_turn_that_has_been_thinking():
+    """The clone's own turns get the WebUI's /stop: a line heard now is not
+    queued behind a turn that is walking somewhere or calling tools."""
+    events: list[tuple] = []
+    llm = _SlowRoundLLM()
+    clone = build_local_clone(
+        "alpha", _IdleTransport(), CFG, FnSink(lambda t, c: events.append((t, c))), llm=llm
+    )
+    clone.start()
+    try:
+        clone.note("player said hi", source="GhostWorld")
+        assert _eventually(lambda: llm.rounds >= 1, 3.0), "the turn never started"
+
+        # A turn that has only just begun has nothing worth cutting: a burst of
+        # speech must not restart the answer over and over.
+        assert clone.interrupt_turn(min_age_s=60.0) is False
+        assert llm.rounds == 1, "the spared turn kept running"
+
+        assert clone.interrupt_turn() is True
+        assert clone.turn_aborted() is True
+        assert _eventually(lambda: clone._turn_abort is None, 5.0), "the cut turn must end"
+        assert clone.turn_aborted() is False, "the flag belongs to the turn, not the clone"
+    finally:
+        clone.stop()
+    assert ("error", "Aborted by user") in events, "the turn ends the way /stop ends one"
+
+
+def test_a_wake_interrupts_before_it_queues(monkeypatch):
+    """Order matters: queue first and a turn that is already winding down takes
+    the new line into a reply it had almost finished."""
+    calls: list[tuple] = []
+    stub = types.SimpleNamespace(
+        _local=types.SimpleNamespace(tools={}),
+        local=types.SimpleNamespace(
+            interrupt_turn=lambda min_age_s=0.0: calls.append(("interrupt", min_age_s)) or True,
+            note=lambda text, **kw: calls.append(("note", text, kw)),
+        ),
+    )
+    armed: list = []
+    monkeypatch.setattr(
+        ghostworld, "arm", lambda directory, on_wake=None: armed.append(on_wake) or True
+    )
+    monkeypatch.setattr(room_mod, "load_config", _on)
+    room_mod.ensure_ghostworld_watch(stub)
+
+    armed[0]({"kind": "wake", "event": "heard", "from": "player", "message": "在吗"})
+    assert calls == [
+        ("interrupt", room_mod.PLAYER_INTERRUPT_AFTER_S),
+        ("note", "玩家（player）说：在吗", {"source": "GhostWorld"}),
+    ]
 
 
 # ── the watcher ──────────────────────────────────────────────────────────────

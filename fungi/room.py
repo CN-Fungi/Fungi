@@ -216,6 +216,23 @@ class HostPoller:
                     inbox.push(env)
 
 
+PLAYER_INTERRUPT_AFTER_S = 2.0
+
+
+def _player_spoke(room, module, evt: dict) -> None:
+    """The player said something: heard now, not after the current turn.
+
+    A character that goes silent for the length of a turn is a character the
+    player thinks cannot hear them. So a turn that has already been thinking for
+    a couple of seconds is cut (the same abort the WebUI's /stop uses) and the
+    line starts a turn of its own; the graced two seconds keep a burst of speech
+    from restarting the answer over and over. Whatever the cut turn produced
+    stays in the clone's history, so the new turn still knows what was going on.
+    """
+    room.local.interrupt_turn(PLAYER_INTERRUPT_AFTER_S)
+    room.local.note(module.wake_text(evt), source="GhostWorld")
+
+
 def ensure_ghostworld_watch(room) -> None:
     """GhostWorld character control (spec §43): arm the player-speech wake.
 
@@ -237,7 +254,7 @@ def ensure_ghostworld_watch(room) -> None:
         return
     module.arm(
         str(live.ghostworld_dir or ""),
-        on_wake=lambda evt: room.local.note(module.wake_text(evt), source="GhostWorld"),
+        on_wake=lambda evt: _player_spoke(room, module, evt),
     )
     # The clone's own tool dict drives inbox (wake) turns; the room's per-turn
     # dict is a copy of it, so adding it there covers both.
