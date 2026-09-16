@@ -54,12 +54,29 @@ from fungi.tools.files import ImageRead, image_data_url
 
 FAILURE_LIMIT = 3  # strikes before the tool asks the user instead of retrying
 MAX_CANDIDATES = 60
+LISTINGS_MAX = 8  # windows whose classified candidates a session keeps (a drag needs two)
 DIFF_THRESHOLD = 0.002  # fraction of changed pixels that counts as an effect
 SETTLE_S = 0.30  # let the app repaint before the verifying frame
 DOUBLE_CLICK_GAP_S = 0.06  # well inside the system's double-click time (default 0.5s)
 MOVE_STEPS = 14  # intermediate points on the way to a click target — a glide, not a teleport
 MOVE_DURATION_S = 0.22  # total travel time: a person's flick, and small against SETTLE_S
 MOVE_TOLERANCE_PX = 2  # measured round-trip error of the 0..65535 space: 0px, -1px at a corner
+# A drag is the one gesture whose path matters to the application (spec §46): the button
+# is down, so every point on the way is a position the app may act on, and a drop target
+# decides on the hover before the release.
+DRAG_MIN_STEPS = 12  # even a short carry is a path, not a jump
+DRAG_MAX_STEPS = 48  # …and a long one stops here (48 points x 12ms = 0.6s of travel)
+DRAG_PX_PER_STEP = 12  # the path's resolution: about one point per 12px of travel
+DRAG_STEP_SLEEP_S = 0.012  # between points — the prototype's warning is that a denser
+# stream gets coalesced on the application's side, so the pace is a calibrated one
+DRAG_HOLD_S = 0.08  # between the press and the first move: the press has to be received
+DRAG_DWELL_S = 0.25  # hover the drop point before letting go, so a drop target lights up
+DRAG_VIA_WAIT_S = 3.0  # hovering a taskbar button until the shell brings its window forward:
+# the shell's own drag-over-taskbar activation is what a person relies on (user, 2026-09-17),
+# and it takes about a second — the window is not asked to appear, it is waited for
+DRAG_VIA_POLL_S = 0.15  # how often that wait re-reads whether the drop point is reachable
+SM_CYCAPTION = 4  # GetSystemMetrics: the height of a window's own title bar
+BUTTON_VK = {"left": 0x01, "right": 0x02}  # GetAsyncKeyState: is the button still down?
 TYPE_CHAR_DELAY_S = 0.15  # 逐字输入: the gap between characters — a *watchable* pace
 # (user 2026-09-14: five to ten characters a second, and 0.15 lands mid-band). 0.03 (33 a
 # second) is a blur: the text appears as if it had been pasted, which is the thing this
@@ -119,6 +136,10 @@ _u32.GetAncestor.restype = wt.HWND
 _u32.GetForegroundWindow.restype = wt.HWND
 _u32.GetCursorPos.argtypes = [ctypes.POINTER(wt.POINT)]
 _u32.GetCursorPos.restype = wt.BOOL
+# A held mouse button is verified against the system, not against our own bookkeeping
+# (SHORT, and negative when the key is down: the high bit is what matters).
+_u32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+_u32.GetAsyncKeyState.restype = ctypes.c_short
 
 SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
 SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
@@ -995,6 +1016,9 @@ _BUTTON_FLAGS = {
     "left": (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
     "right": (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
 }
+# Every move this module injects is absolute over the whole virtual desktop; a press or a
+# release is the same event plus the button's flag, so the pointer stays where it is.
+_MOVE_ABS = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
 
 # Keyboard vocabulary: the Ophio key_map's names and aliases, with 'delete'
 # pointing at the real Del and the desktop-only keys (home/end/insert/pageup/
@@ -1065,6 +1089,7 @@ _EXTENDED_VK = frozenset(
 _MODIFIER_VK = frozenset({0x10, 0x11, 0x12, 0x5B})
 MODIFIER_NAMES = frozenset({"shift", "ctrl", "control", "alt", "win", "meta", "cmd", "command"})
 _held: set[int] = set()
+_held_buttons: set[str] = set()
 
 
 def resolve_key(name: str) -> int | None:
@@ -1130,7 +1155,7 @@ def move_to(x: int, y: int, *, steps: int = MOVE_STEPS, duration: float = MOVE_D
     raises when the pointer sits in a screen corner. User decision the same day: ours
     (spec §36).
     """
-    move = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+    move = _MOVE_ABS
     nx, ny = _norm_point(x, y)
     here = cursor_pos()
     if here is None or here == (x, y):
@@ -1148,6 +1173,51 @@ def move_to(x: int, y: int, *, steps: int = MOVE_STEPS, duration: float = MOVE_D
     return steps
 
 
+def _button_event(button: str, *, down: bool, at: tuple[int, int] | None = None) -> int:
+    """One press or release, remembered while it is down.
+
+    A press is the only thing this tool injects that has to survive *between* two points
+    in time (a drag), and a left button left down makes the machine unusable until a human
+    clicks. So a release the OS did not take (SendInput returns the number of events it
+    inserted, and 0 means it refused) stays in the book — the action's `finally`, or a
+    disarm, then tries again rather than assuming it worked.
+    """
+    flags = _BUTTON_FLAGS.get(button, _BUTTON_FLAGS["left"])[0 if down else 1]
+    point = _norm_point(*(at if at is not None else (cursor_pos() or (0, 0))))
+    result = _mouse_event(*point, _MOVE_ABS | flags)
+    if down:
+        _held_buttons.add(button)
+    elif result:
+        _held_buttons.discard(button)
+    return result
+
+
+def _button_is_down(button: str) -> bool:
+    """Whether the OS still has that button down — the judge is the system, not our book."""
+    return bool(_u32.GetAsyncKeyState(BUTTON_VK.get(button, 0x01)) & 0x8000)
+
+
+def lift_button(button: str = "left") -> int:
+    """Release one button and make sure it really is released.
+
+    The system is asked afterwards (`GetAsyncKeyState`), and if it still reports the button
+    down the release is sent once more from wherever the pointer is: a held left button
+    drags whatever the pointer crosses for the rest of the session, and only a human can
+    clear it (§35.2's reason for `release_all_keys`, applied to the mouse).
+    """
+    released = _button_event(button, down=False)
+    if _button_is_down(button):
+        released += _button_event(button, down=False)
+    return released
+
+
+def release_all_buttons() -> list[str]:
+    """Lift every button this session may still be holding (the safety net)."""
+    lifted = [name for name in sorted(_held_buttons) if lift_button(name)]
+    _held_buttons.clear()
+    return lifted
+
+
 def click_at(x: int, y: int, button: str = "left", clicks: int = 1) -> bool:
     """Absolute click(s) at physical screen coordinates, after gliding there.
 
@@ -1160,9 +1230,6 @@ def click_at(x: int, y: int, button: str = "left", clicks: int = 1) -> bool:
     what makes the shell (and an app's own hit-testing) read it as one gesture
     rather than two clicks.
     """
-    nx, ny = _norm_point(x, y)
-    move = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
-    down, up = _BUTTON_FLAGS.get(button, _BUTTON_FLAGS["left"])
     moves = move_to(x, y)
     # Did it actually get there? A coordinate outside the virtual screen gets clamped by
     # the OS (measured 2026-09-14: x=-185 became 0), and then a press would land on
@@ -1174,11 +1241,203 @@ def click_at(x: int, y: int, button: str = "left", clicks: int = 1) -> bool:
     for index in range(clicks):
         if index:
             time.sleep(DOUBLE_CLICK_GAP_S)
-        injected += _mouse_event(nx, ny, move | down)
-        injected += _mouse_event(nx, ny, move | up)
+        injected += _button_event(button, down=True, at=(x, y))
+        injected += _button_event(button, down=False, at=(x, y))
     # the travel plus a press/release pair per click; a struct-size mistake makes
     # SendInput return 0 silently, which is what this number is here to catch
     return injected == moves + 2 * clicks
+
+
+def _drag_path(start: tuple[int, int], end: tuple[int, int], steps: int) -> list[tuple[int, int]]:
+    """The carried path: eased like a click's glide, a point every ~12px of travel, and
+    the last point exactly the drop point (eased == 1.0 there, so no extra event)."""
+    (x0, y0), (x1, y1) = start, end
+    return [
+        (
+            int(x0 + (x1 - x0) * _smoothstep(index / steps)),
+            int(y0 + (y1 - y0) * _smoothstep(index / steps)),
+        )
+        for index in range(1, steps + 1)
+    ]
+
+
+def _drag_steps(start: tuple[int, int], end: tuple[int, int]) -> int:
+    """How many points one leg of a drag travels in: about one every `DRAG_PX_PER_STEP`, and
+    never fewer than `DRAG_MIN_STEPS` — a short carry is still a path, not a jump."""
+    travel = max(abs(end[0] - start[0]), abs(end[1] - start[1]))
+    return max(DRAG_MIN_STEPS, min(DRAG_MAX_STEPS, travel // DRAG_PX_PER_STEP))
+
+
+def _cancel_gesture() -> None:
+    """Escape, the way a person abandons a drag.
+
+    A shell drag-and-drop loop reads Escape as "give the item back": the release that
+    follows drops nothing. An application that draws its own drag has no such contract,
+    so the result says the drop did not happen — never that the app rolled back.
+    """
+    _key_event(0x1B, down=True)
+    _key_event(0x1B, down=False)
+
+
+def drag_to(
+    start: tuple[int, int],
+    end: tuple[int, int],
+    *,
+    button: str = "left",
+    hold: float = DRAG_HOLD_S,
+    step_sleep: float = DRAG_STEP_SLEEP_S,
+    dwell: float = DRAG_DWELL_S,
+    via: tuple[int, int] | None = None,
+    wait: Callable[[], bool] | None = None,
+    wait_s: float | None = None,
+    refresh: Callable[[], tuple[int, int] | str | None] | None = None,
+    should_abort: Callable[[], bool] | None = None,
+    pre_release: Callable[[], str | None] | None = None,
+) -> dict:
+    """Carry the pointer from `start` to `end` with the button held down.
+
+    A drag is the one gesture whose *middle* is part of the effect: the application reads
+    the press, then a path, then the release — a drop target decides during the hover, and
+    anything tracking the pointer (a rubber band, a slider, a canvas) never sees a jump. So
+    the pointer walks a real eased path (`DRAG_MIN_STEPS`..`DRAG_MAX_STEPS` points, one per
+    `DRAG_PX_PER_STEP`), the press is held for `hold` before the first move, and the drop
+    point is hovered for `dwell` before the release.
+
+    `via` is a waypoint on the way: the pointer is carried there and *held* while `wait()`
+    is polled (up to `wait_s`). That is the user's own route out of a covered window
+    (2026-09-17): carry the thing onto the destination's taskbar button and hold — the
+    shell brings that window to the front by itself — then continue into it. `refresh` is
+    asked once the wait succeeded, because a window that came forward may have been restored
+    or moved: it returns the drop point to use (or a reason to cancel instead).
+
+    Three things end a drag early, and all three cancel it the way a person does — Escape,
+    then the release, in a `finally`, because a held button is not something to leave
+    behind:
+
+    * the turn was aborted — `should_abort` is asked before every point, like `type_text`'s
+      per-character check, because a drag is a second of work and a stop press must end it;
+    * the pointer never arrived: `_norm_point` clamps a coordinate outside the virtual
+      screen (measured 2026-09-14: x=-185 arrived at 0), so the release would drop onto
+      whatever sits at the edge — no arrival, no press; and if it stops arriving on the way
+      (or the waypoint's wait runs out), the drop is cancelled rather than released elsewhere;
+    * `pre_release` returned a reason: the caller reads the world again at the last moment
+      (which window owns the drop point now) and refuses a drop that would land elsewhere.
+
+    Returns the facts: `started`, how many `points` went out of `steps`, whether the pointer
+    `arrived`, how far `off` it was, how long the waypoint `waited`, the injection count
+    against what was `expected`, whether the button was `released` (checked against the
+    system), and `stopped` — why, if it did.
+    """
+    facts: dict = {
+        "started": False,
+        "steps": 0,
+        "points": 0,
+        "seconds": 0.0,
+        "waited": 0.0,
+        "arrived": False,
+        "off": None,
+        "injected": 0,
+        "expected": 0,
+        "released": False,
+        "stopped": None,
+    }
+    injected = move_to(*start)
+    planned = injected
+    here = cursor_pos()
+    if here is None or max(abs(here[0] - start[0]), abs(here[1] - start[1])) > MOVE_TOLERANCE_PX:
+        facts["stopped"] = (
+            f"the pointer never reached the grab point {start} (it is at {here}) — "
+            "nothing was pressed"
+        )
+        return facts
+    if not _button_event(button, down=True, at=start):
+        injected += lift_button(button)
+        facts["injected"] = injected
+        facts["stopped"] = "the press was not injected (SendInput returned 0) — nothing moved"
+        return facts
+    facts["started"] = True
+    injected += 1
+    planned += 2  # the press and the release
+    began = time.monotonic()
+    try:
+        if hold > 0:
+            time.sleep(hold)
+
+        def walk(target: tuple[int, int]) -> str | None:
+            """One leg of the carried path; returns why it stopped, or None."""
+            nonlocal injected, planned
+            here = cursor_pos() or start
+            steps = _drag_steps(here, target)
+            facts["steps"] += steps
+            planned += steps
+            for index, point in enumerate(_drag_path(here, target, steps), 1):
+                if should_abort is not None and should_abort():
+                    return f"stopped after {facts['points']} points: the turn was aborted"
+                injected += _mouse_event(*_norm_point(*point), _MOVE_ABS)
+                facts["points"] += 1
+                if step_sleep > 0 and index < steps:
+                    time.sleep(step_sleep)
+            return None
+
+        def hold_at(waypoint: tuple[int, int]) -> str | None:
+            """Hover the waypoint until the caller says the drop point is within reach.
+
+            The timeout is read here, not taken as a default argument: a default is bound at
+            import time, and then the knob cannot be tuned (or patched in a test) at all —
+            the same trap `blocking_ask` carries a note about."""
+            limit = DRAG_VIA_WAIT_S if wait_s is None else wait_s
+            began_wait = time.monotonic()
+            deadline = began_wait + max(0.0, limit)
+            try:
+                while not (wait() if wait is not None else True):
+                    if should_abort is not None and should_abort():
+                        return "stopped while waiting at the waypoint: the turn was aborted"
+                    if time.monotonic() >= deadline:
+                        return (
+                            f"the waypoint {waypoint} was hovered for {limit:g}s and the drop "
+                            "point never came within reach — cancelled instead of released there"
+                        )
+                    time.sleep(DRAG_VIA_POLL_S)
+            finally:
+                facts["waited"] = round(time.monotonic() - began_wait, 2)
+            return None
+
+        stopped = walk(via if via is not None else end)
+        if stopped is None and via is not None:
+            stopped = hold_at(via)
+        if stopped is None and via is not None:
+            # The drop point is read once more: a window the shell brought forward may have
+            # been restored or moved, and the release has to land on a point it really owns.
+            fresh = refresh() if refresh is not None else None
+            if isinstance(fresh, str):
+                stopped = fresh
+            elif fresh is not None:
+                end = fresh
+        if stopped is None and via is not None:
+            stopped = walk(end)
+        facts["stopped"] = stopped
+        facts["seconds"] = max(0.0, time.monotonic() - began)
+        if facts["stopped"] is None:
+            if dwell > 0:
+                time.sleep(dwell)
+            landed = cursor_pos()
+            facts["off"] = max(abs(landed[0] - end[0]), abs(landed[1] - end[1])) if landed else None
+            facts["arrived"] = facts["off"] is not None and facts["off"] <= MOVE_TOLERANCE_PX
+            if not facts["arrived"]:
+                facts["stopped"] = (
+                    f"the pointer is at {landed}, not at the drop point {end} — cancelled "
+                    "instead of released somewhere else"
+                )
+            elif pre_release is not None:
+                facts["stopped"] = pre_release()
+        if facts["stopped"] is not None:
+            _cancel_gesture()
+    finally:
+        injected += lift_button(button)
+    facts["injected"] = injected
+    facts["expected"] = planned
+    facts["released"] = not _button_is_down(button)
+    return facts
 
 
 def _key_event(vk: int, *, down: bool) -> int:
@@ -1314,6 +1573,19 @@ def release_all_keys() -> list[str]:
 
 # ── the session: arming, candidates, two frames, strike counts ─────────────
 @dataclass
+class Listing:
+    """One window's numbered candidates, and where that window was when they were cut.
+
+    Per window, not one slot for the whole session: a drag names a target in its source
+    window *and* one in its destination window, and a single remembered listing throws the
+    first window's numbers away the moment the second one is listed (2026-09-17).
+    """
+
+    candidates: dict[int, Target] = field(default_factory=dict)
+    rect: tuple[int, int, int, int] | None = None
+
+
+@dataclass
 class Session:
     """Everything the tool remembers between calls. Pixels are deliberately
     just the current and the previous frame (spec §35.4): enough to answer "did
@@ -1323,9 +1595,7 @@ class Session:
     # (user decision 2026-09-13 — "the experimental switch means I already
     # allowed it"). What stays is bookkeeping that makes one action trustworthy:
     # which window is where, and which keys are down.
-    candidates: dict[int, Target] = field(default_factory=dict)
-    candidates_hwnd: int = 0
-    candidates_rect: tuple[int, int, int, int] | None = None
+    listings: dict[int, Listing] = field(default_factory=dict)
     # What the model called a shape ("发送"), bound to the rectangle it saw it at
     # (spec §35.10). Numbers are per-listing; a rectangle survives a re-listing.
     labels: dict[str, Target] = field(default_factory=dict)
@@ -1339,6 +1609,7 @@ class Session:
         self.labels.clear()
         self.labels_hwnd = 0
         self.labels_rect = None
+        self.listings.clear()
         self.frames.clear()
 
     def remember(self, frame: Frame) -> None:
@@ -1349,13 +1620,15 @@ _session = Session()
 
 
 def disarm() -> None:
-    """End the armed window; releases keys, drops frames, forgets candidates.
-    Bound to the room's stop and the process exit, so a crash cannot leave the
-    host's keyboard half-pressed.
+    """End the armed window; releases keys and mouse buttons, drops frames, forgets
+    candidates and listings. Bound to the room's stop and the process exit, so a crash
+    cannot leave the host's keyboard half-pressed or its left button still dragging
+    whatever the pointer crosses.
 
     Nothing is announced: a tray toast pops over the very screen being driven and
     steals focus from it (user decision 2026-09-13 — spec §35.14)."""
     release_all_keys()
+    release_all_buttons()
     _session.disarm()
 
 
@@ -1383,15 +1656,16 @@ def resolve_target(hwnd: int, args: dict, *, allow_ocr: bool = True) -> Target |
             wanted = int(number)
         except (TypeError, ValueError):
             return f"ERROR: target must be a number, got {number!r}"
-        if _session.candidates_hwnd == hwnd and wanted in _session.candidates:
-            stored = _session.candidates[wanted]
+        listing = _session.listings.get(hwnd)
+        if listing is not None and wanted in listing.candidates:
+            stored = listing.candidates[wanted]
             if stored.source != "a11y":
                 # Its rectangle came out of the picture, not out of the tree, so
                 # re-matching it against a11y elements picks a *different* control
                 # (two empty-named elements matched each other on 2026-09-13 and the
                 # click went to the wrong place). The picture's own frame origin
                 # only holds while the window stays where it was.
-                if _session.candidates_rect != window_rect(hwnd):
+                if listing.rect != window_rect(hwnd):
                     return (
                         "ERROR: the window moved or resized since that listing — run targets again "
                         f"(hwnd={hwnd}); those numbers belong to the picture they were cut from."
@@ -1636,9 +1910,11 @@ def _action_targets(args: dict) -> str | ImageRead:
                 if cand.rect == bound.rect:
                     cand.name = bound_name  # the semantic name the model gave it
     with _session.lock:
-        _session.candidates = {cand.n: cand for cand in targets}
-        _session.candidates_hwnd = hwnd
-        _session.candidates_rect = window_rect(hwnd)
+        _session.listings[hwnd] = Listing({cand.n: cand for cand in targets}, window_rect(hwnd))
+        # Bounded: a long session lists many windows, and a listing is only ever
+        # consumed by the next few calls (a drag reads two of them).
+        while len(_session.listings) > LISTINGS_MAX:
+            _session.listings.pop(next(iter(_session.listings)))
     title = _window_text(hwnd)
     head = f"TARGETS in hwnd=0x{hwnd:X} {title!r}{note} — pick one by number"
     listing = "\n".join(cand.label for cand in targets) or "  (none)"
@@ -1715,6 +1991,171 @@ def target_problem(hwnd: int, target: Target) -> str | None:
             "(name=<text>; OCR reads the picture), or drive it with keys"
         )
     return None
+
+
+@dataclass
+class DragEnds:
+    """Both ends of one drag, as the program read them (spec §46).
+
+    `source` is the candidate that was grabbed — `None` when the grab is the window's own
+    title bar — and `target` is the candidate a drop was aimed at, if any: the two are what
+    the a11y read-back verification has to work with.
+    """
+
+    grab: tuple[int, int]
+    grab_label: str
+    source: Target | None
+    drop: tuple[int, int]
+    drop_label: str
+    target: Target | None
+
+
+def titlebar_point(hwnd: int) -> tuple[int, int] | str:
+    """Where this window's own title bar is — the grab point for a reposition.
+
+    The OS says how tall a caption is (`SM_CYCAPTION`) and the window rect says where the
+    window is, so this is still a rectangle the program read rather than a coordinate the
+    model guessed (spec §35.1). The middle of the caption is the grab point; an application
+    that paints its own chrome across the whole caption band (a browser's tab strip) is why
+    the result prints the grab point it used — a candidate is the better handle there.
+    """
+    rect = window_rect(hwnd)
+    if rect is None:
+        return f"ERROR: window 0x{hwnd:X} has no rectangle to read a title bar from"
+    left, top, right, _bottom = rect
+    caption = int(_u32.GetSystemMetrics(SM_CYCAPTION)) or 30
+    return ((left + right) // 2, top + max(6, caption // 2))
+
+
+def point_problem(hwnd: int, point: tuple[int, int]) -> str | None:
+    """Why nothing must happen at this point — the two measured ways a point goes astray.
+
+    Asked of both ends of a drag (a carried-the-window-by-its-title-bar grab, and the drop
+    point) and of nothing else: a *candidate* grab goes through `target_problem`, which
+    also knows the rectangle rules a click needs.
+
+    * Outside the window the caller named: what happens there is whatever sits there
+      instead (the same accident a mis-resolved click is, 2026-09-13).
+    * Something else covers the point: during a drag the window *under the pointer* is what
+      receives the drop, so this is asked twice — before the press (nothing is injected if
+      it fails) and again just before the release, because a drag that passes over the
+      taskbar can hand the pointer to another window on hover.
+    """
+    rect = window_rect(hwnd)
+    if rect is None:
+        return f"window 0x{hwnd:X} has no rectangle any more"
+    left, top, right, bottom = rect
+    if not (left <= point[0] <= right and top <= point[1] <= bottom):
+        return (
+            f"the point {point} is outside window 0x{hwnd:X} ({left},{top},{right},{bottom})"
+            " — the press or the drop would land on whatever is there"
+        )
+    at = covering_window(point)
+    if not at:
+        return f"there is no window at {point} to press or drop on"
+    if at != hwnd:
+        cover = _window_text(at) or _class_name(at) or f"0x{at:X}"
+        return (
+            f"the point {point} belongs to {cover!r} (0x{at:X}), not to 0x{hwnd:X} — the press "
+            "or the drop would go there instead. Put that window in front, or aim the drag "
+            "somewhere that is not covered"
+        )
+    return None
+
+
+def resolve_drop(
+    hwnd: int, args: dict, grab: tuple[int, int], *, carry: bool
+) -> tuple[tuple[int, int], str, Target | None] | str:
+    """Where the carried thing is let go: an anchor the program reads, shifted by the
+    caller's relative `dx`/`dy`.
+
+    Three anchors, because a drag has three shapes (all of them read by the program):
+
+    * `to_target`/`to_name` — a control in the destination window (a text box, a drop zone);
+    * `to_hwnd` with no target — that window itself, which is the file-into-an-application
+      case: the drop point is its client-area centre, and the window takes it from there;
+    * neither — a carry inside the same window, so the drop point is the *grab point*
+      shifted by `dx`/`dy` (a selection, a slider, a window moved by its title bar, where
+      only the delta `drop - grab` means anything).
+
+    A drop is not a click. What it lands on is a *window* — or a control inside it — and a
+    drop target that covers the whole client area is the normal case (a chat window takes a
+    file anywhere), so `target_problem`'s "that is the whole surface, not a control" refusal
+    has no business here. The rule that does apply is `point_problem`: it has to land inside
+    the window that was named, and that window has to be what is at that point.
+    """
+    try:
+        dx = int(args.get("dx") or 0)
+        dy = int(args.get("dy") or 0)
+    except (TypeError, ValueError):
+        return f"ERROR: dx and dy must be whole pixels, got {args.get('dx')!r}/{args.get('dy')!r}"
+    wants = args.get("to_target") is not None or bool(args.get("to_name"))
+    target: Target | None = None
+    if wants:
+        resolved = resolve_target(
+            hwnd, {"target": args.get("to_target"), "name": args.get("to_name")}
+        )
+        if isinstance(resolved, str):
+            return resolved
+        target = resolved
+        anchor, why = target.center, f"{target.label} in hwnd=0x{hwnd:X}"
+    elif carry:
+        anchor, why = grab, "a carry inside the same window"
+    else:
+        area = client_rect(hwnd) or window_rect(hwnd)
+        if area is None:
+            return f"ERROR: window 0x{hwnd:X} has no rectangle to drop into"
+        anchor = ((area[0] + area[2]) // 2, (area[1] + area[3]) // 2)
+        why = f"the client-area centre of hwnd=0x{hwnd:X}"
+    if dx or dy:
+        why += f" shifted by ({dx:+d},{dy:+d})"
+    return ((anchor[0] + dx, anchor[1] + dy), why, target)
+
+
+def _drag_ends(hwnd: int, to_hwnd: int, args: dict, grab_from: str) -> DragEnds | str:
+    """Resolve both ends of a drag. No coverage checks here: those ask what covers each
+    point, and the answer during the drag is the state *after* the source window has been
+    raised, so the action runs them once that has happened."""
+    source: Target | None = None
+    if grab_from == "titlebar":
+        point = titlebar_point(hwnd)
+        if isinstance(point, str):
+            return point
+        grab, grab_label = point, "the title bar"
+    else:
+        found = resolve_target(hwnd, args)
+        if isinstance(found, str):
+            return found
+        source, grab, grab_label = found, found.center, found.label
+    drop = resolve_drop(to_hwnd, args, grab, carry=args.get("to_hwnd") in (None, ""))
+    if isinstance(drop, str):
+        return drop
+    point, drop_label, target = drop
+    if point == grab:
+        return (
+            f"ERROR: the grab point and the drop point are both {point} — a drag nowhere moves"
+            " nothing. Pass dx/dy (or a to_target/to_name) to say where it is carried to."
+        )
+    return DragEnds(grab, grab_label, source, point, drop_label, target)
+
+
+def _crop(frame: Frame, rect: tuple[int, int, int, int]) -> Frame | None:
+    """The part of a whole-screen capture that a screen rectangle covers (None if none of
+    it is in the frame) — a Frame of its own, so the two pictures a drag compares are the
+    same kind of object the diff already understands.
+
+    Screen crops rather than window captures: the two pictures are of a *place*, and the
+    destination may sit behind the window the drag started from — whose window capture
+    would either come back blank (a covered renderer keeps its pixels) or measure the wrong
+    surface entirely.
+    """
+    left, top, right, bottom = frame.to_local(rect)
+    left, top = max(0, left), max(0, top)
+    right, bottom = min(frame.image.width, right), min(frame.image.height, bottom)
+    if right - left < 2 or bottom - top < 2:
+        return None
+    origin = (frame.origin[0] + left, frame.origin[1] + top)
+    return Frame(frame.image.crop((left, top, right, bottom)), origin, frame.hwnd, time.time())
 
 
 LABEL_MAX = 24
@@ -2204,6 +2645,225 @@ def _action_scroll(args: dict, sink, should_abort, on_answer, call_id) -> str | 
     return _attach(summary, after_frame) if after_frame is not None else summary
 
 
+def _action_drag(args: dict, sink, should_abort, on_answer, call_id) -> str | ImageRead:
+    """Carry something with the left button held down (user, 2026-09-17).
+
+    What it is for: content that is not text — a file, a picture — going into a text box,
+    and the gestures a person makes on a window or a canvas (reposition by the title bar,
+    drag a selection, carry a shape). A drop needs no focus, which is exactly why it reaches
+    a UI that draws itself, where §35.13 found no addressable input control at all.
+
+    Neither end is a coordinate the model produced: the grab end is a candidate in the
+    source window or that window's own title bar, and the drop end is an anchor the program
+    reads (a candidate in the destination window, or its client-area centre) shifted by the
+    caller's `dx`/`dy`. Nothing is injected until both ends resolve and each point has been
+    confirmed to belong to the window it was named in; that check runs again just before the
+    release (`drag_to`), because a drop that lands somewhere else is worse than no drop.
+    """
+    hwnd = int(args["hwnd"])
+    to_hwnd = args.get("to_hwnd")
+    to_hwnd = int(to_hwnd) if to_hwnd not in (None, "") else hwnd
+    if not _u32.IsWindow(to_hwnd):
+        return f"ERROR: no such window to drop into: 0x{to_hwnd:X}"
+    grab_from = str(args.get("from") or "").strip().lower()
+    if grab_from not in ("", "titlebar"):
+        return f"ERROR: from must be 'titlebar' (or left out), got {grab_from!r}"
+    if grab_from == "titlebar" and _is_shell_surface(hwnd):
+        return f"ERROR: 0x{hwnd:X} is the desktop or the taskbar — it has no title bar to carry"
+    route_kind = str(args.get("route") or "").strip().lower()
+    if route_kind not in ("", "taskbar"):
+        return f"ERROR: route must be 'taskbar' (or left out), got {route_kind!r}"
+    # The route out of a covered window (user, 2026-09-17): carry the thing onto the
+    # destination's own taskbar button and hold, and the shell brings that window forward.
+    # Resolved before anything is injected — no taskbar button means no route.
+    route: Entry | None = None
+    if route_kind == "taskbar":
+        win = next((w for w in list_windows(include_hidden=True) if w.hwnd == to_hwnd), None)
+        if win is None:
+            return f"ERROR: 0x{to_hwnd:X} is not in the window list, so there is nothing to route through"
+        found = via_entry(win)
+        if isinstance(found, str):
+            return f"ERROR: the drag cannot go through the taskbar: {found}"
+        route = found
+    # Resolve before waking anything, when both windows are readable: a name that does not
+    # exist comes back as no_target, not as a wake-up nobody needed.
+    ready = (
+        window_state(hwnd) == "normal"
+        and window_state(to_hwnd) == "normal"
+        and capture_problem(hwnd) is None
+    )
+    ends: DragEnds | str | None = _drag_ends(hwnd, to_hwnd, args, grab_from) if ready else None
+    if isinstance(ends, str):
+        return ends
+    # The destination's own pixels, read *now* — before the source window is raised over
+    # it. Taken later, every "before" picture would be the source window and every drag
+    # would look like it changed the destination.
+    dst_rect = window_rect(to_hwnd)
+    dst_state = window_state(to_hwnd)
+    before = _crop(grab_screen(), dst_rect) if dst_rect else None
+    value_before = ""
+    if ends is not None and ends.target is not None:
+        value_before, _ = _read_back(to_hwnd, ends.target)
+    ok, note = _guarded_input(hwnd)
+    if not ok:
+        return note
+    if to_hwnd != hwnd and route is None:
+        ok, to_note = _guarded_input(to_hwnd)
+        if not ok:
+            return to_note
+        note += to_note
+    if ends is None:
+        ends = _drag_ends(hwnd, to_hwnd, args, grab_from)
+        if isinstance(ends, str):
+            return ends
+    # The press has to land in the window the caller named, so the source is raised last:
+    # the drop point was measured against what covers it, and that is what the pointer is
+    # going to find during the drag.
+    raised = True if _is_shell_surface(hwnd) else set_foreground(hwnd)
+    problems = [
+        target_problem(hwnd, ends.source)
+        if ends.source is not None
+        else point_problem(hwnd, ends.grab),
+    ]
+    if route is None:
+        problems.append(point_problem(to_hwnd, ends.drop))
+    else:
+        # The whole point of a route is that the drop point is *not* reachable yet, so what
+        # has to be reachable now is the waypoint itself.
+        problems.append(point_problem(route.surface, route.target.center))
+    for problem in problems:
+        if problem:
+            return f"ERROR: {problem}"  # refused before a single event was injected
+    # The point the release lands on, re-read whenever the world is re-read: a window that
+    # the shell brought forward may have been restored or moved on the way.
+    drop_box = {"point": ends.drop}
+
+    def refresh_drop() -> tuple[int, int] | str | None:
+        fresh = resolve_drop(to_hwnd, args, ends.grab, carry=args.get("to_hwnd") in (None, ""))
+        if isinstance(fresh, str):
+            return fresh
+        drop_box["point"] = fresh[0]
+        return fresh[0]
+
+    def drop_reachable() -> bool:
+        """Is the drop point somewhere the destination really is?
+
+        The state is asked first, and that is not a formality: a minimized window reports a
+        0x0 client rect and an icon-slot window rect (measured 2026-09-17), and
+        `WindowFromPoint` at that icon slot *does* answer with the window — so geometry alone
+        says yes while there is nothing on screen to drop into. What the wait is really for is
+        the moment the window is back."""
+        if window_state(to_hwnd) != "normal":
+            return False
+        point = refresh_drop()
+        return not isinstance(point, str) and point_problem(to_hwnd, point) is None
+
+    facts = drag_to(
+        ends.grab,
+        ends.drop,
+        button=str(args.get("button") or "left"),
+        via=route.target.center if route is not None else None,
+        wait=drop_reachable if route is not None else None,
+        refresh=refresh_drop if route is not None else None,
+        should_abort=should_abort,
+        pre_release=lambda: point_problem(to_hwnd, drop_box["point"]),
+    )
+    released_at = drop_box["point"]
+    time.sleep(SETTLE_S)
+    # Bring the destination forward for the picture: the window the drag started from is
+    # still in front (the press needed it there), so the drop's own repaint may be behind it.
+    if to_hwnd != hwnd and not _is_shell_surface(to_hwnd):
+        set_foreground(to_hwnd)
+        time.sleep(SETTLE_S)
+    dst_rect_after = window_rect(to_hwnd)
+    after = _crop(grab_screen(), dst_rect_after) if dst_rect_after else None
+    after_frame = grab_window(to_hwnd)
+    if after_frame is not None:
+        _session.remember(after_frame)
+    value_after = ""
+    if ends.target is not None:
+        value_after, _ = _read_back_settled(to_hwnd, ends.target)
+    moved = dst_rect != dst_rect_after
+    # A destination that was minimized (or hidden in the tray) when the drag started has no
+    # on-screen geometry and no pixels to compare — coming back on screen *is* the effect,
+    # and it is the shell that did it, through the application's own path.
+    came_back = dst_state != "normal" and window_state(to_hwnd) == "normal"
+    changed = _diff_ratio(before, after) if before is not None and after is not None else 0.0
+    value_changed = bool(value_after) and value_after != value_before
+    injected_ok = bool(facts["started"] and facts["injected"] == facts["expected"])
+    verified = (
+        injected_ok
+        and facts["stopped"] is None
+        and (moved or came_back or value_changed or changed > DIFF_THRESHOLD)
+    )
+    key = f"drag:{hwnd}:{ends.grab_label}->{to_hwnd}:{ends.drop_label}"
+    if verified:
+        _clear_strikes(key)
+    elif _strike(key) >= FAILURE_LIMIT:
+        at = covering_window(released_at)
+        cover = (_window_text(at) or _class_name(at) or f"0x{at:X}") if at else "nothing"
+        detail = (
+            f"抓取点 {ends.grab}（{ends.grab_label}）→ 落点 {released_at}（{ends.drop_label}）；"
+            f"注入={facts['injected']}/{facts['expected']}；点数={facts['points']}/{facts['steps']}；"
+            f"落点归属={cover}；画面变化={changed:.3%}；窗口矩形 {dst_rect} → {dst_rect_after}"
+            + (f"；{facts['stopped']}" if facts["stopped"] else "")
+        )
+        return _escalate(
+            sink,
+            key,
+            f"drag {ends.grab_label} → {ends.drop_label}",
+            detail,
+            should_abort,
+            on_answer,
+            call_id,
+        )
+    if came_back:
+        signal = f"the destination came back on screen (was {dst_state}, now normal)"
+    elif moved:
+        signal = f"the window moved {dst_rect} → {dst_rect_after}"
+    elif value_changed:
+        signal = f"read back {value_after!r} from {ends.drop_label}"
+    elif changed > DIFF_THRESHOLD:
+        signal = f"destination pixels changed {changed:.2%}"
+    else:
+        signal = "nothing changed on screen"
+    lines = [
+        f"DRAG {ends.grab_label} from hwnd=0x{hwnd:X} to {ends.drop_label} at {released_at} "
+        f"in hwnd=0x{to_hwnd:X}{note}",
+    ]
+    if facts["stopped"]:
+        lines.append(
+            f"  stopped: {facts['stopped']}"
+            + (" (Escape sent, button released)" if facts["started"] else "")
+        )
+    if route is not None:
+        lines.append(
+            f"  via: its {route.where} {route.label!r} at {route.target.center} — hovered "
+            f"{facts['waited']:.2f}s"
+            + (
+                " until the drop point came within reach"
+                if facts["stopped"] is None
+                else " waiting for the window to come forward"
+            )
+        )
+    lines += [
+        f"  path: {facts['points']}/{facts['steps']} points in {facts['seconds']:.2f}s from "
+        f"{ends.grab} · held {DRAG_HOLD_S:g}s before the first move, hovered {DRAG_DWELL_S:g}s "
+        f"before letting go · "
+        + (
+            "button released (verified against the system)"
+            if facts["released"]
+            else "RELEASE NOT VERIFIED — the button may still be down"
+        ),
+        f"  verify: {signal} → {'verified' if verified else 'unverified'}",
+    ]
+    if not raised:
+        lines.append("  could not raise the source window to the foreground!")
+    lines.append("  control: on (pc_control switch; no prompt for this action)")
+    summary = "\n".join(lines)
+    return _attach(summary, after_frame) if after_frame is not None else summary
+
+
 TRAY_OVERFLOW_HINTS = ("显示隐藏的图标", "Show hidden icons", "显示隐藏的图标 ")
 TRAY_FLYOUT_CLASSES = ("TopLevelWindowForOverflowXamlIsland", "NotifyIconOverflowWindow")
 SHELL_WAKE_S = (
@@ -2514,6 +3174,33 @@ def _is_shell_surface(hwnd: int) -> bool:
     return hwnd in (int(_u32.FindWindowW("Shell_TrayWnd", None) or 0), _desktop_surface())
 
 
+def via_entry(win: Win) -> Entry | str:
+    """Where a drag may hover to bring this window forward: its taskbar button.
+
+    The user's own route (2026-09-17): when something covers the window you are carrying
+    something to, carry it onto that window's *taskbar button* and hold — the shell brings
+    the window to the front by itself — then continue into it. Only the taskbar qualifies:
+    a tray icon's flyout would have to be *clicked* open, and a click is not available while
+    a drag is holding the button down, so an application that lives only in the notification
+    area cannot be reached this way (the result says so rather than pretending).
+    """
+    tray = int(_u32.FindWindowW("Shell_TrayWnd", None) or 0)
+    if not tray:
+        return "there is no taskbar on this desktop to route the drag through"
+    found = _shell_row(_surface_rows(tray), win)
+    if found is None:
+        return (
+            f"{win.title!r} has no taskbar button right now, and the shell route to bring a "
+            "window forward needs one"
+        )
+    if found.cls.startswith(TRAY_BUTTON_PREFIX):
+        return (
+            "its row in the notification area is a tray icon, not a taskbar button — that "
+            "flyout has to be clicked open, which a drag cannot do while holding the button"
+        )
+    return _entry(tray, found, "任务栏按钮", 1)
+
+
 def _no_entry_reason(win: Win) -> str:
     """Why nothing could be clicked: the windows an application has no entry in.
 
@@ -2683,6 +3370,7 @@ def _action_restore(args: dict) -> str | ImageRead:
 _INPUT_ACTIONS = {
     "click": _action_click,
     "double_click": _action_double_click,
+    "drag": _action_drag,
     "type": _action_type,
     "key": _action_key,
     "scroll": _action_scroll,
@@ -2712,8 +3400,8 @@ def _run(
     handler = _INPUT_ACTIONS.get(action)
     if handler is None and action != "restore":
         return (
-            f"ERROR: unknown action {action!r} — use shot, windows, targets, click, type, key, "
-            "scroll or restore"
+            f"ERROR: unknown action {action!r} — use shot, windows, targets, click, "
+            "double_click, drag, type, key, scroll or restore"
         )
     hwnd = args.get("hwnd")
     if hwnd in (None, ""):
@@ -2729,9 +3417,11 @@ def _run(
             return _action_restore(args)
         return handler(args, sink, should_abort, on_answer, call_id)
     finally:
-        # Belt and braces: no injection path may leave a key down, including
-        # the ones that raise or return early.
+        # Belt and braces: no injection path may leave a key down or the left button
+        # held, including the ones that raise or return early. A stuck button is a fault
+        # only a human can clear, exactly like a stuck Ctrl.
         release_all_keys()
+        release_all_buttons()
 
 
 SCHEMA = {
@@ -2745,7 +3435,8 @@ SCHEMA = {
             "(the controls inside one window, numbered, with the same numbers drawn "
             "on a picture). Input actions: `click`, `double_click` (the open "
             "gesture for anything that is at hand on screen — a desktop icon, a "
-            "document icon, a file already listed in a window that is showing), `type` "
+            "document icon, a file already listed in a window that is showing), `drag` "
+            "(carry something with the left button held down — see below), `type` "
             "(enters text one character at a time), `key`, "
             "`scroll`, plus `restore` (bring a minimized or tray-resident window back on "
             "screen, then picture it) and `label` (give a shape you recognised a name, so the "
@@ -2773,6 +3464,42 @@ SCHEMA = {
             "bring the windows back) — and then act on the icon. If another window covers the "
             "icons, the icon click comes back refused with the name of the window on top: that "
             "means 'show the desktop first', not 'give up'. "
+            "`drag` carries something with the left button held down, and it is how anything "
+            "is handed to a window: putting a file or a picture into a text box (typing carries "
+            "text only, one character at a time), repositioning a window by its "
+            "title bar, dragging a selection across, carrying a shape around a canvas. A drop "
+            "needs no focus, which is exactly why it also works in an application whose input "
+            "box exposes no addressable control at all. Both of its ends come from the "
+            'program: the grab point is target/name in hwnd=, or `from="titlebar"` for the '
+            "window's own title bar; the drop point is the anchor in to_hwnd= — a to_target/"
+            "to_name, or that window's client-area centre — shifted by dx/dy pixels, which are "
+            "a relative shift and never a screen position (with no to_hwnd= at all the drop "
+            "point is the grab point itself shifted by dx/dy — a carry inside one window: a "
+            "selection, a slider, a window moved by its title bar). Nothing is injected unless the grab "
+            "point belongs to hwnd and the drop point to to_hwnd, and that is checked again "
+            "just before the button is let go: a drag that would release somewhere else is "
+            "cancelled with Escape, and the result says so. If the window you are carrying "
+            "something to sits behind another one, the drop point is covered and the drag is "
+            "refused — move the covering window first, or aim at a part of the destination "
+            'that is showing, or take the shell\'s own route with `route="taskbar"`: the thing is '
+            "carried onto that window's taskbar button and held there until the shell brings "
+            "the window forward, and the drag then continues into it (this is the way a person "
+            "gets past a window that fills the screen, and the way a *minimized* window comes "
+            "back: with a route the destination is deliberately not woken through the OS "
+            "first, because the hover brings it up through the shell — the application's own "
+            "path). The other route into a box is the "
+            "keyboard, the user's own pairing (2026-09-17): select the file's row or click it, "
+            "`key` ['ctrl','c'], then click the box or the conversation and `key` ['ctrl','v']. "
+            "That is a plain copy through the clipboard, so it spends whatever the user had on "
+            "it, and the box has to be one that takes a paste — but for a file or a picture it "
+            "can be shorter than a drag. It does not change the rule above: text is still "
+            "entered by `type`, one character at a time. "
+            "Dropping a file *into an application* is not a file operation; "
+            "moving or renaming a file is, and that still goes through the shell. A file row "
+            "inside a modern folder window has no addressable name (Windows 11's Explorer list "
+            "is not in the accessibility tree this tool walks), so reach it by a *fragment* of "
+            'its visible text — the OCR reads the picture and is approximate, so `name="报告"` '
+            "finds `报告.pdf` where the full name with its extension may not. "
             "`restore` opens a window through whatever is at hand (触手可及), which has three "
             "faces, one method each: a taskbar button is single-clicked, a tray icon is reached "
             "behind the notification area's overflow arrow and then single-clicked, and a desktop "
@@ -2817,6 +3544,7 @@ SCHEMA = {
                         "label",
                         "click",
                         "double_click",
+                        "drag",
                         "type",
                         "key",
                         "scroll",
@@ -2833,13 +3561,17 @@ SCHEMA = {
                 },
                 "target": {
                     "type": "integer",
-                    "description": "Candidate number from the last `targets` call for this window",
+                    "description": (
+                        "Candidate number from the last `targets` call for this window. For "
+                        "drag it is the thing being carried (unless from='titlebar')."
+                    ),
                 },
                 "name": {
                     "type": "string",
                     "description": (
                         "The control's name or visible text instead of a number "
-                        "(e.g. the button caption). Ambiguous matches come back as a list."
+                        "(e.g. the button caption). Ambiguous matches come back as a list. "
+                        "For drag it names the thing being carried."
                     ),
                 },
                 "text": {
@@ -2874,6 +3606,64 @@ SCHEMA = {
                     "type": "string",
                     "enum": ["left", "right"],
                     "description": "click/double_click: mouse button (default left)",
+                },
+                "from": {
+                    "type": "string",
+                    "enum": ["target", "titlebar"],
+                    "description": (
+                        "drag only: what is grabbed. 'target' (default) means the "
+                        "target/name in hwnd=; 'titlebar' means the window's own title bar, "
+                        "which is how a window is repositioned — the OS says where that bar "
+                        "is, so it needs no target."
+                    ),
+                },
+                "to_hwnd": {
+                    "type": "integer",
+                    "description": (
+                        "drag only: the window the thing is carried to (default: hwnd itself, "
+                        "for a drag that stays inside one window — a selection, a slider, a "
+                        "shape). A different window is the file-or-picture-into-a-text-box "
+                        "case; list its targets with targets(hwnd=to_hwnd) first."
+                    ),
+                },
+                "to_target": {
+                    "type": "integer",
+                    "description": (
+                        "drag only: the drop point as a candidate number from the to_hwnd "
+                        "listing. Left out, the drop point is that window's client-area centre."
+                    ),
+                },
+                "to_name": {
+                    "type": "string",
+                    "description": "drag only: the drop point named by the control's visible text",
+                },
+                "dx": {
+                    "type": "number",
+                    "description": (
+                        "drag only: how far the drop point is shifted from its anchor, in "
+                        "physical pixels (e.g. dx=-400 with an 800-wide window puts it a "
+                        "half-window further left). The anchor is the to_target/to_name "
+                        "control, or the to_hwnd window's centre, or — with neither — the point "
+                        "you grabbed, so dx/dy alone is how a selection is dragged across or a "
+                        "window moved. A relative shift, never a screen position."
+                    ),
+                },
+                "dy": {
+                    "type": "number",
+                    "description": "drag only: the vertical part of the same relative shift",
+                },
+                "route": {
+                    "type": "string",
+                    "enum": ["taskbar"],
+                    "description": (
+                        "drag only: a waypoint to hold the carried thing over while the shell "
+                        "brings the destination forward. 'taskbar' carries it onto the "
+                        "destination's own taskbar button and hovers there — that is how a "
+                        "window which something else covers (a maximized folder window, say) is "
+                        "reached: the shell raises that window by itself, and the drag then "
+                        "continues into it. Without it the path is straight, and a covered drop "
+                        "point is refused."
+                    ),
                 },
                 "label": {
                     "type": "string",

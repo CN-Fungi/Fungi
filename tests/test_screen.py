@@ -25,17 +25,31 @@ def _cand(n, name, cls, rect, patterns=(), source="a11y"):
     return screen.Target(n, name, cls, rect, patterns, source)
 
 
+def _listed(hwnd, *cands, rect=None):
+    """The listing `targets` would have stored for this window, so the resolution half
+    can be driven without a desktop. `rect` is where the window was when it was cut
+    (only the picture tiers care)."""
+    screen._session.listings[hwnd] = screen.Listing({cand.n: cand for cand in cands}, rect)
+
+
 class _U32:
     """Stand-in for the user32 handle: records what was asked of the OS."""
 
-    def __init__(self, window=True, client=(1000, 500, 1400, 800), cls="Notepad"):
+    def __init__(self, window=True, client=(1000, 500, 1400, 800), cls="Notepad", caption=30):
         self.window = window
         self.client = client
         self.cls = cls
+        self.caption = caption
         self.shown = []
 
     def IsWindow(self, _hwnd):  # noqa: N802 (mimics user32)
         return self.window
+
+    def GetSystemMetrics(self, _code):  # noqa: N802 (mimics user32)
+        return self.caption
+
+    def FindWindowW(self, _cls, _name):  # noqa: N802 (mimics user32)
+        return 555  # the shell surfaces (taskbar / desktop) this box always has
 
     def ShowWindow(self, hwnd, cmd):  # noqa: N802 (mimics user32)
         self.shown.append((hwnd, cmd))
@@ -413,8 +427,7 @@ def test_a_listing_number_resolves_against_the_live_window(monkeypatch):
         (_cand(2, "", "Edit", (1000, 540, 1100, 570), ("Value",)), object()),
     ]
     monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: pairs)
-    screen._session.candidates = {cand.n: cand for cand, _ in pairs}
-    screen._session.candidates_hwnd = 42
+    _listed(42, *(cand for cand, _ in pairs))
 
     hit = screen.resolve_target(42, {"target": 1})
     assert isinstance(hit, screen.Target) and hit.name == "保存"
@@ -989,7 +1002,7 @@ def test_a_self_drawn_window_falls_back_to_ocr_text(monkeypatch):
 
     out = str(screen._action_targets({"hwnd": 42}))
     assert "OCR" in out and "搜索" in out
-    assert screen._session.candidates[2].name == "搜索"
+    assert screen._session.listings[42].candidates[2].name == "搜索"
 
 
 def test_a_self_drawn_window_is_judged_before_the_picture_is_read(monkeypatch):
@@ -1211,7 +1224,7 @@ def test_a_shape_that_is_only_the_ink_of_a_text_box_is_dropped(monkeypatch):
     assert "#1 [text] '确定'" in out
     assert out.count("[shape]") == 1
     assert "#2 [shape]" in out  # renumbered, so the listing has no gap
-    assert screen._session.candidates[2].source == "visual"
+    assert screen._session.listings[42].candidates[2].source == "visual"
 
 
 def test_a_listing_says_where_its_candidates_came_from(monkeypatch):
@@ -1261,9 +1274,7 @@ def test_a_number_from_the_picture_keeps_its_own_rectangle(monkeypatch):
     a11y = [(_cand(4, "", "", (852, 131, 2178, 173), ("Value",)), object())]
     monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: a11y)
     monkeypatch.setattr(screen, "window_rect", lambda hwnd: (852, 131, 2178, 173))
-    screen._session.candidates = {8: shape}
-    screen._session.candidates_hwnd = 42
-    screen._session.candidates_rect = (852, 131, 2178, 173)
+    _listed(42, shape, rect=(852, 131, 2178, 173))
 
     hit = screen.resolve_target(42, {"target": 8})
     assert isinstance(hit, screen.Target) and hit.rect == (1305, 261, 1461, 416)
@@ -1275,9 +1286,7 @@ def test_a_number_from_the_picture_expires_when_the_window_moves(monkeypatch):
     shape = _cand(8, "", "", (1305, 261, 1461, 416), (), "visual")
     monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: [])
     monkeypatch.setattr(screen, "window_rect", lambda hwnd: (852, 231, 2178, 273))
-    screen._session.candidates = {8: shape}
-    screen._session.candidates_hwnd = 42
-    screen._session.candidates_rect = (852, 131, 2178, 173)
+    _listed(42, shape, rect=(852, 131, 2178, 173))
 
     out = screen.resolve_target(42, {"target": 8})
     assert isinstance(out, str) and "moved or resized" in out and "run targets again" in out
@@ -1298,9 +1307,7 @@ def test_labelling_a_shape_makes_its_name_stick(monkeypatch):
     monkeypatch.setattr(screen, "_u32", _U32())
     monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: [])
     monkeypatch.setattr(screen, "window_rect", lambda hwnd: (852, 131, 2178, 173))
-    screen._session.candidates = {8: shape}
-    screen._session.candidates_hwnd = 42
-    screen._session.candidates_rect = (852, 131, 2178, 173)
+    _listed(42, shape, rect=(852, 131, 2178, 173))
 
     out = screen._action_label({"hwnd": 42, "target": 8, "label": " 发送 "})
     assert out.startswith("LABELLED '发送'") and "labels here: 发送" in out
@@ -1411,8 +1418,7 @@ def test_three_fruitless_attempts_ask_the_user_instead_of_retrying(monkeypatch):
     monkeypatch.setattr(screen, "ensure_on_screen", lambda hwnd: "normal")
     monkeypatch.setattr(screen, "window_rect", lambda hwnd: (900, 400, 1200, 600))
     monkeypatch.setattr(screen, "covering_window", lambda point: 42)  # our window is on top
-    screen._session.candidates = {1: pairs[0][0]}
-    screen._session.candidates_hwnd = 42
+    _listed(42, pairs[0][0])
 
     results = [
         str(screen._action_click({"hwnd": 42, "target": 1}, None, None, None, None))
@@ -1515,8 +1521,7 @@ def test_double_click_reports_the_window_it_opened(monkeypatch):
     monkeypatch.setattr(screen, "_guarded_input", lambda hwnd: (True, ""))
     monkeypatch.setattr(screen, "window_rect", lambda hwnd: (900, 400, 1200, 600))
     monkeypatch.setattr(screen, "_window_text", lambda hwnd: "记事本" if hwnd == 777 else "桌面")
-    screen._session.candidates = {1: pairs[0][0]}
-    screen._session.candidates_hwnd = 42
+    _listed(42, pairs[0][0])
 
     out = str(screen._action_double_click({"hwnd": 42, "target": 1}, None, None, None, None))
     assert gestures == [2]  # two press/release pairs reach the mouse, not one
@@ -1539,7 +1544,7 @@ def test_an_unknown_action_says_what_is_available():
 def test_every_input_action_insists_on_a_window_id():
     cfg = Config()
     cfg.pc_control = True
-    for action in ("click", "double_click", "type", "key", "scroll", "restore"):
+    for action in ("click", "double_click", "drag", "type", "key", "scroll", "restore"):
         out = screen._run(cfg, None, {"action": action})
         assert "needs hwnd" in out, action
 
@@ -1553,6 +1558,7 @@ def test_the_tool_offers_the_actions_the_spec_promises():
         "label",
         "click",
         "double_click",
+        "drag",
         "type",
         "key",
         "scroll",
@@ -1561,3 +1567,508 @@ def test_the_tool_offers_the_actions_the_spec_promises():
     assert "target" in screen.SCHEMA["function"]["parameters"]["properties"]
     # no coordinates in the schema: the pixel is never the model's to choose
     assert "x" not in screen.SCHEMA["function"]["parameters"]["properties"]
+    # a drag's second end is a relative shift of an anchor the program read, plus the
+    # window that anchor lives in — never a position either
+    props = screen.SCHEMA["function"]["parameters"]["properties"]
+    assert {"to_hwnd", "to_target", "to_name", "dx", "dy", "from"} <= set(props)
+    assert "y" not in props
+
+
+# ── drag: a press, a path, a drop (spec §46; user 2026-09-17) ──────────────
+
+
+class _Recorder:
+    """What a gesture injected, in order — mouse and keyboard on one timeline, so that
+    "the Escape came before the release" is something a test can assert."""
+
+    def __init__(self):
+        self.timeline: list[str] = []
+        self.events: list[tuple[int, int, int]] = []
+        self.keys: list[tuple[int, bool]] = []
+        self.pointer = (0, 0)
+
+    def mouse(self, x, y, flags):
+        if flags & screen.MOUSEEVENTF_LEFTDOWN:
+            self.timeline.append("press")
+        elif flags & screen.MOUSEEVENTF_LEFTUP:
+            self.timeline.append("release")
+        else:
+            self.timeline.append("move")
+        self.events.append((x, y, flags))
+        if flags & screen.MOUSEEVENTF_MOVE:
+            self.pointer = (x, y)
+        return 1
+
+    def key(self, vk, *, down):
+        self.keys.append((vk, down))
+        if down:
+            self.timeline.append("escape" if vk == 0x1B else f"key{vk}")
+        return 1
+
+
+def _drag_stub(monkeypatch):
+    """Drive a gesture with no mouse and no screen: the recorded events are readable pixels
+    (`_norm_point` becomes the identity), the pointer follows the moves it is given — the
+    gesture checks its own arrival, so it has to — and the button state is the book's own."""
+    rec = _Recorder()
+    monkeypatch.setattr(screen, "_mouse_event", rec.mouse)
+    monkeypatch.setattr(screen, "_norm_point", lambda x, y: (x, y))
+    monkeypatch.setattr(screen, "cursor_pos", lambda: rec.pointer)
+    monkeypatch.setattr(screen, "_button_is_down", lambda button: button in screen._held_buttons)
+    monkeypatch.setattr(screen, "_key_event", rec.key)
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    return rec
+
+
+def _desktop_stub(monkeypatch, rect_of, owner_of):
+    """The platform half of `_action_drag`: readable windows, a screen to crop, a live a11y
+    tree that offers exactly what was listed, and nothing that could touch a real desktop."""
+    monkeypatch.setattr(screen, "_u32", _U32())
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "capture_problem", lambda hwnd: None)
+    monkeypatch.setattr(screen, "window_rect", rect_of)
+    monkeypatch.setattr(screen, "covering_window", owner_of)
+    monkeypatch.setattr(screen, "_guarded_input", lambda hwnd: (True, ""))
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "_is_shell_surface", lambda hwnd: False)
+    monkeypatch.setattr(screen, "grab_screen", lambda: _frame((2240, 1400), origin=(0, 0)))
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((400, 300), origin=(0, 0)))
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: f"w{hwnd}")
+    monkeypatch.setattr(screen, "_class_name", lambda hwnd: "Win")
+    monkeypatch.setattr(screen, "_read_back", lambda hwnd, target: ("", ""))
+    monkeypatch.setattr(screen, "_read_back_settled", lambda hwnd, target: ("", ""))
+    # Resolving a number re-matches it against the live tree, so the tree has to have it.
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: [
+            (cand, object())
+            for cand in screen._session.listings.get(hwnd, screen.Listing()).candidates.values()
+        ],
+    )
+
+
+def test_a_drag_presses_at_the_grab_point_walks_a_path_and_releases_at_the_drop_point(
+    monkeypatch,
+):
+    """The order is the gesture: press where the thing is, carry it with the button down (a
+    teleport would give the application a single move, which is not a drag — spec §36's
+    reason for the glide, applied to the one gesture whose middle the application reads),
+    and let go exactly on the drop point."""
+    rec = _drag_stub(monkeypatch)
+    facts = screen.drag_to((100, 200), (900, 700))
+
+    press = screen.MOVE_STEPS  # the travel to the grab point comes first
+    assert rec.events[press][:2] == (100, 200)
+    assert rec.events[press][2] & screen.MOUSEEVENTF_LEFTDOWN
+    assert rec.timeline.count("press") == 1
+    path = rec.events[press + 1 : -1]
+    assert len(path) == facts["points"] == facts["steps"] >= screen.DRAG_MIN_STEPS
+    assert len({point[:2] for point in path}) > 2  # a path, not one jump
+    assert path[-1][:2] == (900, 700) == rec.events[-1][:2]
+    assert rec.events[-1][2] & screen.MOUSEEVENTF_LEFTUP and rec.timeline[-1] == "release"
+    assert facts["started"] and facts["arrived"] and facts["released"]
+    assert facts["stopped"] is None and facts["injected"] == facts["expected"]
+
+
+def test_a_stopped_drag_is_cancelled_with_escape_and_never_leaves_the_button_down(monkeypatch):
+    """A drag is a second of work, so a stop press has to end it — the per-character
+    contract typing has, asked per point here. Abandoning it means Escape *then* release:
+    releasing first would drop the thing wherever the pointer had got to."""
+    rec = _drag_stub(monkeypatch)
+
+    def stop():
+        return rec.timeline.count("move") > screen.MOVE_STEPS + 3
+
+    facts = screen.drag_to((100, 200), (900, 700), should_abort=stop)
+
+    assert facts["started"] and facts["stopped"] and "aborted" in facts["stopped"]
+    assert 0 < facts["points"] < facts["steps"] and not facts["arrived"]
+    assert rec.timeline.index("escape") < rec.timeline.index("release")
+    assert rec.events[-1][2] & screen.MOUSEEVENTF_LEFTUP
+    assert facts["released"] and screen._held_buttons == set()
+
+
+def test_a_drop_point_that_changed_hands_is_cancelled_instead_of_released(monkeypatch):
+    """During a drag the window *under the pointer* receives the drop, and a path can hand
+    the pointer to another window on hover (the taskbar does exactly that). So the drop
+    point's owner is read once more just before the button comes up: if it is no longer the
+    window that was named, nothing is dropped."""
+    rec = _drag_stub(monkeypatch)
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (0, 0, 1200, 900))
+    monkeypatch.setattr(screen, "covering_window", lambda point: 77)
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "任务栏")
+    monkeypatch.setattr(screen, "_class_name", lambda hwnd: "Shell_TrayWnd")
+
+    facts = screen.drag_to(
+        (100, 200), (900, 700), pre_release=lambda: screen.point_problem(42, (900, 700))
+    )
+
+    assert facts["stopped"] and "belongs to" in facts["stopped"] and "任务栏" in facts["stopped"]
+    assert rec.timeline.index("escape") < rec.timeline.index("release")
+    assert facts["released"]
+
+
+def test_a_drag_whose_drop_point_is_covered_is_refused_without_pressing_anything(monkeypatch):
+    """The most expensive mistake this gesture could make is letting go somewhere else, so
+    that is checked before the press: a covered drop point means not one event."""
+    rec = _drag_stub(monkeypatch)
+    _desktop_stub(monkeypatch, lambda hwnd: (0, 0, 1200, 900), lambda point: 42)
+    monkeypatch.setattr(screen, "client_rect", lambda hwnd: (0, 0, 1200, 900))
+    _listed(42, _cand(1, "报告.pdf", "ListItem", (100, 200, 300, 240)))
+
+    out = str(
+        screen._action_drag(
+            {"hwnd": 42, "target": 1, "to_hwnd": 77, "dx": 50, "dy": 50}, None, None, None, None
+        )
+    )
+
+    assert out.startswith("ERROR:") and "belongs to" in out and "w42" in out
+    assert rec.events == [] and rec.keys == []
+    assert screen._held_buttons == set()
+
+
+def test_a_button_the_gesture_left_down_is_lifted_by_the_action_safety_net(monkeypatch):
+    """The one fault only a human can clear: a left button that stays down (it drags
+    whatever the pointer crosses for the rest of the session). Every injection path goes
+    through `_run`'s finally, so a gesture that raises after pressing — or returns without
+    lifting — still leaves the machine usable."""
+    rec = _drag_stub(monkeypatch)
+    cfg = Config()
+    cfg.pc_control = True
+    monkeypatch.setattr(screen, "_u32", _U32())
+
+    def boom(*_args, **_kwargs):
+        screen._button_event("left", down=True, at=(10, 10))  # pressed, then died
+        raise RuntimeError("mid-gesture failure")
+
+    # Through the dispatch table, not the module attribute: that is the path `_run` takes.
+    monkeypatch.setitem(screen._INPUT_ACTIONS, "drag", boom)
+
+    with pytest.raises(RuntimeError):
+        screen._run(cfg, None, {"action": "drag", "hwnd": 42})
+
+    assert rec.events[-1][2] & screen.MOUSEEVENTF_LEFTUP and screen._held_buttons == set()
+
+
+def test_disarm_lifts_a_button_that_is_still_down(monkeypatch):
+    """Turning the switch off (or leaving the room) has to hand the machine back, and a
+    held button is part of that — §35.2's `release_all_keys` reason, applied to the mouse."""
+    rec = _drag_stub(monkeypatch)
+    screen._button_event("left", down=True, at=(10, 10))
+    assert screen._held_buttons == {"left"}
+
+    screen.disarm()
+
+    assert rec.events[-1][2] & screen.MOUSEEVENTF_LEFTUP and screen._held_buttons == set()
+
+
+def test_a_drag_inside_one_window_carries_the_target_by_dx_dy(monkeypatch):
+    """The selection / slider case: one window, one control, and the drop point is that
+    control's own centre shifted by a relative dx/dy — the model still never gives a screen
+    position, and no second window is needed."""
+    rec = _drag_stub(monkeypatch)
+    _desktop_stub(monkeypatch, lambda hwnd: (0, 0, 2000, 1200), lambda point: 42)
+    _listed(42, _cand(1, "文本编辑器", "Edit", (1000, 500, 1100, 540), ("Value",)))
+
+    out = str(
+        screen._action_drag({"hwnd": 42, "target": 1, "dx": 200, "dy": 40}, None, None, None, None)
+    )
+
+    assert rec.events[screen.MOVE_STEPS][:2] == (1050, 520)  # the press, on the control
+    assert rec.events[-1][:2] == (1250, 560)  # the drop, 200 right and 40 down
+    assert out.startswith("DRAG") and "shifted by (+200,+40)" in out
+
+
+def test_a_drag_carries_between_two_windows_listed_at_the_same_time(monkeypatch):
+    """Why a session keeps one listing per window: the grab end and the drop end live in
+    different windows (a file row into a chat window's input box), so both sets of numbers
+    have to be alive at once — a single remembered listing would throw the first away."""
+    rec = _drag_stub(monkeypatch)
+    source = _cand(5, "报告.pdf", "ListItem", (1000, 600, 1300, 640))
+    dest = _cand(3, "输入框", "Edit", (1700, 800, 2000, 860), ("Value",))
+    _listed(42, source)
+    _listed(77, dest)
+    _desktop_stub(
+        monkeypatch,
+        lambda hwnd: {42: (900, 500, 1400, 900), 77: (1500, 700, 2100, 1000)}[hwnd],
+        lambda point: 42 if point[0] < 1500 else 77,
+    )
+
+    out = str(
+        screen._action_drag(
+            {"hwnd": 42, "target": 5, "to_hwnd": 77, "to_target": 3}, None, None, None, None
+        )
+    )
+
+    assert rec.events[screen.MOVE_STEPS][:2] == (1150, 620) == source.center
+    assert rec.events[-1][:2] == (1850, 830) == dest.center
+    assert out.startswith("DRAG") and "报告.pdf" in out and "输入框" in out
+
+
+def test_a_title_bar_drag_reports_the_window_it_moved(monkeypatch):
+    """Repositioning a window needs no target: the OS says where the window is and how tall
+    a caption is, so the grab point is a rectangle the program read. The window's own
+    rectangle is what verifies it — pixels only say that something changed."""
+    rec = _drag_stub(monkeypatch)
+    moved = {"now": False}
+
+    def rect_of(hwnd):
+        return (500, 260, 1300, 960) if moved["now"] else (300, 200, 1100, 900)
+
+    def owner_of(point):
+        moved["now"] = point == (900, 275)  # the drop point the drag is aimed at
+        return 42
+
+    _desktop_stub(monkeypatch, rect_of, owner_of)
+
+    out = str(
+        screen._action_drag(
+            {"hwnd": 42, "from": "titlebar", "dx": 200, "dy": 60}, None, None, None, None
+        )
+    )
+
+    assert rec.events[screen.MOVE_STEPS][:2] == (700, 215)  # the middle of the 30px caption
+    assert rec.events[-1][:2] == (900, 275)
+    assert "the title bar" in out and "the window moved" in out and "verified" in out
+
+
+def test_a_drop_onto_a_self_drawn_window_is_allowed_where_a_click_would_not_be(monkeypatch):
+    """WeChat 4.x exposes one pattern-less element over its whole client area. Clicking its
+    centre is refused as "the whole window surface, not a control" — but a *drop* there is
+    the normal case (a chat window takes a file anywhere), so only the two measured point
+    rules apply: inside the named window, and that window owns the point."""
+    surface = _cand(1, "MMUIRenderSubWindowHW", "", (0, 0, 1200, 800), ())
+    _listed(77, surface)
+    monkeypatch.setattr(
+        screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: [(surface, object())]
+    )
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (0, 0, 1200, 860))
+    monkeypatch.setattr(screen, "client_rect", lambda hwnd: (0, 0, 1200, 800))
+    monkeypatch.setattr(screen, "covering_window", lambda point: 77)
+
+    assert screen.target_problem(77, surface) is not None  # a click there would be a guess
+    drop = screen.resolve_drop(77, {"to_target": 1}, (10, 10), carry=False)
+    assert isinstance(drop, tuple) and drop[0] == (600, 400) and drop[2] is surface
+    assert screen.point_problem(77, drop[0]) is None
+
+
+# ── the route out of a covered window (user, 2026-09-17) ──────────────────
+
+
+def test_a_route_hovers_the_waypoint_until_the_drop_point_comes_within_reach(monkeypatch):
+    """The user's own way past a window that fills the screen: carry the thing onto the
+    destination's taskbar button and hold — the shell brings that window to the front — and
+    only then carry it in. The drop point is read *after* the wait, because a window that
+    came forward may have been restored or moved on the way."""
+    rec = _drag_stub(monkeypatch)
+    polls = {"n": 0}
+
+    def wait():
+        polls["n"] += 1
+        return polls["n"] >= 3  # the window comes forward on the third read
+
+    refreshed = (900, 700)
+    stale = (1700, 1500)
+    facts = screen.drag_to(
+        (100, 200), stale, via=(1600, 1350), wait=wait, refresh=lambda: refreshed, wait_s=5.0
+    )
+
+    assert facts["started"] and facts["stopped"] is None and polls["n"] == 3
+    assert facts["arrived"] and facts["released"]
+    assert rec.events[-1][:2] == refreshed  # released at the point read after the wait
+    assert stale not in [point[:2] for point in rec.events]  # never went to the stale point
+    assert (1600, 1350) in [point[:2] for point in rec.events]  # it did hover the waypoint
+    assert facts["injected"] == facts["expected"]
+
+
+def test_a_route_that_never_comes_forward_is_cancelled_with_escape(monkeypatch):
+    """If the window never comes forward the drag must not hang over the button, and the
+    thing must not be let go onto it: Escape first (the shell gives the item back), then the
+    release — and the report says the drop point never came within reach."""
+    rec = _drag_stub(monkeypatch)
+
+    facts = screen.drag_to((100, 200), (900, 700), via=(1600, 1350), wait=lambda: False, wait_s=0.0)
+
+    assert facts["stopped"] and "never came within reach" in facts["stopped"]
+    assert rec.timeline.index("escape") < rec.timeline.index("release")
+    assert rec.events[-1][2] & screen.MOUSEEVENTF_LEFTUP and screen._held_buttons == set()
+    assert rec.events[-1][:2] != (900, 700)  # never released at the drop point
+
+
+def test_a_route_needs_a_taskbar_button_and_says_so_when_there_is_none(monkeypatch):
+    """A tray-only application has no button to hover, and a flyout cannot be clicked open
+    while a drag holds the button down — so the route is refused before anything is injected,
+    with the reason, rather than hovering something that can never work."""
+    rec = _drag_stub(monkeypatch)
+    _desktop_stub(monkeypatch, lambda hwnd: (0, 0, 1200, 900), lambda point: 42)
+    _listed(42, _cand(1, "报告.pdf", "ListItem", (100, 200, 300, 240)))
+    monkeypatch.setattr(screen, "via_entry", lambda win: "it lives only in the notification area")
+    monkeypatch.setattr(
+        screen,
+        "list_windows",
+        lambda include_hidden=False: [
+            screen.Win(
+                42, "微信", "Qt51514QWindowIcon", (0, 0, 1200, 900), 7, "WeChat.exe", "normal"
+            )
+        ],
+    )
+
+    out = str(
+        screen._action_drag(
+            {"hwnd": 42, "target": 1, "to_hwnd": 42, "route": "taskbar", "dx": 10, "dy": 10},
+            None,
+            None,
+            None,
+            None,
+        )
+    )
+
+    assert out.startswith("ERROR: the drag cannot go through the taskbar")
+    assert "notification area" in out
+    assert rec.events == [] and screen._held_buttons == set()
+
+
+def test_a_route_takes_the_taskbar_button_and_never_the_notification_area(monkeypatch):
+    """`via_entry` is the 触手可及 resolution (spec §35.15) narrowed to what a *hover* can use:
+    a taskbar button raises its window, a tray icon would have to be clicked."""
+    button = screen.Target(
+        2, "微信 - 1 个运行窗口", "Taskbar.TaskListButtonAutomationPeer", (10, 0, 60, 40)
+    )
+    icon = screen.Target(
+        3, " 微信: 3754901636", "SystemTray.NotificationAreaButton", (1700, 0, 1750, 40)
+    )
+    win = screen.Win(42, "微信", "Qt51514QWindowIcon", (0, 0, 1200, 900), 7, "WeChat.exe", "normal")
+    monkeypatch.setattr(screen, "_u32", _U32())
+
+    monkeypatch.setattr(screen, "_surface_rows", lambda surface: [button, icon])
+    entry = screen.via_entry(win)
+    assert entry.where == "任务栏按钮" and entry.target is button and entry.surface == 555
+
+    monkeypatch.setattr(screen, "_surface_rows", lambda surface: [icon])
+    refused = screen.via_entry(win)
+    assert isinstance(refused, str) and "notification area" in refused
+
+
+def _entry():
+    """The taskbar button row this box always has, as `via_entry` would resolve it."""
+    return screen.Entry(
+        555,
+        _cand(
+            9,
+            "DragProbe - 1 个运行窗口",
+            "Taskbar.TaskListButtonAutomationPeer",
+            (1160, 1345, 1215, 1385),
+        ),
+        "任务栏按钮",
+        1,
+        "DragProbe - 1 个运行窗口",
+    )
+
+
+def test_a_route_never_releases_on_a_place_a_minimized_window_only_pretends_to_be(monkeypatch):
+    """Measured 2026-09-17, and it cost a run: a minimized window reports a 0x0 client rect and
+    an icon-slot window rect, and `WindowFromPoint` at that icon slot *does* answer with the
+    window — so geometry alone says the drop point is fine while there is nothing on screen. The
+    wait asks the window's state first, and without that the file was released onto the icon
+    slot (the pointer got clamped into the screen corner and the drag was cancelled)."""
+    rec = _drag_stub(monkeypatch)
+    _desktop_stub(
+        monkeypatch,
+        lambda hwnd: (0, 0, 1200, 900) if hwnd == 42 else (-48000, -48000, -47644, -47941),
+        lambda point: 42,
+    )
+    monkeypatch.setattr(screen, "client_rect", lambda hwnd: (-48000, -48000, -48000, -48000))
+    monkeypatch.setattr(
+        screen, "window_state", lambda hwnd: "minimized" if hwnd == 77 else "normal"
+    )
+    monkeypatch.setattr(screen, "point_problem", lambda hwnd, point: None)  # the false positive
+    monkeypatch.setattr(screen, "DRAG_VIA_WAIT_S", 0.0)
+    monkeypatch.setattr(screen, "via_entry", lambda win: _entry())
+    monkeypatch.setattr(
+        screen,
+        "list_windows",
+        lambda include_hidden=False: [
+            screen.Win(77, "DragProbe", "Cls", (0, 0, 1200, 900), 7, "python.exe", "normal")
+        ],
+    )
+    _listed(42, _cand(1, "报告.pdf", "ListItem", (100, 200, 300, 240)))
+
+    out = str(
+        screen._action_drag(
+            {"hwnd": 42, "target": 1, "to_hwnd": 77, "route": "taskbar"}, None, None, None, None
+        )
+    )
+
+    assert "never came within reach" in out and "cancelled" in out
+    assert rec.events[-1][:2] != (-48000, -48000)  # never released at the icon slot
+    assert rec.timeline.index("escape") < rec.timeline.index("release")
+    assert screen._held_buttons == set()
+
+
+def test_a_route_reads_the_drop_point_again_once_the_window_is_back(monkeypatch):
+    """The drop point is a *place*, and a window the shell brought back from the taskbar may
+    have been restored: the release happens at the client centre it has now, not at the one it
+    had while minimized."""
+    rec = _drag_stub(monkeypatch)
+    waypoint = screen.Entry(
+        555,
+        _cand(
+            9,
+            "DragProbe - 1 个运行窗口",
+            "Taskbar.TaskListButtonAutomationPeer",
+            (1160, 1345, 1215, 1385),
+        ),
+        "任务栏按钮",
+        1,
+        "DragProbe - 1 个运行窗口",
+    ).target.center  # what the hover is aimed at, taken from the row itself
+    state = {"back": False}
+
+    def back() -> bool:
+        """The window stays forward once the shell has brought it forward — which is what the
+        hover is aimed at, and it does not go back when the pointer leaves the button."""
+        if rec.pointer == waypoint:
+            state["back"] = True
+        return state["back"]
+
+    def rect_of(hwnd):
+        if hwnd == 42:
+            return (900, 500, 1400, 900)
+        if hwnd == 555:  # the taskbar strip the button lives in
+            return (0, 1330, 2240, 1400)
+        return (1151, 41, 2242, 1331) if back() else (-48000, -48000, -47644, -47941)
+
+    def owner_of(point):
+        if point[1] > 1330:
+            return 555
+        return 42 if point[0] < 1300 else 77
+
+    _desktop_stub(monkeypatch, rect_of, owner_of)
+    monkeypatch.setattr(
+        screen,
+        "client_rect",
+        lambda hwnd: (1163, 87, 2229, 1318) if back() else (-48000, -48000, -48000, -48000),
+    )
+    monkeypatch.setattr(
+        screen, "window_state", lambda hwnd: "normal" if hwnd == 42 or back() else "minimized"
+    )
+    monkeypatch.setattr(screen, "via_entry", lambda win: _entry())
+    monkeypatch.setattr(
+        screen,
+        "list_windows",
+        lambda include_hidden=False: [
+            screen.Win(77, "DragProbe", "Cls", (1151, 41, 2242, 1331), 7, "python.exe", "normal")
+        ],
+    )
+    _listed(42, _cand(1, "报告.pdf", "ListItem", (1000, 600, 1300, 640)))
+
+    out = str(
+        screen._action_drag(
+            {"hwnd": 42, "target": 1, "to_hwnd": 77, "route": "taskbar"}, None, None, None, None
+        )
+    )
+
+    assert rec.events[-1][:2] == (1696, 702)  # the client centre the window has *now*
+    assert "came back on screen" in out and "verified" in out
+    assert "-48000" not in out
