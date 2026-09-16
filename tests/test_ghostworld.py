@@ -109,6 +109,45 @@ def test_console_scripts_are_used_when_no_checkout_is_configured(monkeypatch):
     assert cwd is None
 
 
+def test_the_cli_is_started_without_a_console_window(monkeypatch):
+    """The exe is windowed, so a console child is given a console of its own: the
+    CLI's window would flash on every send, and the follower's would sit on the
+    desktop for as long as it is watched (2026-09-16 report: 连这个 CLI 都不该
+    显示出来). CREATE_NO_WINDOW is what Windows needs to hear."""
+    seen: dict = {}
+
+    class _Done:
+        returncode, stdout, stderr = 0, "{}", ""
+
+    def run(argv, **kwargs):
+        seen.update(kwargs)
+        return _Done()
+
+    monkeypatch.setattr(ghostworld.subprocess, "run", run)
+    ghostworld.send_command({"cmd": "pos"}, GAME_DIR)
+    assert seen["creationflags"] == ghostworld.NO_WINDOW
+    assert getattr(subprocess, "CREATE_NO_WINDOW", 0) == ghostworld.NO_WINDOW, (
+        "the Windows flag itself"
+    )
+
+    class _Proc:
+        stdout = None
+
+        def kill(self) -> None:
+            return None
+
+        def wait(self, timeout=None) -> int:
+            return 0
+
+    seen.clear()
+    monkeypatch.setattr(
+        ghostworld.subprocess, "Popen", lambda argv, **kwargs: (seen.update(kwargs), _Proc())[1]
+    )
+    monkeypatch.setattr(ghostworld.shutil, "which", lambda name: None)  # module form: same flags
+    assert ghostworld._spawn(GAME_DIR) is not None
+    assert seen["creationflags"] == ghostworld.NO_WINDOW
+
+
 @pytest.mark.parametrize(
     ("reply", "needle"),
     [

@@ -55,6 +55,14 @@ CLI_EXE = "GhostWorldCLI.exe"
 APP_DATA = ("GhostWorld", ".channel.json")  # where a packed game advertises itself
 CHANNEL_REL = ("metaverse", ".channel.json")  # ...and a checkout, beside its code
 
+# Fungi as an exe is windowed (PyInstaller --noconsole), so it owns no console —
+# and Windows hands any console program it starts a brand-new one. The channel CLI
+# is a console exe: without this flag its window flashes on every send, and the
+# follower's window sits on the desktop for as long as it is watched (2026-09-16
+# report: "连这个 CLI 都不该显示出来"). The name is Windows-only; 0 is a no-op
+# elsewhere, which also keeps the tests platform-independent.
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 SCHEMA = {
     "type": "function",
     "function": {
@@ -164,6 +172,7 @@ def _run_cli(
         errors="replace",
         timeout=timeout,
         check=False,
+        creationflags=NO_WINDOW,  # silent: a console window of its own would flash
     )
 
 
@@ -309,6 +318,7 @@ def _spawn(directory: str) -> subprocess.Popen | None:
             text=True,
             encoding="utf-8",
             errors="replace",
+            creationflags=NO_WINDOW,  # the follower lives for minutes: no window, ever
         )
     except OSError:
         return None
