@@ -84,7 +84,7 @@ P2P写起来又麻烦，防火墙问题频发，也不好；
 
 并且对于视频，一大可利用要素是音轨。**能否使用ASR技术提取音轨中的可利用信息呢？**
 
-就是以这样一种“穷人思维”，对于受限的技术做拆分，我开发了[VidSense](https://github.com/Offblink/VidSense)，并成为了Fungi的一个工具。**通过OpenCV对视频抽帧，使用CILP选取关键帧，利用Fast-Whisper做语音识别，最后将音视频糅合到一起喂给VLM实现。**
+就是以这样一种“穷人思维”，对于受限的技术做拆分，我开发了[VidSense](https://github.com/Offblink/VidSense)，并成为了Fungi的一个工具。**通过OpenCV对视频抽帧，使用CLIP选取关键帧，利用Fast-Whisper做语音识别，最后将音视频糅合到一起喂给VLM实现。**
 
 <video src="https://github.com/user-attachments/assets/7667cc59-8594-41d8-a45b-e5086ffa7dfe" controls></video>
 
