@@ -4,6 +4,7 @@ loopback callers."""
 
 import json
 import threading
+import urllib.error
 import urllib.request
 
 from fungi.server import WEBUI_TOKEN, YesSirHandler, lan_payload, make_webui_server
@@ -88,6 +89,39 @@ def test_webui_binds_all_interfaces_and_lan_endpoint_works():
         assert payload["ip"] not in ("", None)
         assert payload["token"] == WEBUI_TOKEN
         assert payload["url"].endswith(f"/m?t={WEBUI_TOKEN}")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+class _BoomRuntime(_TouchRuntime):
+    """A route that blows up: the page must still get an answer."""
+
+    def comm_send(self, data: dict) -> dict:
+        raise ValueError("hub said no")
+
+
+def test_a_route_that_raises_still_answers():
+    """A dropped connection reads as a network failure in the browser — and
+    Chromium silently re-sends the POST, which restarted the send-file modal's
+    bar from zero (a send over max_file_mb did exactly that). So an exception
+    becomes a 500 the page can print.
+    """
+    server = make_webui_server(0, _BoomRuntime())
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_address[1]}/comm-send",
+            data=json.dumps({"host": "beta", "file": "x"}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 500
+            payload = json.loads(exc.read().decode("utf-8"))
+        assert payload == {"error": "ValueError: hub said no"}
     finally:
         server.shutdown()
         server.server_close()

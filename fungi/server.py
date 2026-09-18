@@ -7,6 +7,7 @@ store; client: its own disk — never the peer-operated hub), and routes
 card answers back out as answer envelopes.
 """
 
+import contextlib
 import json
 import re
 import secrets
@@ -22,7 +23,7 @@ from fungi import runlog, session
 from fungi.agent import SYSTEM_PROMPT, Agent, public_messages
 from fungi.config import PROJECT_ROOT, RESOURCE_ROOT, load_config, save_config
 from fungi.events import Sink
-from fungi.hub.app import safe_name
+from fungi.hub.app import safe_name, too_large_message
 from fungi.tools.ask import resolve_ask
 from fungi.tools.mcp import mcp_extra_tools
 from fungi.trilayer import TriLayer
@@ -380,6 +381,26 @@ class YesSirHandler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, UnicodeDecodeError):
             return {}
 
+    def _answer(self, routes) -> None:
+        """Every request gets an answer — a route that blows up says so.
+
+        A dropped connection is indistinguishable from a network failure in the
+        browser, and Chromium then silently RE-SENDS the POST: a send-file over
+        max_file_mb raised out of /comm-send, the send-file modal said "Failed
+        to fetch", and each re-send restarted its bar from zero. So a route
+        exception becomes a 500 the page can print, and a dead reader is just
+        closed (nothing left to say to it).
+        """
+        try:
+            routes()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self.close_connection = True
+        except Exception as exc:  # the point is to answer, not to type the failure
+            runlog.problem("webui %s %s failed: %s", self.command, self.path.split("?")[0], exc)
+            self.close_connection = True
+            with contextlib.suppress(Exception):  # already streaming: no reply room
+                self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=500)
+
     def _authorized(self) -> bool:
         """Loopback clients (desktop WebUI, GUI) pass freely. LAN clients must
         carry the QR token for every data route. Static shell assets (page,
@@ -419,6 +440,9 @@ class YesSirHandler(BaseHTTPRequestHandler):
 
     # ---- GET --------------------------------------------------------------
     def do_GET(self):
+        self._answer(self._get_routes)
+
+    def _get_routes(self):
         if not self._gate():
             return
         self.runtime.touch()  # anyone still polling = someone is looking
@@ -495,6 +519,9 @@ class YesSirHandler(BaseHTTPRequestHandler):
 
     # ---- POST -------------------------------------------------------------
     def do_POST(self):
+        self._answer(self._post_routes)
+
+    def _post_routes(self):
         if not self._gate():
             return
         self.runtime.touch()
@@ -586,6 +613,9 @@ class YesSirHandler(BaseHTTPRequestHandler):
 
     # ---- DELETE -----------------------------------------------------------
     def do_DELETE(self):
+        self._answer(self._delete_routes)
+
+    def _delete_routes(self):
         if not self._gate():
             return
         url = urlparse(self.path)
@@ -842,7 +872,7 @@ class YesSirHandler(BaseHTTPRequestHandler):
                 if not chunk:
                     break
                 drained += len(chunk)
-            self._send_json({"error": "file too large"}, status=413)
+            self._send_json({"error": too_large_message(length, limit)}, status=413)
             return
         part = _extract_upload(self.rfile.read(length), match.group(1).encode("latin-1"))
         if part is None:

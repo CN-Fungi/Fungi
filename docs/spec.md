@@ -1849,3 +1849,60 @@ Escape = 把东西还回去；不先松键是因为松键就已经落下去了�
    读模块常量」的老坑（`blocking_ask` 有一条同样的注释）。修：`wait_s=None` → 函数体内取 `DRAG_VIA_WAIT_S`。
 3. 顺带：探针窗口是被我自己的终端盖住的那次也说明了同一件事——**agent 自己的终端就是屏幕上最碍事的那个窗口**，
    验证前先把它挪到角落（脚手架，不是被测对象）。
+
+## 47. 修复（2026-09-18 用户真机反馈）：大文件发不出去——「进度条从 0 反复、最终 Failed to fetch」
+
+**用户原话**：「我发现 fungi 在传送大文件的时候，会出现下载一点点，然后进度条重新从 0 开始，反复很多次，最终 fail to
+fetch 的情况。」三个现象：**从 0 重来**、**反复多次**、**最后是 fetch 失败**（不是「文件太大」这种话）。全部按事实复现了。
+
+### 47.1 复现：两个角色、三种异常，一个共同点
+
+两只真房间（alpha 宿主 + beta 加入）、真浏览器、真 `Xfer` 模态，把 hub 上限压到 2 MiB 好让 5 MiB 的文件「太大」：
+
+| 谁在发 | 服务端发生了什么 | 页面看到 |
+|---|---|---|
+| 宿主房间（自己的 hub，进程内） | `Transfers.stage_from` 抛 `ValueError: file too large` → `Hub.upload_transfer` → `LocalTransport`（只捕 `OSError`）→ `comm_send_human` → `do_POST`，**一路没人接** | `Failed to fetch` |
+| 客户端房间（hub 在对面，走 HTTP） | hub 先答 413 就不再读 body，客户端往死掉的 socket 里接着发 → `ConnectionAbortedError: WinError 10053` 逃出 `HubClient.upload_transfer` | `Failed to fetch` |
+| 同一件事的另一半 | `data/transfers/<id>__<name>` 被写到上限（默认 200 MiB）**再删掉**——用户当天看到的就是这个目录一直在动 | — |
+
+**「从 0 重来」的来源量到了**：一次 `Xfer.sendOne` 在服务端**到过 2–3 次**（探针按 job id 数），**job id 一模一样**——
+是 Chromium 在「连接被关掉、一个字节响应都没收到」时**静默重发同一个 POST**。重发到了 `/comm-send` 就是
+`xfer_jobs.start(job, …)`，`done` 归零 → 轮询把 0 写回进度条 → **用户看见条子回到 0**。所以「反复很多次」不是用户手抖，
+是浏览器自己在重试；重到 6–7 次后它放弃，页面显示的就是最后那个 `Failed to fetch`。
+
+**还有一个把线索吃掉的地方**：`WebUIServer.handle_error` 会静默掉 `ConnectionAbortedError`/`ConnectionResetError`
+（手机浏览器天天开一堆推测连接又 reset，这是对的）——于是客户端角色那次失败**连日志都没有**，是探针在
+`BaseServer.handle_error` 上挂了一层才看见的。
+
+### 47.2 修复：拒绝要当成一句话说出来，而不是把连接掐掉
+
+1. **hub 端按声明尺寸先拒**（`hub/app.py::_Handler._transfer_upload`）：`Content-Length` 一读出来就问
+   `transfers.refusal()`，超了**先答 413、再排空 body**（顺序重要：先答，发送方一个 RTT 内就读到并停手，排空只见 EOF）。
+   `refusal()/too_large_message()` 是新的唯一措辞：`file too large: 16 MB (limit 2 MB)`——两个数都写出来，
+   用户才知道该动哪个旋钮（`/upload` 的 413 也从光秃秃的 `file too large` 改成同一句）。**一个字节都不再落盘**。
+2. **进程内那条路不抛异常**（`clone/base.py::LocalTransport.upload_transfer`）：先 `refusal(total)` → 返回 `{"error": …}`；
+   `ValueError` 仍兜一层（文件在传输中长大）。这一条就是用户那台（自己开 hub）的病根。
+3. **客户端会听早到的回复**（`hub/client.py::HubClient.upload_transfer`）：`endheaders()` 之后先 `_answered(conn, 50ms)`
+   瞄一眼，body 里每 256 KiB 再瞄一次（`select` 0 超时）；看见回复就停止发送去 `getresponse()`。
+   没有这一步，被拒的 16 MiB 会**一个不少地灌进排空循环**（实测 sent=16777216），有了它是 **sent=0 B、0.01s**。
+   发送途中断链（`OSError`/`HTTPException`）也变成 `{"error": …}`，不再掀翻请求线程。
+4. **兜底：任何路由都必须给出回答**（`server.py::YesSirHandler._answer`）：`do_GET/do_POST/do_DELETE` 改成
+   薄壳 + `_get_routes/_post_routes/_delete_routes`，异常 → 500 `{"error": "<类型>: <消息>"}` 并写 `runlog.problem`，
+   读完就走的读者只关连接。**「连接没了」在浏览器里和「网络坏了」是同一件事**，这一层让下一类 bug 变成页面上的一句话，
+   而不是又一个 `Failed to fetch`。
+
+### 47.3 验收
+
+- 新用例两条，都先跑红：`tests/test_webui_transfer.py::test_a_file_over_the_cap_is_refused_by_name_from_either_role`
+  （两个角色各发一次超限文件，断言模态里是 `file too large`、job 记录 `state=error`、`transfers/` 里一个文件都没有；还原成修复前它以
+  `note: 'Failed to fetch'` 失败）和 `tests/test_webui_gate.py::test_a_route_that_raises_still_answers`
+  （还原后 `http.client.RemoteDisconnected` → 修复后 500 + JSON）。
+- 真机数字：5 MiB / 2 MiB 上限 → `file too large: 5 MB (limit 2 MB)`，服务端**到达 1 次**（不再重发，条子不再归零），
+  未处理异常 0；客户端角色 8 MiB → 同样一句、1 次到达；16 MiB / 2 MiB 上限 → **sent=0 B**、0.01s、`transfers/` 连目录都不建。
+- 上限内的传输不受影响：1 MiB 文件仍然 100% + `已发出，等待对方接收`，commlog 有 `[file]` 那行。
+- 门禁：`ruff check --fix fungi tests` / `ruff format --check fungi tests` / `ruff check fungi tests` 全干净；`PYTHONIOENCODING=utf-8 python -m pytest -q` → **633 passed**（3:05，比 §46.8 的 631 多两条新用例）。
+- 改动面：`fungi/hub/app.py`、`fungi/hub/client.py`、`fungi/clone/base.py`、`fungi/server.py` + 两个测试文件；`docs/spec.md` 只追加本节（CRLF 保持，`git diff --stat` 是 56 行新增，没有整树漂移）。
+
+**边界（如实记）**：`max_file_mb`（默认 200）是**故意的**上限，这次改的是「被拒时要说话」——文件仍然发不出去，
+要发更大的文件得在 `config.json` 里把 `max_file_mb` 调大（发送方与 hub 两侧都用这个值）。上限之内的大文件该怎么慢还怎么慢
+（发送是同步的、`/comm-send` 要等到字节全部进 hub 才回），这次没动它。

@@ -12,6 +12,7 @@ green.
 
 import contextlib
 import time
+from pathlib import Path
 
 import pytest
 
@@ -26,6 +27,8 @@ pw_sync = pytest.importorskip("playwright.sync_api", reason="playwright not inst
 from fungi import server as webui_server  # noqa: E402  (after the skip guard)
 
 CFG = Config(api_key="k", endpoint="e", model="m")
+# A 1 MiB hub cap: the cheap way to be "too large" (see the over-cap test).
+CAP_CFG = Config(api_key="k", endpoint="e", model="m", max_file_mb=1)
 
 
 class SilentLLM:
@@ -45,11 +48,11 @@ def _wait(predicate, timeout_s: float = 10.0) -> bool:
 
 
 @contextlib.contextmanager
-def _rooms(tmp_path):
+def _rooms(tmp_path, cfg=CFG):
     """A host room and a joiner, both real: the friend view needs a peer."""
     server = RoomServer(
         "alpha",
-        CFG,
+        cfg,
         NullSink(),
         "tok",
         tmp_path / "d1",
@@ -60,7 +63,7 @@ def _rooms(tmp_path):
     try:
         client = RoomClient(
             "beta",
-            CFG,
+            cfg,
             NullSink(),
             f"http://127.0.0.1:{server.hub.port}",
             "tok",
@@ -81,6 +84,13 @@ def _rooms(tmp_path):
 @pytest.fixture(scope="module")
 def rooms(tmp_path_factory):
     with _rooms(tmp_path_factory.mktemp("xfer-rooms")) as pair:
+        yield pair
+
+
+@pytest.fixture(scope="module")
+def capped_rooms(tmp_path_factory):
+    """The same pair behind a 1 MiB cap: over-cap sends are the interesting case."""
+    with _rooms(tmp_path_factory.mktemp("xfer-cap"), CAP_CFG) as pair:
         yield pair
 
 
@@ -284,3 +294,40 @@ def test_a_failed_send_says_so_and_stays_open(page, rooms, tmp_path):
     assert "show" in last["cls"], "the modal closed on a failure"
     assert "failed" in last["steps"][-1]["cls"]
     assert "no such file" in last["steps"][-1]["note"]
+
+
+def test_a_file_over_the_cap_is_refused_by_name_from_either_role(browser, capped_rooms, tmp_path):
+    """Over max_file_mb the refusal must REACH the page, whichever side sends.
+
+    It used to leave the request unanswered — the host role raised the cap's
+    ValueError out of /comm-send, the client role's socket died mid-body
+    (WinError 10053) — so the modal said "Failed to fetch" and Chromium silently
+    re-sent the POST, which restarted the bar from zero once per re-send. The
+    user saw exactly that loop on a big file, with a cap's worth of partial left
+    behind in transfers/.
+    """
+    server, client = capped_rooms
+    big = tmp_path / "huge.bin"
+    big.write_bytes(b"\0" * (2 * 1024 * 1024))  # cap is 1 MiB
+
+    for room, peer in ((server, "beta"), (client, "alpha")):
+        assert _wait(lambda r=room, p=peer: r._clones.get(p) is not None), "comm clone never came"
+        with _page(browser, room) as pg:
+            pg.evaluate(XFER_WATCH)
+            out = pg.evaluate(
+                """async ([host, p]) => {
+                     try { await Xfer.sendOne('发送文件给 ' + host, host, p); return {ok: true}; }
+                     catch (e) { return {ok: false, err: String((e && e.message) || e)}; }
+                   }""",
+                [peer, str(big)],
+            )
+            assert out["ok"] is False, out
+            last = _log(pg)[-1]
+            assert "file too large" in last["steps"][-1]["note"], last
+            assert "fetch" not in last["steps"][-1]["note"].lower(), "dropped, not refused"
+            job = room.webui_runtime().transfer_progress(last["job"])
+            assert job["state"] == "error" and "file too large" in job["error"], job
+
+    # the refusal came from the declared size: no partial was ever staged
+    staged = Path(server.hub.transfers.root)
+    assert not staged.is_dir() or not any(staged.iterdir())

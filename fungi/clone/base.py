@@ -95,6 +95,13 @@ class LocalTransport:
         if not src.is_file():
             return {"error": f"no such file: {path}"}
         total = src.stat().st_size
+        why = self.hub.transfers.refusal(total)
+        if why:
+            # A refusal, not an exception: this runs inside the WebUI's request
+            # thread, and an exception here leaves /comm-send unanswered — the
+            # page then shows "Failed to fetch" and Chromium silently re-sends
+            # the POST, which restarts the modal's bar from zero.
+            return {"error": why}
         sent = 0
 
         def read(size: int) -> bytes:
@@ -108,6 +115,8 @@ class LocalTransport:
         try:
             with src.open("rb") as src_fh:
                 return self.hub.upload_transfer(self.host, to_host, name, read)
+        except ValueError as exc:  # grew past the cap while we streamed it
+            return {"error": str(exc)}
         except OSError as exc:
             return {"error": f"cannot read {path}: {exc}"}
 

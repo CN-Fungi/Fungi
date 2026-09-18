@@ -2,6 +2,7 @@
 
 import http.client
 import json
+import select
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -11,6 +12,29 @@ from .. import runlog
 from ..protocol import Envelope, ProtocolError, deserialize
 
 POLL_CAP = 25.0
+# How long the first peek waits for a refusal: the hub decides from the
+# declared size, so its 413 lands within one RTT — never push a whole file into
+# a drain just to read it (measured: 16 MiB sent for a 2 MiB cap without this).
+REFUSAL_WAIT_S = 0.05
+
+
+def _answered(conn: http.client.HTTPConnection, wait: float = 0.0) -> bool:
+    """True when the hub has already replied — in practice, a refusal.
+
+    The hub refuses an over-cap upload from the declared size, before reading
+    the body. A client that keeps pushing bytes never gets to read that reply:
+    the send dies on a closed socket (WinError 10053), so the page says "Failed
+    to fetch" instead of "file too large". Peeking is what turns the refusal
+    back into a sentence.
+    """
+    sock = getattr(conn, "sock", None)
+    if sock is None:
+        return False
+    try:
+        readable, _, _ = select.select([sock], [], [], wait)
+    except (OSError, ValueError):
+        return False
+    return bool(readable)
 
 
 class HubError(Exception):
@@ -188,7 +212,8 @@ class HubClient:
                 conn.putheader("Content-Type", "application/octet-stream")
                 conn.putheader("Content-Length", str(total))
                 conn.endheaders()
-                while True:
+                refused = _answered(conn, REFUSAL_WAIT_S)
+                while not refused:
                     chunk = fh.read(256 * 1024)
                     if not chunk:
                         break
@@ -196,8 +221,15 @@ class HubClient:
                     sent += len(chunk)
                     if progress is not None:
                         progress(sent, total)
+                    refused = _answered(conn)  # the hub answered mid-body: stop
             resp = conn.getresponse()
             body = resp.read()
+        except (OSError, http.client.HTTPException) as exc:
+            # A hub that closed on us must not take this thread down: an
+            # exception here leaves /comm-send unanswered and the page says
+            # "Failed to fetch" (Chromium then re-sends the POST, restarting
+            # the modal's bar).
+            return {"error": f"upload failed: {exc}"}
         finally:
             conn.close()
         try:
