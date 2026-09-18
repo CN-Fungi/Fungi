@@ -135,3 +135,23 @@ def test_repair_config_file_is_quiet_when_there_is_nothing_to_do(tmp_path):
     good.write_text('{"model": "m"}', encoding="utf-8")
     assert config.repair_config_file(good) is None
     assert json.loads(good.read_text(encoding="utf-8"))["model"] == "m"
+
+
+def test_the_retired_max_file_mb_key_is_reported_not_swallowed(tmp_path, capsys):
+    """Spec §48: transfers are not capped any more. A config still carrying the
+    old key must say so once — someone who set it small to protect their disk
+    cannot be left believing it still applies."""
+    p = tmp_path / "config.json"
+    p.write_text('{"model": "m", "max_file_mb": 20}', encoding="utf-8")
+    config._warned.discard("max_file_mb")  # the once-per-process guard is global
+
+    cfg = config.load_config(p)
+
+    assert cfg.model == "m"
+    assert not hasattr(cfg, "max_file_mb"), "the knob is gone, not merely ignored"
+    said = capsys.readouterr().err
+    assert "max_file_mb" in said and "废止" in said
+
+    capsys.readouterr()  # drain: the next load must be quiet
+    config.load_config(p)
+    assert capsys.readouterr().err == "", "a warning per load would be noise"
