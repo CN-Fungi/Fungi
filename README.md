@@ -84,23 +84,23 @@ P2P写起来又麻烦，防火墙问题频发，也不好；
 
 并且对于视频，一大可利用要素是音轨。**能否使用ASR技术提取音轨中的可利用信息呢？**
 
-就是以这样一种“穷人思维”，对于受限的技术做拆分，我开发了[VidSense](https://github.com/Offblink/VidSense)，并成为了Fungi的一个工具。**通过OpenCV对视频抽帧，使用CLIP选取关键帧，利用Fast-Whisper做语音识别，最后将音视频糅合到一起喂给VLM实现。**
+就是以这样一种“穷人思维”，对于受限的技术做拆分，我开发了[VidSense](https://github.com/Offblink/VidSense)，并成为了Fungi的一个工具。**通过OpenCV对视频抽帧，使用CLIP选取关键帧，利用Fast-Whisper做语音识别，最后将音视频糅合到一起喂给VLM实现**。
 
 <video src="https://github.com/user-attachments/assets/7667cc59-8594-41d8-a45b-e5086ffa7dfe" controls></video>
 
 ## ④ REPL 能力
 
-如果你从前尝试过让Agent玩命令行的RPG游戏，一定会惊奇地发现它的disability——**每次只能进行一次I/O，是众多Agent竞品的常态。**
+如果你从前尝试过让Agent玩命令行的RPG游戏，一定会惊奇地发现它的disability——**每次只能进行一次I/O，是众多Agent竞品的常态**。
 
 如何解决这一问题呢？REPL，Read-Eval-Print Loop，意为交互式命令行。我的方案出乎意料的简单，效果却不错：**首先让REPL进程跑在后台，然后对该进程发送输入流并捕获输出流，并以此循环往复。**
 
 ## ⑤ Computer Use能力
 
-最近GPT-6的Astra中令人耳目一新的一大能力是Computer Use，然而我还不具备涉及Docker与AIOS底层开发方面的能力。**能否不依靠这些技术，而实现大致的效果呢？**
+最近GPT-6的Astra中令人耳目一新的一大能力是Computer Use，然而我还不具备涉及Docker与AIOS底层开发方面的能力。**能否不依靠这些技术，而实现大致的效果呢**？
 
-以前的我认为不可能——VLM无法精确确定坐标。**况且依靠GUI而非CLI或其他底层接口实现的Computer Use，本身也是一种妥协。**
+以前的我认为不可能——VLM无法精确确定坐标。**况且依靠GUI而非CLI或其他底层接口实现的Computer Use，本身也是一种妥协**。
 
-然而，最近在OpenCV课上学习到的二值化，却改变了我的看法。**我们是否可以让坐标自己暴露出来，OCR负责文字识别，而VLM只负责语义理解呢？**充分利用现有的技术，让VLM做真正需要自己的事情。进一步的，**A11y（或者Windows的UIA）**本身就可以作为坐标暴露的重要补充。抱着试试看的心态，我将Ophio的控制能力融入Fungi，并结合上述思路，开发出了Screen工具。
+然而，最近在OpenCV课上学习到的二值化，却改变了我的看法。**我们是否可以让坐标自己暴露出来，OCR负责文字识别，而VLM只负责语义理解呢**？充分利用现有的技术，让VLM做真正需要自己的事情。进一步的，**A11y（或者Windows的UIA**）本身就可以作为坐标暴露的重要补充。抱着试试看的心态，我将Ophio的控制能力融入Fungi，并结合上述思路，开发出了Screen工具。
 
 ![](docs/readme/screen-raw.png)
 ⬆️ 原图
