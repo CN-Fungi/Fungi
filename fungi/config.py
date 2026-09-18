@@ -47,8 +47,7 @@ class Config:
     system_prompt: str | None = None
     # MCP servers (stdio): name -> {command, args?, env?}
     mcp_servers: dict[str, dict] = field(default_factory=dict)
-    # File transfer: per-file size cap and the local landing directory.
-    max_file_mb: int = 200
+    # File transfer: the local landing directory (no size cap — see spec §48).
     inbox_dir: str = ""  # empty -> PROJECT_ROOT / "inbox"
     # Presentation nickname shown to friends; never used on the wire.
     display: str = ""
@@ -228,7 +227,15 @@ def load_config(path: Path | None = None) -> Config:
                 str(k): v for k, v in data["mcp_servers"].items() if isinstance(v, dict)
             }
         if data.get("max_file_mb"):
-            cfg.max_file_mb = int(data["max_file_mb"])
+            # Retired 2026-09-18 (spec §48): transfers are not capped any more.
+            # A config that still carries the key must say so once — silently
+            # ignoring it would leave someone who set it small believing their
+            # disk is protected.
+            _warn_once(
+                "max_file_mb",
+                "[config] max_file_mb 已废止（文件传输不再设上限，见 spec §48）；"
+                "这条设置被忽略，config.json 里可以删掉",
+            )
         if data.get("inbox_dir"):
             cfg.inbox_dir = str(data["inbox_dir"])
         if data.get("display"):
@@ -265,8 +272,6 @@ def save_config(cfg: Config, path: Path | None = None) -> None:
         data["system_prompt"] = cfg.system_prompt
     if cfg.mcp_servers:
         data["mcp_servers"] = cfg.mcp_servers
-    if cfg.max_file_mb != 200:
-        data["max_file_mb"] = cfg.max_file_mb
     if cfg.inbox_dir:
         data["inbox_dir"] = cfg.inbox_dir
     if cfg.diary:

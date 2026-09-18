@@ -243,17 +243,50 @@ def test_transfer_upload_roundtrip_and_guard(room, tmp_path):
     assert "error" in out
 
 
-def test_transfer_upload_enforces_size_cap(tmp_path):
-    hub = Hub("srv", "room-token", tmp_path, max_file_mb=0)  # cap = 1 MiB
+def test_transfer_discard_actually_drops_the_staged_copy(room, tmp_path):
+    """The receiver's discard must drop the bytes. The client sends its token in
+    the JSON body (HubClient._request); the route read it from the query, so the
+    discard was always 403 and every delivered file kept a full staged copy on
+    the hub's disk until restart — invisible, because both callers suppress the
+    error."""
+    hub, clients = room
+    clients["alpha"].post("/api/join", {"name": "alpha", "token": "room-token"})
+    clients["beta"].post("/api/join", {"name": "beta", "token": "room-token"})
+    src = tmp_path / "report.bin"
+    src.write_bytes(b"round-trip")
+    out = clients["alpha"].upload_transfer(str(src), "report.bin", "beta")
+    dest = tmp_path / "landed.bin"
+    clients["beta"].download_transfer(out["id"], dest)
+    assert dest.read_bytes() == b"round-trip"
+
+    # only the designated receiver may drop it, and only with the token
+    assert clients["alpha"].discard_transfer(out["id"]) == {"ok": False}
+    assert hub.transfers.fetchable(out["id"], "beta") is not None
+    code, _ = clients["beta"].delete("/api/transfer", {"token": "nope", "id": out["id"]})
+    assert code == 403
+
+    assert clients["beta"].discard_transfer(out["id"]) == {"ok": True}
+    assert not (hub.transfers.root / f"{out['id']}__report.bin").exists()
+    assert hub.transfers.fetchable(out["id"], "beta") is None
+
+
+def test_transfer_upload_stages_a_file_of_any_size(tmp_path):
+    """No size cap any more (spec §48): staging is a 256 KiB-chunked stream to
+    disk, so a file several chunks long lands whole and the record carries its
+    real size."""
+    hub = Hub("srv", "room-token", tmp_path)
     hub.start()
     try:
         client = Client(f"http://127.0.0.1:{hub.port}", "room-token", "alpha")
         client.post("/api/join", {"name": "alpha", "token": "room-token"})
         client.post("/api/join", {"name": "beta", "token": "room-token"})
         big = tmp_path / "big.bin"
-        big.write_bytes(b"x" * (1024 * 1024 + 1))
+        big.write_bytes(b"x" * (3 * 1024 * 1024))
         out = client.upload_transfer(str(big), "big.bin", "beta")
-        assert "too large" in out.get("error", "")
+        assert out["ok"] is True and out["size"] == big.stat().st_size
+        staged = hub.transfers.root / f"{out['id']}__big.bin"
+        assert staged.stat().st_size == big.stat().st_size
+        assert staged.read_bytes() == big.read_bytes()
     finally:
         hub.stop()
 

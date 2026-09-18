@@ -79,7 +79,7 @@ def test_hub_consumes_mail_envelope_into_both_boxes(tmp_path):
     """Regression: parse_addr used to reject the "host:mail" role, so real
     hub delivery of the amail tool's envelope crashed with ProtocolError."""
     data_root = tmp_path / "data"
-    hub = Hub(tmp_path, "tok", data_root, max_file_mb=10)
+    hub = Hub(tmp_path, "tok", data_root)
     hub.join("alice", "127.0.0.1:1")
     hub.join("bob", "127.0.0.1:2")
     out = hub.send(

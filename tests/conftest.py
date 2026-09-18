@@ -26,16 +26,32 @@ class Client:
 
     # ── raw HTTP ──
 
-    def post(self, path: str, obj: dict) -> tuple[int, dict]:
+    def _json(self, method: str, path: str, obj: dict) -> tuple[int, dict]:
         data = json.dumps(obj).encode("utf-8")
         req = urllib.request.Request(
-            self.base + path, data=data, headers={"Content-Type": "application/json"}
+            self.base + path,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method=method,
         )
         try:
             with urllib.request.urlopen(req, timeout=40) as resp:
                 return resp.status, json.loads(resp.read())
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read())
+
+    def post(self, path: str, obj: dict) -> tuple[int, dict]:
+        return self._json("POST", path, obj)
+
+    def delete(self, path: str, obj: dict) -> tuple[int, dict]:
+        return self._json("DELETE", path, obj)
+
+    def discard_transfer(self, transfer_id: str) -> dict:
+        """Receiver-side drop of the hub's staged copy — HubClient-compatible,
+        token in the body (that is where the real client puts it)."""
+        return self.delete(
+            "/api/transfer", {"token": self.token, "id": transfer_id, "host": self.host}
+        )[1]
 
     def get(self, path: str) -> tuple[int, dict]:
         try:

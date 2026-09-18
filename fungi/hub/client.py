@@ -12,20 +12,21 @@ from .. import runlog
 from ..protocol import Envelope, ProtocolError, deserialize
 
 POLL_CAP = 25.0
-# How long the first peek waits for a refusal: the hub decides from the
-# declared size, so its 413 lands within one RTT — never push a whole file into
-# a drain just to read it (measured: 16 MiB sent for a 2 MiB cap without this).
+# How long the first peek waits for an early reply: the hub answers before the
+# body when it cannot stage the file (no room, no permission), so its status
+# lands within one RTT — never push a whole file into a drain just to read it
+# (measured: 16 MiB sent for a 2 MiB cap back when sizes were capped, 0 B now).
 REFUSAL_WAIT_S = 0.05
 
 
 def _answered(conn: http.client.HTTPConnection, wait: float = 0.0) -> bool:
     """True when the hub has already replied — in practice, a refusal.
 
-    The hub refuses an over-cap upload from the declared size, before reading
-    the body. A client that keeps pushing bytes never gets to read that reply:
-    the send dies on a closed socket (WinError 10053), so the page says "Failed
-    to fetch" instead of "file too large". Peeking is what turns the refusal
-    back into a sentence.
+    A hub that answers before the body ends (see _Handler._transfer_upload) is
+    one a client can otherwise never hear: it keeps pushing bytes until the
+    send dies on the closed socket (WinError 10053), so the page says "Failed
+    to fetch" instead of naming the reason. Peeking turns it back into a
+    sentence.
     """
     sock = getattr(conn, "sock", None)
     if sock is None:

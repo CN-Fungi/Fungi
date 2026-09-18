@@ -27,8 +27,6 @@ pw_sync = pytest.importorskip("playwright.sync_api", reason="playwright not inst
 from fungi import server as webui_server  # noqa: E402  (after the skip guard)
 
 CFG = Config(api_key="k", endpoint="e", model="m")
-# A 1 MiB hub cap: the cheap way to be "too large" (see the over-cap test).
-CAP_CFG = Config(api_key="k", endpoint="e", model="m", max_file_mb=1)
 
 
 class SilentLLM:
@@ -84,13 +82,6 @@ def _rooms(tmp_path, cfg=CFG):
 @pytest.fixture(scope="module")
 def rooms(tmp_path_factory):
     with _rooms(tmp_path_factory.mktemp("xfer-rooms")) as pair:
-        yield pair
-
-
-@pytest.fixture(scope="module")
-def capped_rooms(tmp_path_factory):
-    """The same pair behind a 1 MiB cap: over-cap sends are the interesting case."""
-    with _rooms(tmp_path_factory.mktemp("xfer-cap"), CAP_CFG) as pair:
         yield pair
 
 
@@ -249,7 +240,7 @@ def test_mobile_send_shows_two_steps_and_lands_both_hops(mobile_page, rooms, tmp
     monkeypatch.setattr(
         webui_server,
         "load_config",
-        lambda: Config(api_key="k", endpoint="e", model="m", inbox_dir=str(inbox), max_file_mb=8),
+        lambda: Config(api_key="k", endpoint="e", model="m", inbox_dir=str(inbox)),
     )
 
     mobile_page.evaluate("() => openFriendChat('beta')")
@@ -296,38 +287,34 @@ def test_a_failed_send_says_so_and_stays_open(page, rooms, tmp_path):
     assert "no such file" in last["steps"][-1]["note"]
 
 
-def test_a_file_over_the_cap_is_refused_by_name_from_either_role(browser, capped_rooms, tmp_path):
-    """Over max_file_mb the refusal must REACH the page, whichever side sends.
+def test_a_big_file_goes_through_from_either_role(browser, rooms, tmp_path):
+    """No size cap (spec §48, the user's call): a file far bigger than the cap
+    these tests used to prove stages whole from both sides, and the bar the page
+    watches reaches 100%.
 
-    It used to leave the request unanswered — the host role raised the cap's
-    ValueError out of /comm-send, the client role's socket died mid-body
-    (WinError 10053) — so the modal said "Failed to fetch" and Chromium silently
-    re-sent the POST, which restarted the bar from zero once per re-send. The
-    user saw exactly that loop on a big file, with a cap's worth of partial left
-    behind in transfers/.
+    Both roles matter: the host stages the bytes in-process, the client streams
+    them to the hub over HTTP.
     """
-    server, client = capped_rooms
-    big = tmp_path / "huge.bin"
-    big.write_bytes(b"\0" * (2 * 1024 * 1024))  # cap is 1 MiB
+    server, client = rooms
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"\x5a" * (4 * 1024 * 1024))
 
     for room, peer in ((server, "beta"), (client, "alpha")):
         assert _wait(lambda r=room, p=peer: r._clones.get(p) is not None), "comm clone never came"
         with _page(browser, room) as pg:
             pg.evaluate(XFER_WATCH)
-            out = pg.evaluate(
-                """async ([host, p]) => {
-                     try { await Xfer.sendOne('发送文件给 ' + host, host, p); return {ok: true}; }
-                     catch (e) { return {ok: false, err: String((e && e.message) || e)}; }
-                   }""",
+            pg.evaluate(
+                "async ([host, p]) => { await Xfer.sendOne('发送文件给 ' + host, host, p); }",
                 [peer, str(big)],
             )
-            assert out["ok"] is False, out
             last = _log(pg)[-1]
-            assert "file too large" in last["steps"][-1]["note"], last
-            assert "fetch" not in last["steps"][-1]["note"].lower(), "dropped, not refused"
+            assert "done" in last["steps"][-1]["cls"], last
+            assert last["steps"][-1]["width"] == "100%"
             job = room.webui_runtime().transfer_progress(last["job"])
-            assert job["state"] == "error" and "file too large" in job["error"], job
+            assert job["state"] == "done", job
+            assert job["done"] == job["total"] == big.stat().st_size
 
-    # the refusal came from the declared size: no partial was ever staged
-    staged = Path(server.hub.transfers.root)
-    assert not staged.is_dir() or not any(staged.iterdir())
+    # both sends staged the whole file on the hub, byte for byte (that the
+    # receiver then accepts and drops it is test_room's delivered-transfer case)
+    staged = sorted(Path(server.hub.transfers.root).glob("*__big.bin"))
+    assert [p.stat().st_size for p in staged] == [big.stat().st_size] * 2

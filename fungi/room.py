@@ -909,7 +909,7 @@ class RoomServer(RoomBase):
         port: int = 0,
     ):
         super().__init__(host, cfg, sink, llm=llm, rules_path=rules_path, display=display)
-        self.hub = Hub(host, token, data_root, max_file_mb=cfg.max_file_mb, port=port)
+        self.hub = Hub(host, token, data_root, port=port)
         self._monitor: threading.Thread | None = None
         # Friend-view transcripts live next to the hub's own sessions.
         self._comm_store = SessionStore(data_root / "comm-sessions")

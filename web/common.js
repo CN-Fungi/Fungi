@@ -11,7 +11,7 @@
   /* Build marker: bump per web/ change so any WebUI instance can self-identify
      (console + window.__FUNGI_WEB_VER) — stale cache vs new server is otherwise
      indistinguishable from the outside. */
-  window.__FUNGI_WEB_VER = 'web-transfer-progress';
+  window.__FUNGI_WEB_VER = 'web-raw-upload';
   try { console.info('[fungi-web]', window.__FUNGI_WEB_VER); } catch (e) {}
   /* ---------- http ---------- */
   /* One fetch wrapper. Mobile inits a token prefix + 403 hook; desktop inits
@@ -192,11 +192,15 @@
     document.getElementById('xfer-close')?.addEventListener('click', close);
 
     /* hop 1 (phone): push the picked file to this host's inbox over XHR, whose
-       upload events are the only place those bytes are countable. */
+       upload events are the only place those bytes are countable. Raw bytes
+       with the name in a header: the host streams it to disk, so a phone video
+       of any size lands (no size cap — see spec §48), and a percent-encoded
+       name survives the ascii-only header line. */
     function upload(file, onProgress) {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', url('/upload'));
+        xhr.setRequestHeader('X-Fungi-Filename', encodeURIComponent(file.name));
         if (xhr.upload) {
           xhr.upload.onprogress = e => {
             if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total);
@@ -214,9 +218,7 @@
           else reject(new Error(d.error || ('upload failed: HTTP ' + xhr.status)));
         };
         xhr.onerror = () => reject(new Error('upload failed'));
-        const fd = new FormData();
-        fd.append('file', file, file.name);
-        xhr.send(fd);
+        xhr.send(file);
       });
     }
 

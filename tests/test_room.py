@@ -14,7 +14,7 @@ from fungi.hub.app import Hub
 from fungi.protocol import Envelope
 from fungi.room import RoomClient, RoomRuntime, RoomServer, merge_comm_history
 
-CFG = Config(api_key="k", endpoint="e", model="m")  # assembly reads max_file_mb/inbox_dir
+CFG = Config(api_key="k", endpoint="e", model="m")  # assembly reads inbox_dir
 LLM = object()
 
 
@@ -772,6 +772,67 @@ def test_delegate_roundtrip_between_server_and_client(tmp_path):
             thread.join(timeout=25)
             assert not thread.is_alive(), "delegate never returned"
             assert out and "pong" in out[0], out
+        finally:
+            client.stop()
+    finally:
+        server.stop()
+
+
+def test_a_delivered_transfer_lands_whole_and_drops_the_staged_copy(tmp_path):
+    """The user's own flow, both roles: send a file to a peer that has the slider
+    on allow -> it lands whole in inbox/<sender>/ -> the hub's staged copy is
+    dropped. The discard used to be refused (token sent in the body, read from
+    the query), so every delivery left a full copy on the hub's disk."""
+    import hashlib
+
+    inbox = tmp_path / "inbox"
+    cfg = Config(api_key="k", endpoint="e", model="m", inbox_dir=str(inbox))
+    server = RoomServer(
+        "alpha",
+        cfg,
+        NullSink(),
+        "tok",
+        tmp_path / "d1",
+        llm=_pong_llm,
+        rules_path=tmp_path / "r1.json",
+    )
+    server.start()
+    try:
+        client = RoomClient(
+            "beta",
+            cfg,
+            NullSink(),
+            f"http://127.0.0.1:{server.hub.port}",
+            "tok",
+            llm=_pong_llm,
+            sessions_dir=tmp_path / "cs",
+            rules_path=tmp_path / "r2.json",
+        )
+        client.start()
+        try:
+            assert _wait(
+                lambda: "beta" in server._clones and "alpha" in client._clones, timeout_s=15
+            ), "comm clones never appeared"
+            # the friend-view slider on the RECEIVING side, one per direction
+            client.rules.set_mode("alpha", "allow")
+            server.rules.set_mode("beta", "allow")
+
+            src = tmp_path / "payload.bin"
+            src.write_bytes(bytes(range(256)) * 8192)  # 2 MiB, not compressible
+            want = hashlib.sha256(src.read_bytes()).hexdigest()
+
+            for sender, peer in ((server, "beta"), (client, "alpha")):
+                out = sender.comm_send_human(peer, file_path=str(src))
+                assert out.get("ok") is True, out
+                landed = inbox / sender.host / "payload.bin"
+                assert _wait(
+                    lambda p=landed: p.is_file() and p.stat().st_size == src.stat().st_size,
+                    timeout_s=30,
+                ), f"never landed for {sender.host}"
+                assert hashlib.sha256(landed.read_bytes()).hexdigest() == want
+                assert _wait(
+                    lambda: not list(server.hub.transfers.root.glob("*__payload.bin")), timeout_s=10
+                ), "the hub still holds a staged copy after delivery"
         finally:
             client.stop()
     finally:

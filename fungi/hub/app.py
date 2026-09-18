@@ -84,35 +84,18 @@ def safe_name(name: str) -> str:
     return Path(str(name or "file").replace("\\", "/")).name or "file"
 
 
-def _mb(n: int) -> str:
-    return f"{n / (1024 * 1024):.4g}"
-
-
-def too_large_message(size: int, limit: int) -> str:
-    """The one sentence every over-cap refusal carries.
-
-    The send-file modal prints it verbatim, so it names both numbers — "file
-    too large" alone left the user guessing which side to turn down.
-    """
-    return f"file too large: {_mb(size)} MB (limit {_mb(limit)} MB)"
-
-
 class Transfers:
-    """In-memory registry of staged file transfers (metadata only on the wire)."""
+    """In-memory registry of staged file transfers (metadata only on the wire).
 
-    def __init__(self, root: Path, max_file_mb: int = 200):
+    No size cap (spec §48): a staged file is streamed to disk in 256 KiB
+    chunks, so the only limit is free space — and it fails as an OSError the
+    callers report, never as a dropped connection.
+    """
+
+    def __init__(self, root: Path):
         self.root = Path(root)
-        self.max_bytes = max(1, max_file_mb) * 1024 * 1024
         self._records: dict[str, dict] = {}
         self._guard = threading.Lock()
-
-    def refusal(self, size: int) -> str:
-        """Why this file cannot be staged, or "" when it fits. Callers refuse
-        BEFORE reading a byte: staging an over-cap file first wrote the cap's
-        worth of bytes into the transfers dir and deleted them again."""
-        if size <= self.max_bytes:
-            return ""
-        return too_large_message(size, self.max_bytes)
 
     def stage_from(self, name: str, src_host: str, dst_host: str, read) -> dict:
         """Stage streamed bytes (read(n) -> b"" ends input) into the transfers dir."""
@@ -128,11 +111,6 @@ class Transfers:
                     if not chunk:
                         break
                     size += len(chunk)
-                    if size > self.max_bytes:
-                        # Only reachable when the stream outgrows the cap it
-                        # declared (a file growing under us): a declared size
-                        # is refused by refusal() before any read.
-                        raise ValueError(too_large_message(size, self.max_bytes))
                     out.write(chunk)
         except BaseException:
             dest.unlink(missing_ok=True)
@@ -144,9 +122,6 @@ class Transfers:
 
     def stage(self, source: Path, name: str, src_host: str, dst_host: str) -> dict:
         """Copy a store file into the transfers dir; returns its record."""
-        why = self.refusal(source.stat().st_size)
-        if why:
-            raise ValueError(why)
         with source.open("rb") as fh:
             return self.stage_from(name, src_host, dst_host, fh.read)
 
@@ -189,7 +164,6 @@ class Hub:
         token: str,
         data_root: Path,
         heartbeat_timeout: float = 30.0,
-        max_file_mb: int = 200,
         port: int = 0,
     ):
         self.name = name
@@ -202,7 +176,7 @@ class Hub:
         self.store = Store(data_root, self.asks)
         self.commlog = CommLog(data_root / "comm")
         self.mail = Mailbox(data_root / "mail")
-        self.transfers = Transfers(data_root / "transfers", max_file_mb)
+        self.transfers = Transfers(data_root / "transfers")
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._reaper: threading.Thread | None = None
@@ -310,7 +284,7 @@ class Hub:
             return {"error": f"not a file: {path}"}
         try:
             rec = self.transfers.stage(target, name or target.name, host, to_host)
-        except (OSError, ValueError) as exc:
+        except OSError as exc:
             return {"error": str(exc)}
         return {"ok": True, **rec}
 
@@ -319,9 +293,8 @@ class Hub:
 
         Unlike create_transfer (store-side copy), the bytes come straight off
         the sender's machine — this is how the user-facing clone sends a real
-        local file. Raises ValueError when the stream outgrows the size cap:
-        callers that know the size up front refuse with Transfers.refusal()
-        BEFORE a byte is read (see _transfer_upload and LocalTransport).
+        local file. An unwritable staging disk raises OSError; callers report
+        it (nobody refuses on size any more, spec §48).
         """
         if not self.roster.known(host) or not self.roster.known(to_host):
             return {"error": "unknown host"}
@@ -442,13 +415,19 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         url = urlparse(self.path)
-        params = parse_qs(url.query)
-        token = (params.get("token") or [""])[0]
-        if token != self.hub.token:
+        try:
+            body = self._body()
+        except (ValueError, json.JSONDecodeError) as exc:
+            self._reply({"error": str(exc)}, 400)
+            return
+        # The token rides in the body, like every other non-GET route: reading it
+        # from the query here rejected the client's own discard with 403 (its
+        # body-carried token was never looked at), so a delivered transfer kept
+        # its staged copy on the hub until restart — a whole file per delivery.
+        if body.get("token") != self.hub.token:
             self._bad_token()
             return
         if url.path == "/api/transfer":
-            body = self._body()
             ok = self.hub.transfers.discard_for(
                 str(body.get("id") or ""), str(body.get("host") or "")
             )
@@ -606,15 +585,6 @@ class _Handler(BaseHTTPRequestHandler):
         if remaining <= 0:
             self._reply({"error": "empty upload"}, 400)
             return
-        why = self.hub.transfers.refusal(remaining)
-        if why:
-            # Answer from the declared size, before a byte of it is stored (the
-            # old path wrote the cap's worth, then deleted it) — and answer
-            # FIRST: the sender reads this 413 within one RTT and stops, so the
-            # drain below usually sees nothing but EOF.
-            self._reply({"error": why}, 413)
-            self._drain(remaining)
-            return
 
         def read(n: int) -> bytes:
             nonlocal remaining
@@ -626,8 +596,13 @@ class _Handler(BaseHTTPRequestHandler):
 
         try:
             out = self.hub.upload_transfer(host, to_host, name, read)
-        except ValueError as exc:
-            self._reply({"error": str(exc)}, 413)
+        except OSError as exc:
+            # No room / no permission on the staging disk. Say so and drain:
+            # the sender is mid-body and can only read this reply if we eat the
+            # rest (a close here aborts its socket, which the page shows as
+            # "Failed to fetch"; see spec §47).
+            self._reply({"error": f"staging failed: {exc}"}, 507)
+            self._drain(remaining)
             return
         if out.get("ok") and remaining != 0:
             self.hub.transfers.discard(str(out.get("id")))
@@ -636,7 +611,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._reply(out, 400 if "error" in out else 200)
 
     def _drain(self, length: int) -> None:
-        """Eat a body we are refusing, so the writer gets our status."""
+        """Eat a body we have already answered, so the writer gets that answer."""
         left = length
         try:
             while left > 0:

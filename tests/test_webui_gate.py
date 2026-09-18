@@ -104,8 +104,8 @@ class _BoomRuntime(_TouchRuntime):
 def test_a_route_that_raises_still_answers():
     """A dropped connection reads as a network failure in the browser — and
     Chromium silently re-sends the POST, which restarted the send-file modal's
-    bar from zero (a send over max_file_mb did exactly that). So an exception
-    becomes a 500 the page can print.
+    bar from zero (a route that raised before replying did exactly that, spec
+    §47). So an exception becomes a 500 the page can print.
     """
     server = make_webui_server(0, _BoomRuntime())
     threading.Thread(target=server.serve_forever, daemon=True).start()

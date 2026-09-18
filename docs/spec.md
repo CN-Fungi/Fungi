@@ -128,7 +128,7 @@ ask 是普通消息，不需要独立协调设施：
   点击进入只读会话视图（`GET /comm-log?host=` 渲染双方通讯 Agent 对话流），无输入框
   （核心洞见 2 不破）。
 - **文件传输（C2，落对端本地盘）**：字节面 store-and-forward——`POST /api/transfer`
-  服务端从 store 复制暂存（上限 `max_file_mb`，config.json，默认 200），envelope 只传元数据；
+  服务端从 store 复制暂存（上限 `max_file_mb`，config.json，默认 200——**2026-09-18 上限取消，见 §48**），envelope 只传元数据；
   控制面复用 consent——接收方 通讯 Agent 向属主本机 Agent 发 ask（同意模式由滑块控制，见下），
   同意后经 `GET /api/transfer` 下载落盘 `<inbox_dir>/<来源host>/<文件名>`（config.json
   `inbox_dir`，默认 `<repo>/inbox`，重名加序号，basename 消毒）。落盘路径经 result envelope
@@ -1900,9 +1900,58 @@ fetch 的情况。」三个现象：**从 0 重来**、**反复多次**、**最�
 - 真机数字：5 MiB / 2 MiB 上限 → `file too large: 5 MB (limit 2 MB)`，服务端**到达 1 次**（不再重发，条子不再归零），
   未处理异常 0；客户端角色 8 MiB → 同样一句、1 次到达；16 MiB / 2 MiB 上限 → **sent=0 B**、0.01s、`transfers/` 连目录都不建。
 - 上限内的传输不受影响：1 MiB 文件仍然 100% + `已发出，等待对方接收`，commlog 有 `[file]` 那行。
+- 改这份 `.md` 照旧**字节级替换**：先把文件归一成 LF 再转回 CRLF，别在已经带 CRLF 的文本上再替换一次换行——混进 3 行 `CR+CR+LF` 就够让 `git diff` 把**整个文件**记成改动（实测 1956 增 / 1908 删，看着像全重写，其实只差那 3 行）。
 - 门禁：`ruff check --fix fungi tests` / `ruff format --check fungi tests` / `ruff check fungi tests` 全干净；`PYTHONIOENCODING=utf-8 python -m pytest -q` → **633 passed**（3:05，比 §46.8 的 631 多两条新用例）。
 - 改动面：`fungi/hub/app.py`、`fungi/hub/client.py`、`fungi/clone/base.py`、`fungi/server.py` + 两个测试文件；`docs/spec.md` 只追加本节（CRLF 保持，`git diff --stat` 是 56 行新增，没有整树漂移）。
 
-**边界（如实记）**：`max_file_mb`（默认 200）是**故意的**上限，这次改的是「被拒时要说话」——文件仍然发不出去，
-要发更大的文件得在 `config.json` 里把 `max_file_mb` 调大（发送方与 hub 两侧都用这个值）。上限之内的大文件该怎么慢还怎么慢
-（发送是同步的、`/comm-send` 要等到字节全部进 hub 才回），这次没动它。
+**边界（如实记）**：上限本身在 2026-09-18 被用户裁决取消（§48）；这一节留下的两件事仍然成立、也仍然必要：
+「每个请求都要有回答」（`_answer`）与「客户端会听早到的回复」（`_answered`）——现在它们守的是**另一种**提前拒绝
+（暂存盘写不进去，hub 答 507）。大文件该怎么慢还怎么慢（发送是同步的、`/comm-send` 要等到字节全部进 hub 才回），这次没动它。
+
+## 48. 用户裁决（2026-09-18）：文件传输**不设上限**
+
+**用户原话**：「我认为不应该设置上限。」——那条 `max_file_mb`（默认 200 MB）取消，不是调大。
+
+**为什么原来会有上限**：不是产品判断，是实现的形状——手机那条 `/upload` 把**整个 body 读进内存**
+（`self.rfile.read(length)`）再拆 multipart，一个 3 GB 的视频就是 3 GB（还要再复制一份）在 16 GB 的机器上；上限是那道
+保护。所以**取消上限必须先换掉这条实现**，否则「没有上限」只是把失败从「413」挪到「MemoryError」。
+
+**换掉了什么**（一条都不留）：
+
+- `web/common.js::upload`：`xhr.send(file)` —— **裸字节**，文件名走 `X-Fungi-Filename`（percent-encoded）。
+  `/upload` 服务端按 64 KiB 流式写进 inbox，**不再拆 multipart**（`_extract_upload` 整块删掉）。
+  顺带修好一件旧账：multipart 的 filename 走 latin-1，中文名会被搅坏；header 里 percent-encode 之后就没事了。
+- `config.max_file_mb` 字段删除；`config.json` 里还留着这个键时**只在日志/控制台说一次**「已废止」，不静默吞掉
+  （有人把它设小是为了护盘，不能让他以为还生效）。
+- `hub/app.py::Transfers` 无 cap：`stage_from` 仍按 256 KiB 分块写盘，唯一的界限是磁盘空间；写不进去是
+  `OSError`，HTTP 层答 **507 + `staging failed: …` 并排空 body**（发送方正在发 body，只有排空它才读得到这句）。
+- `LocalTransport` / `HubClient` 仍然一句 `{"error": …}` 就返回，绝不把异常掀出请求线程（§47 的老账）。
+- `_answered()` 的 peek 与 `_answer` 兜底**留着**：它们现在守的是上面那种提前拒绝（磁盘满），不再是尺寸上限。
+
+**顺手抓到并修掉一个和上限无关的旧 bug**（量出来的，不是看出来的）：接收方下载完要 `DELETE /api/transfer` 丢掉 hub 上的
+暂存副本，但**客户端把 token 放在 JSON body 里，而 hub 的这个路由从 query 里读 token**——于是**每一次** discard 都被
+403 掉，两个调用点又都用 `contextlib.suppress(Exception)` 包着，静默无声。后果：**每成功送出一份文件，hub 盘上都留着
+一整份**（300 MB 就 300 MB，重启才清）。修法是把 `do_DELETE` 改成和 `do_POST` 一样从 body 读 token（客户端是唯一调用者）。
+
+**验收（真机数字，两角色各一次 + 手机那条）**：
+
+| 场景 | 结果 |
+|---|---|
+| 宿主角色发 **300 MiB** | 入 hub 0.3s · 送达 2.0s · **sha256 一致** · 送完 hub 暂存 **0** |
+| 客户端角色发 **300 MiB**（走 HTTP 到 hub） | 入 hub 1.2s · 送达 1.7s · **sha256 一致** · 暂存 **0** |
+| 手机上传 **300 MiB**（裸字节，客户端从盘上分块发） | 0.9s 落盘 · **Python 堆峰值 0.3 MiB** · sha256 一致 |
+
+- 新用例：`tests/test_room.py::test_a_delivered_transfer_lands_whole_and_drops_the_staged_copy`（两个方向都真发一次，
+  哈希一致 + 暂存清空）、`tests/test_hub_app.py::test_transfer_discard_actually_drops_the_staged_copy`（路由契约：只有
+  收件人 + 带 token 才能丢）、`tests/test_webui_upload.py::test_a_big_upload_is_streamed_not_buffered`
+  （24 MiB body，Python 堆峰值必须 < 1/4；把缓冲改回去实测 **25,217,863 B** 复现红）、
+  `tests/test_webui_transfer.py::test_a_big_file_goes_through_from_either_role`（4 MiB 两角色都 100% 且整份落 hub）。
+- 门禁：`ruff check --fix fungi tests` / `ruff format --check fungi tests` / `ruff check fungi tests` 干净；
+  `PYTHONIOENCODING=utf-8 python -m pytest -q` → **634 passed**（2:54，§47 那次是 633）。
+- `web/common.js` 的 build marker 跟着改成 `web-raw-upload`（页面自报版本，线上遇到的旧页面一眼能认）；
+  旧页面往新 `/upload` 发 multipart 时服务端答的是「reload the page」，不是一句 header 名。
+
+**边界（如实记，这是「无上限」的代价）**：字节是**先落 hub 暂存、后问收件人**的，所以房间成员能写到**房主**的盘上，
+唯一的门是房间 token（§8 的 LAN/熟人假设）。以前 200 MB 那道墙顺手拦住了这件事，现在没有墙了：真正兜底的是磁盘空间，
+失败会说出来（507 / `cannot transfer …: [Errno 28]`），不会再变成一句 `Failed to fetch`。接收方落盘
+`inbox/<来源host>/` 同样不设限。
