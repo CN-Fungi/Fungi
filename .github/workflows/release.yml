@@ -63,20 +63,26 @@ jobs:
           Copy-Item README.md dist/Fungi/
           New-Item -ItemType Directory -Force dist/Fungi/docs | Out-Null
           Copy-Item "docs/测试人员必看！.docx" dist/Fungi/docs/
+          Copy-Item -Recurse docs/readme dist/Fungi/docs/
           Compress-Archive -Path dist/Fungi -DestinationPath "fungi-$($env:GITHUB_REF_NAME)-windows-x64.zip"
 
       # A file can drop out of the bundle without failing the build (--icon
-      # did, 0066456), so assert both documents are in the zip we publish.
-      - name: Check the bundle carries both documents
+      # did, 0066456), so assert the documents and the README's figures are in
+      # the zip we publish.
+      - name: Check the bundle carries both documents and the README figures
         shell: python
         run: |
           import os, zipfile
           archive = zipfile.ZipFile("fungi-%s-windows-x64.zip" % os.environ["GITHUB_REF_NAME"])
           names = archive.namelist()
           assert "Fungi/README.md" in names, names
-          guide = [n for n in names if n.startswith("Fungi/docs/")]
-          assert len(guide) == 1 and guide[0].endswith(".docx"), names
-          print("bundled:", ascii(guide[0]), archive.getinfo(guide[0]).file_size, "bytes")
+          files = [n for n in names if n.startswith("Fungi/docs/") and not n.endswith("/")]
+          guide = [n for n in files if n.endswith(".docx")]
+          figures = [n for n in files if n.startswith("Fungi/docs/readme/")]
+          assert len(guide) == 1, names
+          assert len(figures) == 5, names
+          print("bundled:", ascii(guide[0]), archive.getinfo(guide[0]).file_size, "bytes,",
+                len(figures), "README figures")
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
