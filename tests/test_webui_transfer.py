@@ -462,6 +462,27 @@ def test_paths_in_the_transcript_are_taps(mobile_page):
     assert "。" in mobile_page.evaluate("() => document.body.textContent")
     assert "inside.zip" not in "".join(found), "an existing link was rewritten"
 
+    # A name with blanks: a page cannot stat a file, so a line that *is* the path
+    # is the only shape it may claim — cut at the first blank it is a link to
+    # nothing (§53). Two paths on one line are a sentence, not a path, either way.
+    cases = mobile_page.evaluate(
+        r"""() => {
+          const links = (text) => {
+            const box = document.createElement('div');
+            box.innerHTML = marked.parse(text);
+            document.body.appendChild(box);
+            FC.linkifyPaths(box, () => {});
+            return Array.from(box.querySelectorAll('a.file-link')).map(a => a.textContent);
+          };
+          return [links('C:\\tmp\\屏幕录制 2026-09-17 090847.mp4'),
+                  links('C:\\tmp\\a.zip 和 C:\\tmp\\b.zip 都给你')];
+        }"""
+    )
+    assert cases == [
+        ["C:\\tmp\\屏幕录制 2026-09-17 090847.mp4"],
+        ["C:\\tmp\\a.zip", "C:\\tmp\\b.zip"],
+    ], cases
+
 
 def test_the_phone_sees_a_file_the_computer_dropped(mobile_page, rooms, tmp_path, monkeypatch):
     """The transfer session (§53): the computer hands over a path, the phone

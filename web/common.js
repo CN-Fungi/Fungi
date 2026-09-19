@@ -1143,6 +1143,42 @@
      marked's output, and a regex over markup is how tags get broken (or a link
      ends up inside an href). */
   const PATH_RE = /[A-Za-z]:[\\/][^\s"'<>|*?\u3002\uff0c\uff09\uff1f\uff01\u3011\u3015\uff1b\uff1a]+/g;
+  const DRIVE_RE = /[A-Za-z]:[\\/]/g;
+  /* A line that *is* the path. Nothing on a page can stat a file, so this is
+     the only shape that survives a name with blanks of its own — `屏幕录制
+     2026-09-17 090847.mp4` cut at the first blank is a link to nothing (§53). */
+  const LINE_PATH_RE = /^[A-Za-z]:[\\/][^\r\n"'<>|*?\u3002\uff0c\uff09\uff1f\uff01\u3011\u3015\uff1b\uff1a]*$/;
+
+  const trimTail = path => path.replace(/[\\.,;:\uff09)]+$/, '');  // trailing punctuation is prose
+
+  /* Where the paths are in one text node: whole lines first — they are the ones
+     a blank does not end — then what the narrow pattern finds. A line naming
+     two files is a sentence, not a path, so it goes to the scan. */
+  function pathSpans(text) {
+    const spans = [];
+    let at = 0;
+    for (const line of text.split('\n')) {
+      const from = at;
+      at += line.length + 1;
+      const body = line.trim();
+      if (!body) continue;
+      if ((body.match(DRIVE_RE) || []).length === 1 && LINE_PATH_RE.test(body)) {
+        const whole = trimTail(body);
+        if (whole) {
+          spans.push({ start: from + line.length - line.trimStart().length, text: whole });
+          continue;
+        }
+      }
+      PATH_RE.lastIndex = 0;
+      let m;
+      while ((m = PATH_RE.exec(line)) !== null) {
+        const path = trimTail(m[0]);
+        if (path) spans.push({ start: from + m.index, text: path });
+        PATH_RE.lastIndex = m.index + m[0].length;
+      }
+    }
+    return spans;
+  }
 
   function linkifyPaths(root, onPick) {
     if (!root || !onPick) return;
@@ -1153,23 +1189,21 @@
       const parent = node.parentNode;
       if (!parent || (parent.closest && parent.closest('a, .file-card'))) continue;
       const text = node.nodeValue || '';
+      const spans = pathSpans(text);
+      if (!spans.length) continue;  // nothing matched: the node stays untouched
       const frag = document.createDocumentFragment();
       let at = 0;
-      let m;
-      PATH_RE.lastIndex = 0;
-      while ((m = PATH_RE.exec(text)) !== null) {
-        const path = m[0].replace(/[\\.,;:\uff09)]+$/, '');  // trailing punctuation is prose
-        if (m.index > at) frag.appendChild(document.createTextNode(text.slice(at, m.index)));
+      for (const span of spans) {
+        if (span.start < at) continue;
+        if (span.start > at) frag.appendChild(document.createTextNode(text.slice(at, span.start)));
         const a = document.createElement('a');
         a.className = 'file-link';
         a.href = '#';
-        a.textContent = path;
-        a.addEventListener('click', e => { e.preventDefault(); onPick(path); });
+        a.textContent = span.text;
+        a.addEventListener('click', e => { e.preventDefault(); onPick(span.text); });
         frag.appendChild(a);
-        at = m.index + path.length;
-        PATH_RE.lastIndex = at;
+        at = span.start + span.text.length;
       }
-      if (!at) continue;  // nothing matched: the node stays untouched
       if (at < text.length) frag.appendChild(document.createTextNode(text.slice(at)));
       parent.replaceChild(frag, node);
     }

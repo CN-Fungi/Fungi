@@ -2501,3 +2501,64 @@ fetch 的情况。」三个现象：**从 0 重来**、**反复多次**、**最�
   `PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **697 passed**（§56 那次是 696）＋
   本轮全量跑挂过一次 `tests/test_llm.py::test_stream_chat_abort_mid_stream_carries_partial`
   的 `WinError 10053`（本机已知的 socket flake：单跑 2/2 绿，且这一版没碰 `fungi/llm.py`）。
+
+## 58. 名字里有空格就不是文件了（2026-09-19 用户现场反馈）：「我的卡片呢？怎么是信息？」
+
+**用户的原话**：「？我的卡片呢？电脑转手机的卡片呢？怎么是信息？」—— 他发的是一行路径，页面上却是一条**普通消息**，不是卡片。
+
+取证（他那一行就在 `data/sessions/file-transfer.json` 里，`file` 字段是 `None`）：
+
+```
+他发的那一行：C:/Users/37549/Pictures/Screenshots/屏幕录制 2026-09-17 090847.mp4
+这个文件真实存在（6,376,178 B）
+file_in() → None      ← 没有 file 字段，页面就照字段画成一条消息（§56）
+```
+
+### 58.1 病根：`\s` 既可能是路径的边界，也可能是名字的一部分
+
+`FILE_PATH_RE` 的字符类是 `[^\s…]+` —— **到第一个空格就断**。于是从 `…/屏幕录制 2026-09-17 090847.mp4`
+里切出来的是 `…/屏幕录制`，那个东西不是文件 → `file_in()` 返回 `None` → 普通消息。
+而本仓库的用例**清一色是无空格的名字**（`handover.bin`、`gift.bin`、`C:\tmp\a.zip`），所以全绿：
+这是**测试数据不真实**造成的系统性盲区，不是手滑。
+
+同一个正则的第二份拷贝在 `web/common.js`（手机端的可点路径）：含空格的路径会被链成**半截**，点下去 404。
+而**他手机上的录屏/截图文件名恰好全都带空格**（「屏幕录制 2026-09-17 090847.mp4」）——
+这条腿上最常走的名字，正是最坏的那一种。
+
+### 58.2 修法：谁说的都不算，`is_file()` 算
+
+空格是合法文件名字符，所以**没有任何正则能说出一条路径在哪里结束**——只有磁盘知道。于是按「最字面优先」
+依次试候选（`server.py::_path_candidates`）：
+
+1. **整行就是那条路径**（§53 这条腿的正常形状：一行 = 一个地址）；只认盘符开头的绝对路径，
+   免得把一句 `README.md` 当成相对路径去 stat（那才是真的会认错）。
+2. 句子里扫出来的窄 run —— 原来的行为，原样保留。
+3. 允许空格的宽 run，**一次还一个词**（`rsplit(" ", 1)`）：`给你 <path> 收` 就是在「还到 `…090847.mp4`」时命中的。
+
+每一步的判据只有一个：`Path(candidate).is_file()`。命中即卡片；都不命中仍是普通消息 ——
+**打错字不是传输**（§53 定的语义，没动）。
+
+手机侧没有文件系统可问，所以它**只敢认一种形状**：这一行**整行**就是路径（`common.js::LINE_PATH_RE`，
+允许空格，且这一行只有一个盘符起点 —— 一行里两个路径是句子，交给窄扫描）。半截链接比没有链接更坏：
+现在它要么给出完整路径，要么不给。
+
+### 58.3 验收
+
+- **修前先复现**（`git stash` 掉这版源码再跑，两条都红）：`test_a_file_name_with_blanks_is_still_a_card`
+  修前 `KeyError: 'file'`（正是他看到的「是信息不是卡片」）；`test_paths_in_the_transcript_are_taps`
+  修前把那条路径链成 `C:\tmp\屏幕录制`（半截链接）。
+- `tests/test_shuttle.py::test_a_file_name_with_blanks_is_still_a_card`：整行是带空格的路径 → 卡 ·
+  句子里带 → 卡 · 差一个字的错名 → 没有 `file` 字段。
+- `tests/test_webui_transfer.py::test_paths_in_the_transcript_are_taps`（真 Chromium）顺带断言：
+  带空格的整行链成**完整**路径；一行两个路径仍链成两条。
+- 他那一行原文的真机核对（本机跑，不进用例）：
+  `file_in('C:/Users/37549/Pictures/Screenshots/屏幕录制 2026-09-17 090847.mp4', 'computer')`
+  → `{'name': '屏幕录制 2026-09-17 090847.mp4', 'size': 6376178, …, 'direction': 'computer'}`。
+- 门禁：`python -m ruff check .` 干净 · `python -m ruff format --check fungi tests` 干净 ·
+  `PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **698 passed**（§57 那次是 697）。
+
+### 58.4 没做 / 待定
+
+- **已经存在的那一行不会自己变成卡片**：`file` 是写入那一刻算的，老行补不回来。
+  要么重新发一次（反正那一次也没真传过去），要么在读取时对没有 `file` 的行补判一次 ——
+  后者等于让卡片依赖「此刻文件还在不在」，与 §56「行是记录」的语义有出入，**留给用户定**。

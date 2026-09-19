@@ -15,6 +15,7 @@ import socket
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -191,10 +192,47 @@ def _shuttle_row(who: str, landed: dict) -> str:
     return f"{who}：{landed['name']}（{human_size(landed['size'])}）\n{landed['path']}"
 
 
+DRIVE_RE = re.compile(r"[A-Za-z]:[\\/]")
+# A path inside a sentence: a blank ends it — right for prose, wrong for a file
+# name that has blanks of its own (`屏幕录制 2026-09-17 090847.mp4`).
 FILE_PATH_RE = re.compile(
     r"[A-Za-z]:[\\/][^\s\"'<>|*?\u3002\uff0c\uff09\uff1f\uff01\u3011\u3015\uff1b\uff1a]+"
 )
+# The same run with blanks allowed: no pattern can say where such a name ends,
+# so the disk decides instead.
+SPACED_PATH_RE = re.compile(
+    r"[A-Za-z]:[\\/][^\r\n\"'<>|*?\u3002\uff0c\uff09\uff1f\uff01\u3011\u3015\uff1b\uff1a]+"
+)
 TRAILING_CHARS = "\\.,;:\uff09)]"
+
+
+def _path_candidates(text: str) -> Iterator[str]:
+    """What a message could be naming, most literal first.
+
+    A message that *is* a path is this session's normal shape (§53), so its own
+    lines are tried before any scan: that is the one rule a file name with
+    blanks survives. Only then come the runs found inside prose — the narrow
+    ones as they stand, the wide ones handed back one word at a time.
+    """
+    seen: set[str] = set()
+
+    def clean(candidate: str) -> str | None:
+        candidate = candidate.strip().rstrip(TRAILING_CHARS).strip()
+        if not candidate or candidate in seen:
+            return None
+        seen.add(candidate)
+        return candidate
+
+    for line in (text or "").splitlines():
+        candidate = clean(line)
+        if candidate is not None and DRIVE_RE.match(candidate):
+            yield candidate
+    for pattern in (FILE_PATH_RE, SPACED_PATH_RE):
+        for match in pattern.finditer(text or ""):
+            run = clean(match.group(0))
+            while run is not None:
+                yield run
+                run = clean(run.rsplit(" ", 1)[0]) if " " in run else None
 
 
 def file_in(text: str, direction: str) -> dict | None:
@@ -202,16 +240,17 @@ def file_in(text: str, direction: str) -> dict | None:
 
     The computer hands the phone a file by *sending its path* (§53) — but a row
     that names a file the machine can actually open is a transfer, and it should
-    look like one. Anything else stays a plain message: a path that is not
-    there is not a card, it is a typo.
+    look like one. `is_file()` is the only judge there is: blanks are legal in a
+    name, so no pattern can say where one ends. Anything else stays a plain
+    message — a path that is not there is not a card, it is a typo.
     """
-    for match in FILE_PATH_RE.finditer(text or ""):
-        candidate = Path(match.group(0).rstrip(TRAILING_CHARS))
-        if candidate.is_file():
+    for candidate in _path_candidates(text):
+        path = Path(candidate)
+        if path.is_file():
             return {
-                "name": candidate.name,
-                "size": candidate.stat().st_size,
-                "path": str(candidate),
+                "name": path.name,
+                "size": path.stat().st_size,
+                "path": str(path),
                 "direction": direction,
             }
     return None

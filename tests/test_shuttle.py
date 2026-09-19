@@ -145,6 +145,27 @@ def test_a_message_naming_a_real_file_becomes_a_card(shuttle_env, tmp_path):
     assert "file" not in _rows(base)[1]
 
 
+def test_a_file_name_with_blanks_is_still_a_card(shuttle_env, tmp_path):
+    """His own file: `屏幕录制 2026-09-17 090847.mp4`. A blank ends a path in
+    prose and belongs to a name on disk, so the pattern cannot decide it — the
+    disk does (§53). This went wrong exactly here: every case in this file used
+    a name without blanks, so a name *with* them arrived as a plain message."""
+    base, _inbox = shuttle_env
+    src = tmp_path / "屏幕录制 2026-09-17 090847.mp4"
+    src.write_bytes(b"x" * 4096)
+
+    _send(base, str(src))  # the row *is* the path, blanks and all
+    card = _rows(base)[0]["file"]
+    assert (card["name"], card["size"], card["direction"]) == (src.name, 4096, "computer")
+    assert card["path"] == str(src)
+
+    _send(base, f"给你 {src} 收")  # and inside a sentence, where the name ends at 收
+    assert _rows(base)[1]["file"]["path"] == str(src)
+
+    _send(base, str(tmp_path / "屏幕录制 2026-09-17 090848.mp4"))
+    assert "file" not in _rows(base)[2], "a name that is not there is a typo, not a card"
+
+
 def test_a_phone_upload_that_never_landed_writes_nothing(shuttle_env):
     """Half an upload is not a transfer: no row while the file is not whole."""
     base, _inbox = shuttle_env
