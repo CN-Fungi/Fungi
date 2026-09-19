@@ -7,7 +7,6 @@ traffic for the WebUI read-only conversation view.
 """
 
 import json
-import shutil
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -115,7 +114,14 @@ class Transfers:
         except BaseException:
             dest.unlink(missing_ok=True)
             raise
-        rec = {"id": tid, "name": safe_name(name), "size": size, "src": src_host, "dst": dst_host}
+        rec = {
+            "id": tid,
+            "name": safe_name(name),
+            "size": size,
+            "src": src_host,
+            "dst": dst_host,
+            "sent": 0,  # bytes handed to the receiver so far (Transfers.moved)
+        }
         with self._guard:
             self._records[tid] = rec
         return rec
@@ -153,6 +159,28 @@ class Transfers:
         if not path.is_file():
             return None
         return rec, path
+
+    def moved(self, transfer_id: str, sent: int) -> None:
+        """How many bytes the hub has handed to the receiver so far.
+
+        The download route streams, so this is the only place in the system
+        that knows the delivery is progressing (§49): the sender's page used to
+        stare at a step with nothing behind it while 1 GB crawled over WiFi.
+        """
+        with self._guard:
+            rec = self._records.get(str(transfer_id))
+        if rec is not None:
+            rec["sent"] = max(0, int(sent))
+
+    def progress_for(self, transfer_id: str, host: str) -> dict | None:
+        """Delivery progress, for the two hosts allowed to know: sender and
+        designated receiver. Any other caller gets nothing (the room token is
+        the outer door; this is the same door one step in)."""
+        with self._guard:
+            rec = self._records.get(str(transfer_id))
+        if rec is None or host not in (rec.get("src"), rec.get("dst")):
+            return None
+        return {"sent": int(rec.get("sent") or 0), "total": int(rec["size"])}
 
 
 class Hub:
@@ -410,6 +438,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._comm_log(params)
         elif url.path == "/api/transfer":
             self._transfer_download(params)
+        elif url.path == "/api/transfer/progress":
+            self._transfer_progress(params)
         else:
             self._reply({"error": "not found"}, 404)
 
@@ -622,6 +652,18 @@ class _Handler(BaseHTTPRequestHandler):
         except OSError:
             self.close_connection = True  # the sender gave up first (see above)
 
+    def _transfer_progress(self, params: dict) -> None:
+        """Delivery progress for the sender's page (§49): how many bytes the hub
+        has handed to the receiver so far, and the total it promised. Only the
+        two ends of this transfer may ask."""
+        host = (params.get("host") or [""])[0]
+        tid = (params.get("id") or [""])[0]
+        out = self.hub.transfers.progress_for(tid, host)
+        if out is None:
+            self._reply({"error": "not found"}, 404)
+            return
+        self._reply({"ok": True, **out})
+
     def _transfer_download(self, params: dict) -> None:
         host = (params.get("host") or [""])[0]
         tid = (params.get("id") or [""])[0]
@@ -643,6 +685,21 @@ class _Handler(BaseHTTPRequestHandler):
                     f"attachment; filename=\"{quoted}\"; filename*=UTF-8''{quoted}",
                 )
                 self.end_headers()
-                shutil.copyfileobj(fh, self.wfile)
+                # Counted, not just copied: this loop is the only place that
+                # knows how far the delivery has got (§49), and the sender's
+                # modal reads that count to show a live second step. Reported a
+                # megabyte at a time — a page polls it once a second.
+                sent = 0
+                reported = 0
+                while True:
+                    chunk = fh.read(64 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    sent += len(chunk)
+                    if sent - reported >= 1024 * 1024:
+                        reported = sent
+                        self.hub.transfers.moved(tid, sent)
+                self.hub.transfers.moved(tid, sent)
         except OSError:
             pass

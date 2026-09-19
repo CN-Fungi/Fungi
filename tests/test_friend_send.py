@@ -625,6 +625,7 @@ def test_comm_send_human_reports_the_hub_upload_into_the_job(tmp_path):
     assert job["state"] == "sent" and job["phase"] == "deliver"
     assert job["done"] == job["total"] == 10
     assert job["name"] == "big.bin"
+    assert job["tid"] == "t9"  # the page asks the hub with this (§49)
     # the id rides the envelope: that is how the receiver can echo it back
     assert transport.sent[0].body["job"] == "job-1"
 

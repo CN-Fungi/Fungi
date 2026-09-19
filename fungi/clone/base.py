@@ -145,12 +145,22 @@ class LocalTransport:
         # Atomic, like the HTTP path: this runs on the hub's own host, where the
         # staged file is a local copy — the same "no half file under the real
         # name" guarantee has to hold (§49).
-        with atomic_landing(dest, int(rec["size"])) as out, path.open("rb") as src:
+        with (
+            atomic_landing(dest, int(rec["size"]), tag=str(transfer_id)[:8]) as out,
+            path.open("rb") as src,
+        ):
             shutil.copyfileobj(src, out)
 
     def discard_transfer(self, transfer_id: str) -> None:
         if self.hub is not None:
             self.hub.transfers.discard(transfer_id)
+
+    def transfer_progress(self, transfer_id: str) -> dict:
+        """The hub moved these bytes itself: read the record, no HTTP (§49)."""
+        if self.hub is None:
+            return {"error": "no hub attached"}
+        out = self.hub.transfers.progress_for(str(transfer_id), self.host)
+        return {"ok": True, **out} if out is not None else {"error": "not found"}
 
 
 class RemoteTransport:
@@ -190,6 +200,9 @@ class RemoteTransport:
 
     def discard_transfer(self, transfer_id: str) -> None:
         self.client.discard_transfer(transfer_id)
+
+    def transfer_progress(self, transfer_id: str) -> dict:
+        return self.client.transfer_progress(transfer_id)
 
 
 class Clone:

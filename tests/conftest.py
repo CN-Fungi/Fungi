@@ -53,6 +53,13 @@ class Client:
             "/api/transfer", {"token": self.token, "id": transfer_id, "host": self.host}
         )[1]
 
+    def transfer_progress(self, transfer_id: str) -> tuple[int, dict]:
+        """Delivery progress as (status, payload): HubClient-compatible route,
+        and the status is what the authorization cases turn on (§49)."""
+        return self.get(
+            f"/api/transfer/progress?token={self.token}&host={self.host}&id={transfer_id}"
+        )
+
     def get(self, path: str) -> tuple[int, dict]:
         try:
             with urllib.request.urlopen(self.base + path, timeout=40) as resp:

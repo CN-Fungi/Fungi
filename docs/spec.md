@@ -2036,4 +2036,31 @@ fetch 的情况。」三个现象：**从 0 重来**、**反复多次**、**最�
 - `tests/test_webui_transfer.py`（真浏览器）：桌面两步、手机三步、**收件人点「同意」之后**才出现「对方已收到」并自动关闭 ·
   拒绝时留在屏幕上并写明原因 · 上传失败画在**出错的那一步**上 · 4 MiB 两角色都整份落到对方盘上（逐字节比对），
   送完 hub 暂存清空。
-- 门禁：`python -m ruff check .` 干净；`PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **650 passed**（3:00，§48 那次是 634）。
+- 门禁：`python -m ruff check .` 干净；`PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **652 passed**（3:12，§48 那次是 634）。
+
+
+### 49.6 用户真机现场（2026-09-19 晚）：「对方接受是何意味、为什么进度条卡死、对面为什么是 .part」
+
+三句话、三个答案：前两句是设计，第三句是我这边的缺陷。
+
+- **`.part` 是对的**：字节先落 `<名字>.<staged id 前 8 位>.part`，写完且长度对得上才改名成真名（49.3 第 1 条）。
+  **名字里带 staged id** 是这一晚补的：他连发了两次同一份文件，两次落地会去写同一个 `.part`，而 Windows 上
+  先完成的那次改名还会被另一个打开着的句柄挡掉（后落地的那份于是收到一句莫名的错误）。各写各的 part 之后，
+  并发、重试、崩溃残留互不干扰。
+- **「对方接收」那一步等的是收件端自己那台机器的人点同意**（落地前收件人必须点头，从 §10 起就是这样），
+  点了之后 hub 才开始把字节推过去。发送端**看不到**「等同意」与「正在收」的区别 —— 只能看到「还没落地」。
+- **卡死是真缺陷**：第二步当时背后什么都没有。实测他此刻的状态：`pc`（192.168.0.113）两条 ESTABLISHED、
+  宿主 NIC **6.8 MB/s**（两份在共享带宽，各约 3.4 MB/s）→ 1.29 GB 要 6 分钟以上，而界面一动不动。
+
+补的是第三条那条腿 —— **hub 自己记账，页面画它**：
+
+- `Transfers` 的记录多一个 `sent`（每 1 MiB 报一次，`Transfers.moved`）；下载路由从 `shutil.copyfileobj`
+  换成计数循环，字节的搬运方式没变，只是多记账。
+- 新路由 `GET /api/transfer/progress?id&host&token` → `{sent, total}`，**只有这单 transfer 的 src 与 dst 能问**
+  （第三个 host、未知 id 都是 404）。这不是协议变更：envelope 一个字段没动，房间 token 仍是那扇门。
+- 房间把 job 的 `tid` 与 hub 的计数合并进 `/transfer-progress`：第二步于是显示
+  `0 B / 1.29 GB · 0%`（对方还没点头）→ 真字节（正在收）→ 判决。没有计数时才回落到「等待对方接收…」。
+- 用例：`test_hub_app.py::test_transfer_progress_counts_what_the_hub_handed_over`（计数到齐 + 第三方 404）、
+  `test_room.py::test_the_senders_job_shows_what_the_hub_handed_the_peer`（点同意前 `delivered == 0`、
+  `delivery_total == 文件大小`，点完变 `done` 且落盘逐字节相同）、
+  `test_webui_transfer.py` 桌面与手机两条：**收件人点同意之前**，最后一步的 note 必须已经是字节形态。

@@ -262,10 +262,13 @@
           .then(j => {
             if (cancelled) return;
             if (j.state === 'sent') {
-              // every byte is in the room; what is left is the peer's own step
-              progress(upStep, 1, 1);
+              // every byte is in the room; what is left is the peer's own step,
+              // and the hub's count of what it has handed over is the only real
+              // progress for it — without it this step looked dead for minutes
+              // on a 1 GB file (§49)
               markDone(upStep);
-              note(upStep + 1, '对方正在接收…');
+              if (j.delivery_total) progress(upStep + 1, j.delivered || 0, j.delivery_total);
+              else note(upStep + 1, '等待对方接收…');
               setTimeout(pump, 1000);
               return;
             }

@@ -229,6 +229,13 @@ def test_desktop_send_waits_for_the_peers_verdict(page, rooms, tmp_path):
     page.evaluate("() => openFriendChat('beta')")
     page.evaluate(XFER_WATCH)
     page.evaluate("async (p) => { await sendFileToFriend(p); }", str(src))
+    # the second step is fed by the HUB's own count of what it has handed over
+    # (§49). While the peer has not taken the file that count is 0 of N — and
+    # the step must say so instead of sitting blank, which is exactly what the
+    # user read as a dead progress bar on 2026-09-19.
+    assert _wait(lambda: "/" in _log(page)[-1]["steps"][1]["note"], timeout_s=15), (
+        f"the waiting step never got its bytes: {_log(page)}"
+    )
     _answer_peer_card(client, "yes")
     assert _wait(
         lambda: not page.evaluate(
@@ -298,6 +305,9 @@ def test_mobile_send_shows_three_steps_and_lands_both_hops(
     mobile_page.set_input_files(
         "#friend-file-input",
         {"name": "photo.bin", "mimeType": "application/octet-stream", "buffer": b"x" * 4096},
+    )
+    assert _wait(lambda: "/" in _log(mobile_page)[-1]["steps"][2]["note"], timeout_s=15), (
+        f"the waiting step never got its bytes: {_log(mobile_page)}"
     )
     _answer_peer_card(client, "yes")
     assert _wait(

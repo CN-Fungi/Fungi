@@ -243,6 +243,34 @@ def test_transfer_upload_roundtrip_and_guard(room, tmp_path):
     assert "error" in out
 
 
+def test_transfer_progress_counts_what_the_hub_handed_over(room, tmp_path):
+    """§49: the hub is the one moving the last leg, so it is the only place that
+    knows a delivery is progressing — and only the two ends may ask it."""
+    _hub, clients = room
+    clients["alpha"].post("/api/join", {"name": "alpha", "token": "room-token"})
+    clients["beta"].post("/api/join", {"name": "beta", "token": "room-token"})
+    src = tmp_path / "report.bin"
+    src.write_bytes(b"x" * (3 * 1024 * 1024 + 7))  # past the 1 MiB report step
+    out = clients["alpha"].upload_transfer(str(src), "report.bin", "beta")
+
+    code, before = clients["alpha"].transfer_progress(out["id"])
+    assert (code, before["sent"], before["total"]) == (200, 0, src.stat().st_size)
+
+    dest = tmp_path / "landed.bin"
+    clients["beta"].download_transfer(out["id"], dest)
+    assert dest.read_bytes() == src.read_bytes()
+
+    code, after = clients["beta"].transfer_progress(out["id"])
+    assert code == 200
+    assert after["sent"] == after["total"] == src.stat().st_size
+
+    # a third host has no business watching someone else's transfer
+    code, body = clients["srv"].transfer_progress(out["id"])
+    assert code == 404 and "error" in body
+    # and an unknown id is just unknown
+    assert clients["beta"].transfer_progress("nope")[0] == 404
+
+
 def test_transfer_discard_actually_drops_the_staged_copy(room, tmp_path):
     """The receiver's discard must drop the bytes. The client sends its token in
     the JSON body (HubClient._request); the route read it from the query, so the

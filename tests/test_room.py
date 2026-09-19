@@ -3,6 +3,7 @@
 import json
 import time
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -833,6 +834,67 @@ def test_a_delivered_transfer_lands_whole_and_drops_the_staged_copy(tmp_path):
                 assert _wait(
                     lambda: not list(server.hub.transfers.root.glob("*__payload.bin")), timeout_s=10
                 ), "the hub still holds a staged copy after delivery"
+        finally:
+            client.stop()
+    finally:
+        server.stop()
+
+
+def test_the_senders_job_shows_what_the_hub_handed_the_peer(tmp_path):
+    """第二步的字节数（§49）：收件人点同意之前一个字节都不动，点了之后 hub 报它推了
+    多少 —— 用户 2026-09-19 现场问「进度条为什么卡死、对面为什么是 .part」：卡死的
+    那一步当时没有任何字节可看，而 .part 正是正在落地的文件。"""
+    inbox = tmp_path / "inbox"
+    cfg = Config(api_key="k", endpoint="e", model="m", inbox_dir=str(inbox))
+    server = RoomServer(
+        "alpha",
+        cfg,
+        NullSink(),
+        "tok",
+        tmp_path / "d1",
+        llm=_pong_llm,
+        rules_path=tmp_path / "r1.json",
+    )
+    server.start()
+    try:
+        client = RoomClient(
+            "beta",
+            cfg,
+            NullSink(),
+            f"http://127.0.0.1:{server.hub.port}",
+            "tok",
+            llm=_pong_llm,
+            sessions_dir=tmp_path / "cs",
+            rules_path=tmp_path / "r2.json",
+        )
+        client.start()
+        try:
+            assert _wait(
+                lambda: "beta" in server._clones and "alpha" in client._clones, timeout_s=15
+            ), "comm clones never appeared"
+
+            src = tmp_path / "notes.bin"
+            src.write_bytes(b"z" * 200_000)
+            out = server.comm_send_human("beta", file_path=str(src), job="job-progress")
+            assert out.get("ok") is True, out
+
+            # the card is still unanswered: everything is in the room, nothing
+            # has moved to the peer yet, and the page can say so
+            assert _wait(lambda: client.cards.pending()), "the peer never got a card"
+            job = server.webui_runtime().transfer_progress("job-progress")
+            assert job["state"] == "sent" and job["phase"] == "deliver"
+            assert job["delivery_total"] == src.stat().st_size
+            assert job["delivered"] == 0
+            assert job["tid"], "the page needs the staged id to ask the hub"
+
+            card = client.cards.pending()[0]
+            assert client.webui_runtime().route_answer(card["id"], "yes") is True
+            assert _wait(
+                lambda: server.webui_runtime().transfer_progress("job-progress")["state"] == "done",
+                timeout_s=30,
+            ), "the delivery never landed"
+            done = server.webui_runtime().transfer_progress("job-progress")
+            assert Path(done["saved"]).read_bytes() == src.read_bytes()
         finally:
             client.stop()
     finally:

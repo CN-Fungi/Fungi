@@ -784,7 +784,7 @@ class RoomBase:
             if refused:
                 self.xfer_jobs.fail(job or "", refused)
                 return {"error": refused}
-            self.xfer_jobs.sent(job or "")
+            self.xfer_jobs.sent(job or "", str(staged.get("id") or ""))
             return {"ok": True, "kind": "transfer", "name": name}
         text = (text or "").strip()
         if not text:
@@ -1379,8 +1379,29 @@ class RoomRuntime(WebUIRuntime):
         )
 
     def transfer_progress(self, job_id: str) -> dict:
-        """Send-file modal poll: the job the browser minted for its own send."""
-        return self.room.xfer_jobs.get(job_id)
+        """Send-file modal poll: the job the browser minted for its own send,
+        plus how far the hub has carried the bytes to the peer (§49).
+
+        The second step used to have nothing behind it: the sender could see
+        that the upload was through and then nothing until the verdict, which
+        on a 1 GB file over WiFi is minutes of a bar that looks dead. The hub
+        counts those bytes, so the page can draw them.
+        """
+        job = self.room.xfer_jobs.get(job_id)
+        tid = str(job.get("tid") or "")
+        if not tid or job.get("state") != "sent":
+            return job
+        transport = getattr(getattr(self.room, "_local", None), "transport", None)
+        if transport is None:
+            return job
+        try:
+            out = transport.transfer_progress(tid)
+        except Exception:  # a hub hiccup must not break the page's poll
+            return job
+        if out.get("ok"):
+            job["delivered"] = int(out.get("sent") or 0)
+            job["delivery_total"] = int(out.get("total") or 0)
+        return job
 
     def comm_note(self, data: dict) -> dict:
         """Feedback on a courier report, from the friend view's feedback box:

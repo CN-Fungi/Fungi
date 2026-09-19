@@ -48,6 +48,7 @@ class TransferJobs:
                 "phase": "upload",
                 "error": "",
                 "saved": "",
+                "tid": "",  # the hub's staged id, set by sent()
                 "ts": time.time(),
             }
 
@@ -57,11 +58,13 @@ class TransferJobs:
             if job is not None and job["state"] == "running":
                 job["done"] = max(0, int(done))
 
-    def sent(self, job_id: str) -> None:
+    def sent(self, job_id: str, transfer_id: str = "") -> None:
         """Every byte is in the hub's staging area; the delivery is not ours.
 
         The name is the honest one: the file has been *sent*, and whether it
-        lands is the receiving host's answer — `deliver` carries that.
+        lands is the receiving host's answer — `deliver` carries that. The
+        staged id rides along so the page can ask the hub how far the last leg
+        has got (§49).
         """
         with self._lock:
             job = self._jobs.get(str(job_id))
@@ -69,6 +72,7 @@ class TransferJobs:
                 job["state"] = "sent"
                 job["phase"] = "deliver"
                 job["done"] = job["total"]
+                job["tid"] = str(transfer_id or "")
                 job["ts"] = time.time()
 
     def deliver(self, job_id: str, ok: bool, error: str = "", saved: str = "") -> None:

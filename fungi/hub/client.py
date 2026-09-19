@@ -190,7 +190,7 @@ class HubClient:
         with urllib.request.urlopen(req, timeout=120) as resp:
             announced = (resp.headers.get("Content-Length") or "").strip()
             expect = int(announced) if announced.isdigit() else None
-            with atomic_landing(Path(dest), expect) as fh:
+            with atomic_landing(Path(dest), expect, tag=str(transfer_id)[:8]) as fh:
                 while True:
                     chunk = resp.read(64 * 1024)
                     if not chunk:
@@ -200,6 +200,14 @@ class HubClient:
     def discard_transfer(self, transfer_id: str) -> dict:
         """Receiver-side: drop the hub's staged copy after a delivery."""
         return self._request("DELETE", "/api/transfer", {"id": transfer_id, "host": self.host})
+
+    def transfer_progress(self, transfer_id: str) -> dict:
+        """How far the hub has carried a staged transfer to its receiver (§49).
+
+        The sender's page polls the ROOM for its own job; the room asks the hub
+        this, because the hub is the one moving the last leg.
+        """
+        return self._request("GET", f"/api/transfer/progress?host={self.host}&id={transfer_id}")
 
     def upload_transfer(self, path: str, name: str, to_host: str, progress=None) -> dict:
         """Stream a local file's raw bytes to the hub staging area.

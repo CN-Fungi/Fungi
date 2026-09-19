@@ -56,17 +56,22 @@ def inbox_root(configured: str = "") -> Path:
 
 
 @contextlib.contextmanager
-def atomic_landing(dest: Path, expect: int | None = None) -> Iterator:
-    """Stream into `dest.part`, then put it in place as `dest` — or leave nothing.
+def atomic_landing(dest: Path, expect: int | None = None, tag: str = "") -> Iterator:
+    """Stream into a part file beside `dest`, then put it in place — or leave nothing.
 
     `expect` is the byte count the sender announced (None: unknown, e.g. a hub
     that answered without Content-Length). A short delivery raises
     TransferTruncatedError instead of landing, and any failure — that one, a
     dropped connection, a full disk — deletes the part file, so the real name
     never names a file that is not exactly what the sender had.
+
+    `tag` (the staged transfer's id) goes into the part's name. Two deliveries
+    of the same file — the user sent it twice, or a retry overlapped the first —
+    then write their own part files instead of interleaving into one, and a
+    crashed part never shadows the next attempt.
     """
     dest = Path(dest)
-    part = dest.with_name(dest.name + PART_SUFFIX)
+    part = dest.with_name(f"{dest.name}.{tag}{PART_SUFFIX}" if tag else dest.name + PART_SUFFIX)
     with contextlib.suppress(OSError):  # an earlier crash must not block this one
         part.unlink()
     try:
