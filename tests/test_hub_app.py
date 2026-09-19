@@ -3,6 +3,7 @@
 import json
 import socket
 import threading
+import urllib.error
 import urllib.request
 
 from conftest import Client
@@ -341,3 +342,134 @@ def test_send_rejects_hosts_that_would_become_file_names(room):
         )
         assert out.get("status") == "bounced", (dst, code, out)
     assert not (mail_root.is_dir() and list(mail_root.iterdir()))
+
+
+# ── ranged downloads (§50): several windows of one delivery at once ──
+
+
+def _fetch(url: str, headers: dict | None = None) -> tuple:
+    """GET, returning `(status, headers, body)` for answers that are not 200."""
+    req = urllib.request.Request(url, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, resp.headers, resp.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.headers, exc.read()
+
+
+def _staged(room, clients, tmp_path, payload: bytes, name: str = "report.bin") -> tuple[str, str]:
+    """Upload `payload` alpha -> beta; returns the transfer id and its URL."""
+    clients["alpha"].post("/api/join", {"name": "alpha", "token": "room-token"})
+    clients["beta"].post("/api/join", {"name": "beta", "token": "room-token"})
+    src = tmp_path / name
+    src.write_bytes(payload)
+    out = clients["alpha"].upload_transfer(str(src), name, "beta")
+    assert out.get("ok") is True, out
+    base = f"http://127.0.0.1:{room[0].port}"
+    return out["id"], f"{base}/api/transfer?id={out['id']}&host=beta&token=room-token"
+
+
+def test_a_range_request_serves_exactly_that_window(room, tmp_path):
+    """A window is bytes, not a hint: 206, the window's own length, and the
+    bytes at that offset — a receiver that assembles them out of order still
+    ends up with the sender's file."""
+    payload = bytes(range(256)) * 16  # 4096 position-dependent bytes
+    _tid, url = _staged(room, room[1], tmp_path, payload)
+
+    status, headers, body = _fetch(url, {"Range": "bytes=100-199"})
+    assert status == 206
+    assert headers["Content-Range"] == f"bytes 100-199/{len(payload)}"
+    assert headers["Content-Length"] == "100"
+    assert headers["Accept-Ranges"] == "bytes"
+    assert body == payload[100:200]
+
+    # open-ended, and clamped to the last byte like the RFC says
+    status, headers, body = _fetch(url, {"Range": "bytes=4000-"})
+    assert (status, headers["Content-Range"], body) == (
+        206,
+        f"bytes 4000-4095/{len(payload)}",
+        payload[4000:],
+    )
+    status, headers, body = _fetch(url, {"Range": "bytes=4000-999999"})
+    assert (status, headers["Content-Range"], len(body)) == (
+        206,
+        f"bytes 4000-4095/{len(payload)}",
+        96,
+    )
+
+    # no range: the whole file, exactly as before §50 — and the hub says it
+    # could have answered one
+    status, headers, body = _fetch(url)
+    assert (status, headers["Content-Length"], headers["Accept-Ranges"]) == (200, "4096", "bytes")
+    assert body == payload
+
+
+def test_a_range_past_the_end_is_416_and_serves_nothing(room, tmp_path):
+    payload = bytes(range(256)) * 16
+    _tid, url = _staged(room, room[1], tmp_path, payload)
+
+    status, headers, body = _fetch(url, {"Range": "bytes=4096-"})
+    assert status == 416
+    assert headers["Content-Range"] == "bytes */4096"
+    assert b"bytes" not in body  # the file's bytes, not our JSON saying so
+
+    # ranges this server does not promise are ignored, never guessed at
+    for guess in ("bytes=-100", "bytes=0-9,20-29", "items=0-9", "bytes=9-1"):
+        status, headers, body = _fetch(url, {"Range": guess})
+        assert status == 200, guess
+        assert body == payload, guess
+
+
+def test_a_range_is_only_for_the_two_ends_of_the_transfer(room, tmp_path):
+    payload = b"private-bytes"
+    _tid, url = _staged(room, room[1], tmp_path, payload)
+
+    status, _headers, _body = _fetch(url.replace("host=beta", "host=srv"), {"Range": "bytes=0-3"})
+    assert status == 404
+
+
+def test_delivery_progress_is_the_union_of_the_windows_asked_for(room, tmp_path):
+    """§50: with several windows in flight a running total would double-count a
+    retried window and (being per-request) could walk backwards. The count the
+    sender's page reads is the union of the ranges that really arrived."""
+    payload = bytes(range(256)) * 16
+    tid, url = _staged(room, room[1], tmp_path, payload)
+    _hub, clients = room
+
+    def delivered() -> int:
+        code, out = clients["beta"].transfer_progress(tid)
+        assert code == 200
+        assert out["total"] == len(payload)
+        assert 0 <= out["sent"] <= out["total"], out
+        return out["sent"]
+
+    assert delivered() == 0
+    _fetch(url, {"Range": "bytes=0-1023"})
+    assert delivered() == 1024
+    _fetch(url, {"Range": "bytes=2048-4095"})  # out of order: windows finish when they finish
+    assert delivered() == 1024 + 2048
+    _fetch(url, {"Range": "bytes=0-2047"})  # a retry overlapping what already arrived
+    assert delivered() == len(payload)
+    # and the same window again is still the same file, not another 4096 bytes
+    _fetch(url, {"Range": "bytes=0-2047"})
+    assert delivered() == len(payload)
+
+
+def test_a_real_delivery_over_several_windows_lands_whole(room, tmp_path):
+    """The receiver's own code over real sockets (§50): one hub, four windows
+    in flight, and the sender's page reading the union of what arrived."""
+    from fungi.hub.client import HubClient
+
+    payload = bytes(range(256)) * (12 * 1024 * 1024 // 256)  # three windows
+    tid, _url = _staged(room, room[1], tmp_path, payload, name="big.bin")
+    land = tmp_path / "inbox"
+    land.mkdir()
+    dest = land / "big.bin"
+
+    receiver = HubClient(f"http://127.0.0.1:{room[0].port}", "room-token", "beta")
+    receiver.download_transfer(tid, dest)
+
+    assert dest.read_bytes() == payload
+    assert [p.name for p in land.iterdir()] == ["big.bin"], "a part file was left"
+    out = receiver.transfer_progress(tid)
+    assert out["sent"] == out["total"] == len(payload)

@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 from .. import runlog
+from ..landing import Spans
 from ..protocol import (
     BAD_NAME_MSG,
     Envelope,
@@ -37,6 +38,53 @@ MAX_POLL = 25.0
 # so a late click resolves nothing. Pinned by tests/test_ask.py.
 ASK_TIMEOUT = 1900.0
 REAP_INTERVAL = 5.0
+# Bytes per write on a download, and how often the delivery count is updated:
+# 1 MiB is a page poll's worth of resolution (§49), and a multiple of the sizes
+# a window is cut into (§50).
+DOWNLOAD_CHUNK = 256 * 1024
+PROGRESS_STEP = 1024 * 1024
+
+
+class RangeNotSatisfiableError(Exception):
+    """A Range that starts past the end of the file: answer 416, serve nothing."""
+
+
+def range_window(value: str, size: int) -> tuple[int, int] | None:
+    """The byte window a `Range` header asks for, as inclusive `(first, last)`.
+
+    None means "no range to honour, send the whole thing": no header, or a form
+    this server deliberately does not guess at — several ranges, a suffix range
+    (`bytes=-500`), another unit. RFC 9110 lets a server ignore a Range it does
+    not understand, and guessing is exactly how the wrong bytes get served.
+    Raises RangeNotSatisfiableError for `bytes=a-` past the end of the file.
+
+    Only one form is promised, because it is the whole of what the receiver
+    sends (§50): `bytes=a-b` and `bytes=a-`, clamped to the file like the RFC
+    says, so a window is never empty and never reaches past the last byte.
+    """
+    spec = (value or "").strip()
+    if not spec.lower().startswith("bytes="):
+        return None
+    wanted = spec[6:].strip()
+    if "," in wanted:
+        return None
+    first_raw, _, last_raw = wanted.partition("-")
+    first_raw = first_raw.strip()
+    if not first_raw.isdigit():
+        return None
+    first = int(first_raw)
+    last_raw = last_raw.strip()
+    if last_raw:
+        if not last_raw.isdigit():
+            return None
+        last = int(last_raw)
+        if last < first:
+            return None  # not a byte range at all: ignore the header (RFC 9110)
+    else:
+        last = size - 1
+    if size <= 0 or first >= size:
+        raise RangeNotSatisfiableError
+    return first, min(last, size - 1)
 
 
 def fs_via_hub(
@@ -94,6 +142,10 @@ class Transfers:
     def __init__(self, root: Path):
         self.root = Path(root)
         self._records: dict[str, dict] = {}
+        # Which bytes have reached the receiver, per transfer. Kept out of the
+        # record because that dict is handed to callers and serialized into
+        # replies, and a Spans is neither JSON nor anyone else's business.
+        self._spans: dict[str, Spans] = {}
         self._guard = threading.Lock()
 
     def stage_from(self, name: str, src_host: str, dst_host: str, read) -> dict:
@@ -120,10 +172,10 @@ class Transfers:
             "size": size,
             "src": src_host,
             "dst": dst_host,
-            "sent": 0,  # bytes handed to the receiver so far (Transfers.moved)
         }
         with self._guard:
             self._records[tid] = rec
+            self._spans[tid] = Spans()
         return rec
 
     def stage(self, source: Path, name: str, src_host: str, dst_host: str) -> dict:
@@ -135,6 +187,7 @@ class Transfers:
         """Drop a staged transfer (registry + bytes); for aborted uploads."""
         with self._guard:
             rec = self._records.pop(str(transfer_id), None)
+            self._spans.pop(str(transfer_id), None)
         if rec is not None:
             (self.root / f"{rec['id']}__{rec['name']}").unlink(missing_ok=True)
 
@@ -146,6 +199,7 @@ class Transfers:
             if rec is None or rec.get("dst") != host:
                 return False
             del self._records[str(transfer_id)]
+            self._spans.pop(str(transfer_id), None)
         (self.root / f"{rec['id']}__{rec['name']}").unlink(missing_ok=True)
         return True
 
@@ -160,17 +214,21 @@ class Transfers:
             return None
         return rec, path
 
-    def moved(self, transfer_id: str, sent: int) -> None:
-        """How many bytes the hub has handed to the receiver so far.
+    def deliver_window(self, transfer_id: str, start: int, end: int) -> None:
+        """Bytes `[start, end)` have been handed to the receiver.
 
-        The download route streams, so this is the only place in the system
-        that knows the delivery is progressing (§49): the sender's page used to
-        stare at a step with nothing behind it while 1 GB crawled over WiFi.
+        Ranges, not a running total (§50): a delivery split into windows reports
+        each one as it runs — out of order, twice when a window is retried from
+        where it stopped — and the count the sender's page reads must never walk
+        backwards. A union also puts a whole-file delivery (one window, `[0,
+        size)`) and a ranged one on the same scale, so `sent` means the same
+        thing either way. The lock is `Spans`' own: windows report from their
+        own request threads.
         """
         with self._guard:
-            rec = self._records.get(str(transfer_id))
-        if rec is not None:
-            rec["sent"] = max(0, int(sent))
+            spans = self._spans.get(str(transfer_id))
+        if spans is not None:
+            spans.add(start, end)
 
     def progress_for(self, transfer_id: str, host: str) -> dict | None:
         """Delivery progress, for the two hosts allowed to know: sender and
@@ -178,9 +236,14 @@ class Transfers:
         the outer door; this is the same door one step in)."""
         with self._guard:
             rec = self._records.get(str(transfer_id))
-        if rec is None or host not in (rec.get("src"), rec.get("dst")):
-            return None
-        return {"sent": int(rec.get("sent") or 0), "total": int(rec["size"])}
+            if rec is None or host not in (rec.get("src"), rec.get("dst")):
+                return None
+            spans = self._spans.get(str(transfer_id))
+            total = int(rec["size"])
+        sent = spans.bytes if spans is not None else 0
+        # A window may report its whole range and then fail; never claim more
+        # than the file has.
+        return {"sent": min(total, sent), "total": total}
 
 
 class Hub:
@@ -341,12 +404,14 @@ class _Handler(BaseHTTPRequestHandler):
 
     # ── plumbing ──
 
-    def _reply(self, obj: dict, code: int = 200) -> None:
+    def _reply(self, obj: dict, code: int = 200, headers: dict | None = None) -> None:
         data = json.dumps(obj).encode("utf-8")
         try:
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError, OSError):
@@ -672,11 +737,29 @@ class _Handler(BaseHTTPRequestHandler):
             self._reply({"error": "not found"}, 404)
             return
         rec, path = found
+        size = int(rec["size"])
+        try:
+            window = range_window(self.headers.get("Range") or "", size)
+        except RangeNotSatisfiableError:
+            # Past the last byte: the receiver has a stale idea of the file, and
+            # the size is the correction. No bytes are served (§50).
+            self._reply(
+                {"error": "range not satisfiable"}, 416, {"Content-Range": f"bytes */{size}"}
+            )
+            return
+        first, last = window if window is not None else (0, size - 1)
+        length = last - first + 1
         try:
             with path.open("rb") as fh:
-                self.send_response(200)
+                fh.seek(first)
+                self.send_response(206 if window is not None else 200)
+                # A hub that answers ranges says so on every answer, including
+                # the single-stream one a receiver gets when it asks for none.
+                self.send_header("Accept-Ranges", "bytes")
                 self.send_header("Content-Type", "application/octet-stream")
-                self.send_header("Content-Length", str(rec["size"]))
+                self.send_header("Content-Length", str(length))
+                if window is not None:
+                    self.send_header("Content-Range", f"bytes {first}-{last}/{size}")
                 # Headers are latin-1 only: RFC 5987 the unicode name, and
                 # keep an ASCII fallback (拾荒集.zip crashed the whole reply).
                 quoted = quote(str(rec["name"]), safe="")
@@ -688,18 +771,20 @@ class _Handler(BaseHTTPRequestHandler):
                 # Counted, not just copied: this loop is the only place that
                 # knows how far the delivery has got (§49), and the sender's
                 # modal reads that count to show a live second step. Reported a
-                # megabyte at a time — a page polls it once a second.
+                # megabyte at a time — a page polls it once a second — as the
+                # range that is now on the wire, so several windows at once add
+                # up instead of overwriting each other (§50).
                 sent = 0
                 reported = 0
-                while True:
-                    chunk = fh.read(64 * 1024)
+                while sent < length:
+                    chunk = fh.read(min(DOWNLOAD_CHUNK, length - sent))
                     if not chunk:
                         break
                     self.wfile.write(chunk)
                     sent += len(chunk)
-                    if sent - reported >= 1024 * 1024:
+                    if sent - reported >= PROGRESS_STEP:
                         reported = sent
-                        self.hub.transfers.moved(tid, sent)
-                self.hub.transfers.moved(tid, sent)
+                        self.hub.transfers.deliver_window(tid, first, first + sent)
+                self.hub.transfers.deliver_window(tid, first, first + sent)
         except OSError:
             pass

@@ -68,6 +68,69 @@ def test_an_unknown_length_still_lands(land):
     assert dest.read_bytes() == b"abc"
 
 
+# ── several windows of one delivery (§50) ──
+
+
+def test_windows_write_their_own_stretch_of_one_part_file(land):
+    """The point of writing in place: no window waits for another, no second
+    copy of the file is made to put them in order, and the real name sees one
+    file that is exactly the sender's."""
+    payload = bytes(range(256)) * 4  # 1024 position-dependent bytes
+    dest = land / "windows.bin"
+
+    with landing.Landing(dest, expect=len(payload), tag="abc12345") as land_obj:
+        assert [p.name for p in land.iterdir()] == ["windows.bin.abc12345.part"]
+        for start in (512, 0, 768, 256):  # out of order on purpose
+            with land_obj.writer(start) as fh:
+                fh.write(payload[start : start + 256])
+                land_obj.written(start, start + 256)
+        land_obj.commit()
+
+    assert dest.read_bytes() == payload
+    assert [p.name for p in land.iterdir()] == ["windows.bin"]
+
+
+def test_a_window_that_never_wrote_leaves_nothing_behind(land):
+    """A delivery with a hole in it is not a delivery — and the length alone
+    cannot say so: the last window extends the file past the hole."""
+    dest = land / "hole.bin"
+    with (
+        pytest.raises(landing.TransferTruncatedError) as exc,
+        landing.Landing(dest, expect=8) as land_obj,
+    ):
+        with land_obj.writer(4) as fh:
+            fh.write(b"defg")
+            land_obj.written(4, 8)
+        with land_obj.writer(0) as fh:
+            fh.write(b"ab")
+            land_obj.written(0, 2)
+        land_obj.commit()
+    assert (exc.value.written, exc.value.expected) == (6, 8)
+    assert list(land.iterdir()) == []
+
+
+def test_spans_are_a_union_not_a_running_total():
+    """What makes a windowed delivery's progress monotone and its completion
+    checkable: overlapping and out-of-order reports add up to the file, not to
+    the traffic."""
+    spans = landing.Spans()
+    assert spans.bytes == 0 and not spans.covers(0, 1)
+
+    spans.add(100, 200)  # out of order
+    spans.add(0, 50)
+    spans.add(50, 100)  # ... and touching: one run, not two
+    assert spans.bytes == 200
+    assert spans.covers(0, 200) and not spans.covers(0, 201)
+    assert spans.end_of_run(0) == 200
+    assert spans.end_of_run(180) == 200  # a resume point inside the run
+
+    spans.add(100, 200)  # the same window reports again: traffic, not bytes
+    assert spans.bytes == 200
+    spans.add(120, 260)  # a retry that overshoots its window by a chunk
+    assert spans.bytes == 260 and spans.covers(0, 260)
+    assert spans.end_of_run(0) == 260 and spans.end_of_run(210) == 260
+
+
 # ── the transport that streams over HTTP ──
 
 
