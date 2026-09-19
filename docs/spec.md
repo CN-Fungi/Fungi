@@ -2463,3 +2463,41 @@ fetch 的情况。」三个现象：**从 0 重来**、**反复多次**、**最�
   改成**按名字找自己那张**。断言里凡是「某类元素里的第几个」都要先问一句：前面的用例会不会留下同样的东西。
 - 门禁：`python -m ruff check .` 干净 · `python -m ruff format --check fungi tests` 干净 ·
   `PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **696 passed**（§55 那次是 693）。
+
+## 57. 两个小毛病，同一个病根（2026-09-19 用户现场反馈）：CSS 写在谁前面、状态行谁来收尾
+
+**用户的原话**：「电脑端上传后会显示 thinking，而且移动和电脑端都靠右 —— 不应该是自己在左边吗」。
+
+修之前先取证（页面里读计算样式、读状态行，不靠看截图猜），两条都复现了，而且各自有一个具体病根：
+
+### 57.1 卡片靠右：`.msg` 定义在我的规则**后面**，于是我的规则根本没生效
+
+桌面端卡片实测 `align-self: auto`、宽度 791px（= `.msg` 的 `max-width:82%`）——
+说明我写的 `.msg` 那一套（`align-self:flex-start`、`max-width:520px`、自己的 padding）**一条都没生效**：
+`.msg` 与 `.file-card` 同特异度（都是 1 个类），而 `.msg` 在 `style.css` 里写在后面，冲突的属性它赢。
+
+- 于是卡片**被拉满、贴到右边**（他说的「靠右」），而**手机端看不出这个问题**（`m.css` 里我的规则恰好写在
+  `.msg` 后面，所以是好的）—— 跟 §56.2 那次一模一样的坑，只是发生在另一个文件。
+- 修法同样是**不靠顺序**：卡片相关规则全部升成 `.msg.file-card`（两个类）→ 无论谁在前都赢。
+  桌面端顺带补上 `align-self:flex-start`（非 `.user` 的行都要自己声明，容器是 `align-items:normal`）。
+
+### 57.2 状态行停在 "Thinking..."：桌面端的回合收尾从来不重置它
+
+`send()` 把 `status` 写成 `Thinking...`，而**桌面端 `done` 分支只做重载、不重置状态行**（手机端那半有这行）。
+普通回合里后续事件会把它覆盖成 `Writing...`，看不太出来；**传输会话一条词都不写（§53：不跑模型）**，
+于是它就永久停在 `Thinking...`。
+
+修法：桌面端 `done` 分支补上与手机端同义的一行
+（`t.aborted ? 'Aborted.' : (failed ? 'Turn failed.' : '')`）—— 顺带把普通会话也修好了。
+
+### 57.3 验收
+
+- `tests/test_webui_sessions.py::test_the_desktop_shows_the_card_left_and_stops_saying_thinking`（真 Chromium）：
+  电脑侧发一条带真文件的路径 → 卡片出现 → 计算样式断言 `align-self:flex-start`、**`max-width:520px`**
+  （这条才是「规则真的生效了」的证据：它被 `.msg` 盖掉时正是 82%）、边框 1px、距容器左边缘 < 40px；
+  再在这个会话里发一句 → 等回合结束 → **`#status` 必须是空串**。
+- `tests/test_webui_transfer.py`（卡片那条）顺带断言手机端卡片的 `align-self` 与边框。
+- 门禁：`python -m ruff check .` 干净 · `python -m ruff format --check fungi tests` 干净 ·
+  `PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **697 passed**（§56 那次是 696）＋
+  本轮全量跑挂过一次 `tests/test_llm.py::test_stream_chat_abort_mid_stream_carries_partial`
+  的 `WinError 10053`（本机已知的 socket flake：单跑 2/2 绿，且这一版没碰 `fungi/llm.py`）。

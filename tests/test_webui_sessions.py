@@ -10,6 +10,10 @@ Skips (never fails) where playwright is missing, so CI without a browser stays
 green.
 """
 
+import json
+import time
+import urllib.request
+
 import pytest
 
 from fungi.config import Config
@@ -17,6 +21,16 @@ from fungi.events import NullSink
 from fungi.llm import LLMResult
 from fungi.room import RoomServer
 from fungi.server import WEBUI_TOKEN
+
+
+def _wait(predicate, timeout_s: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return False
+
 
 pw_sync = pytest.importorskip("playwright.sync_api", reason="playwright not installed")
 
@@ -76,6 +90,52 @@ def page(browser, room):
 
 def _titles(page) -> list:
     return page.evaluate("() => allSessions.map(s => s.title)")
+
+
+def test_the_desktop_shows_the_card_left_and_stops_saying_thinking(page, room, tmp_path):
+    """§57, both from the user's report on the desktop shell:
+    the card stretched to the right edge (`.msg` is defined after my rule, so
+    `max-width`/`align-self` never applied), and the progress line stayed on
+    "Thinking..." forever — no model runs in the transfer session, so nothing
+    else ever cleared it."""
+    payload = b"desktop-card" * 256
+    src = tmp_path / "from-pc.bin"
+    src.write_bytes(payload)
+    body = json.dumps({"sessionId": "file-transfer", "message": f"给手机 {src}"}).encode()
+    req = urllib.request.Request(
+        room.open_webui(False) + "/chat?t=" + WEBUI_TOKEN,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        resp.read()
+
+    page.evaluate("async () => { await loadSessions(); }")
+    page.evaluate("() => switchSession(allSessions.find(s => s.shuttle).id)")
+    page.wait_for_selector("#messages .file-card", timeout=10000)
+    look = page.evaluate(
+        """() => {
+          const cards = Array.from(document.querySelectorAll('#messages .file-card'));
+          const c = cards.find(el => el.querySelector('.fc-name').textContent === 'from-pc.bin');
+          const cs = getComputedStyle(c);
+          const pane = document.getElementById('messages').getBoundingClientRect();
+          return { align: cs.alignSelf, maxWidth: cs.maxWidth, border: cs.borderTopWidth,
+                   gapFromPaneLeft: Math.round(c.getBoundingClientRect().left - pane.left) };
+        }"""
+    )
+    assert look["align"] == "flex-start", look
+    assert look["maxWidth"] == "520px", look  # the rule is in effect, not overridden
+    assert look["border"] == "1px", look
+    assert look["gapFromPaneLeft"] < 40, look  # hugging the left, not pushed right
+
+    page.fill("#input", "记一笔")
+    page.click("#send")
+    assert _wait(lambda: page.evaluate("() => !processing"), timeout_s=15), (
+        "the send never finished"
+    )
+    status = page.evaluate("() => document.getElementById('status').textContent")
+    assert status == "", f"the progress line never cleared: {status!r}"
 
 
 def test_the_transfer_session_stands_apart_and_cannot_be_touched(page):

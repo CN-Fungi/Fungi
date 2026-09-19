@@ -49,15 +49,15 @@ html,body{font-family:var(--font);font-size:16px;line-height:1.6;color:var(--tex
 .session-row.shuttle .session-row-meta{font-size:10px;letter-spacing:.02em}
 .session-row-icon{font-size:13px;line-height:1;color:var(--accent)}
 /* 传输卡片（§56）：名字、大小、方向、路径 + 一个「下载到手机」按钮 */
-.file-card{align-self:flex-start;border:1px solid var(--tool-border);background:var(--tool-bg);border-radius:var(--radius-sm);padding:10px 12px;max-width:100%}
-.fc-head{display:flex;align-items:center;gap:8px}
-.fc-icon{font-size:15px;line-height:1}
-.fc-name{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.fc-size{color:var(--text2);font-size:12px;white-space:nowrap}
-.fc-where{color:var(--dim);font-size:11px;margin-top:3px}
-.fc-path{font-family:var(--mono);font-size:11px;color:var(--text2);word-break:break-all;margin-top:6px}
-.fc-pull{margin-top:9px;border:none;border-radius:var(--radius-xs);padding:8px 16px;cursor:pointer;background:var(--accent);color:var(--on-accent);font-size:12px}
-.fc-pull:hover{background:var(--accent-hover)}
+.msg.file-card{align-self:flex-start;border:1px solid var(--tool-border);background:var(--tool-bg);border-radius:var(--radius-sm);padding:10px 12px;max-width:100%}
+.msg.file-card .fc-head{display:flex;align-items:center;gap:8px}
+.msg.file-card .fc-icon{font-size:15px;line-height:1}
+.msg.file-card .fc-name{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msg.file-card .fc-size{color:var(--text2);font-size:12px;white-space:nowrap}
+.msg.file-card .fc-where{color:var(--dim);font-size:11px;margin-top:3px}
+.msg.file-card .fc-path{font-family:var(--mono);font-size:11px;color:var(--text2);word-break:break-all;margin-top:6px}
+.msg.file-card .fc-pull{margin-top:9px;border:none;border-radius:var(--radius-xs);padding:8px 16px;cursor:pointer;background:var(--accent);color:var(--on-accent);font-size:12px}
+.msg.file-card .fc-pull:hover{background:var(--accent-hover)}
 /* 可点的绝对路径（§52）：点一下把这个文件从电脑取到手机。虚线表明它是动作，
    不是普通的 markdown 链接；长路径要能在窄屏上折行。 */
 .file-link{color:var(--accent2);text-decoration:underline dotted;text-underline-offset:2px;word-break:break-all;cursor:pointer}

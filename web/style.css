@@ -43,15 +43,15 @@ html,body{font-family:var(--font);font-size:var(--fs-md);line-height:1.6;color:v
 .session-row.shuttle .session-row-meta{font-size:11px;letter-spacing:.02em}
 .session-row-icon{font-size:13px;line-height:1;color:var(--accent)}
 /* 传输卡片（§56）：一次传输一张卡 —— 名字、大小、方向、路径（+ 手机端的下载按钮） */
-.file-card{border:1px solid var(--tool-border);background:var(--tool-bg);border-radius:var(--radius-sm);padding:10px 12px;max-width:520px}
-.fc-head{display:flex;align-items:center;gap:8px}
-.fc-icon{font-size:15px;line-height:1}
-.fc-name{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.fc-size{color:var(--text2);font-size:12px;white-space:nowrap}
-.fc-where{color:var(--dim);font-size:11px;margin-top:3px}
-.fc-path{font-family:var(--mono);font-size:11px;color:var(--text2);word-break:break-all;margin-top:6px;user-select:text}
-.fc-pull{margin-top:9px;border:none;border-radius:var(--radius-xs);padding:6px 14px;cursor:pointer;background:var(--accent);color:var(--on-accent);font-size:12px}
-.fc-pull:hover{background:var(--accent-hover)}
+.msg.file-card{align-self:flex-start;border:1px solid var(--tool-border);background:var(--tool-bg);border-radius:var(--radius-sm);padding:10px 12px;max-width:520px}
+.msg.file-card .fc-head{display:flex;align-items:center;gap:8px}
+.msg.file-card .fc-icon{font-size:15px;line-height:1}
+.msg.file-card .fc-name{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msg.file-card .fc-size{color:var(--text2);font-size:12px;white-space:nowrap}
+.msg.file-card .fc-where{color:var(--dim);font-size:11px;margin-top:3px}
+.msg.file-card .fc-path{font-family:var(--mono);font-size:11px;color:var(--text2);word-break:break-all;margin-top:6px;user-select:text}
+.msg.file-card .fc-pull{margin-top:9px;border:none;border-radius:var(--radius-xs);padding:6px 14px;cursor:pointer;background:var(--accent);color:var(--on-accent);font-size:12px}
+.msg.file-card .fc-pull:hover{background:var(--accent-hover)}
 .session-row-act.del:hover{color:#ef4444;background:rgba(239,68,68,0.08)}
 .session-row input.rename-input{flex:1;background:var(--bg);border:1px solid var(--accent);border-radius:var(--radius-xs);color:var(--text);font-family:var(--font);font-size:12px;padding:4px 10px;outline:none;min-width:0}
 #session-list-empty{padding:44px 16px;text-align:center;color:var(--dim);font-size:var(--fs-sm);line-height:1.9}

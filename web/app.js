@@ -632,6 +632,11 @@ function handleTurnEvent(obj) {
           if (agents[id].status === 'running') setAgentStatus(id, 'aborted');
         });
       }
+      // The line under the input is a progress readout, so the end of a turn has
+      // to clear it: nothing else does, and a session that never wrote a word
+      // (the transfer session: one row, no model — §53) left "Thinking..." on
+      // screen for good.
+      status.textContent = t.aborted ? 'Aborted.' : (failed ? 'Turn failed.' : '');
       if (viewing) reloadSessionFromServer();
       else loadSessions(); // the finished turn landed in a background session
       break;

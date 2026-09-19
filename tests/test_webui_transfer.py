@@ -606,6 +606,19 @@ def test_a_sent_path_arrives_as_a_card_that_pulls(mobile_page, rooms, tmp_path):
     assert card["pull"] is True, card
     assert card["links"] == 0, "the path inside the card must not also be a link"
 
+    # §57: the layout rule has to be *in effect*, not merely written — the card
+    # used to stretch to the right edge because `.msg` was defined after it.
+    layout = mobile_page.evaluate(
+        """() => {
+          const cards = Array.from(document.querySelectorAll('#messages .file-card'));
+          const c = cards.find(el => el.querySelector('.fc-name').textContent === 'handover.bin');
+          const cs = getComputedStyle(c);
+          return { align: cs.alignSelf, border: cs.borderTopWidth };
+        }"""
+    )
+    assert layout["align"] == "flex-start", layout
+    assert layout["border"] == "1px", layout
+
     with mobile_page.expect_download(timeout=30000) as caught:
         mobile_page.click("#messages .file-card:has-text('handover.bin') .fc-pull")
     saved = tmp_path / "pulled.bin"
