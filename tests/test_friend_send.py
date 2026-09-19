@@ -601,7 +601,10 @@ def test_a_consent_verdict_stays_a_bare_value(tmp_path):
 
 def test_comm_send_human_reports_the_hub_upload_into_the_job(tmp_path):
     """发文件时浏览器自己造的 job id 拿到真实的字节进度：桌面端和手机端用同一个
-    进度条，而字节只在服务器上流动（见 fungi/xfer.py）。"""
+    进度条，而字节只在服务器上流动（见 fungi/xfer.py）。
+
+    上传结束只是「已发出」：文件在房间里，收件端还没说话 —— job 停在 sent，
+    弹窗的最后一步等的是对方的判决（§49）。"""
     room = _room(tmp_path)
     transport = _wire_clone(room)
     src = tmp_path / "big.bin"
@@ -619,9 +622,165 @@ def test_comm_send_human_reports_the_hub_upload_into_the_job(tmp_path):
     assert out == {"ok": True, "kind": "transfer", "name": "big.bin"}
     assert seen == [(str(src), "big.bin", "bob")]
     job = room.xfer_jobs.get("job-1")
-    assert job["state"] == "done"
+    assert job["state"] == "sent" and job["phase"] == "deliver"
     assert job["done"] == job["total"] == 10
     assert job["name"] == "big.bin"
+    # the id rides the envelope: that is how the receiver can echo it back
+    assert transport.sent[0].body["job"] == "job-1"
+
+
+def test_the_receivers_verdict_finishes_the_job(tmp_path):
+    """收件端的话才算数：收到会说落在哪，没收下会带着原因停下（§49）。"""
+    room = _room(tmp_path)
+    _wire_clone(room)
+    src = tmp_path / "plan.txt"
+    src.write_text("hello")
+    transport = room._clones["bob"].transport
+    transport.upload_transfer = lambda path, name, to_host, progress=None: {
+        "id": "t1",
+        "name": name,
+        "size": 5,
+    }
+    room.comm_send_human("bob", file_path=str(src), job="job-9")
+
+    room._delivery_result("job-9", {"ok": True, "saved": "C:/pc/inbox/alice/plan.txt"})
+    job = room.xfer_jobs.get("job-9")
+    assert job["state"] == "done" and job["saved"].endswith("plan.txt")
+
+    room.xfer_jobs.start("job-10", "plan.txt", 5)
+    room.xfer_jobs.sent("job-10")
+    room._delivery_result("job-10", {"ok": False, "error": "delivery ended early: 4 of 5 bytes"})
+    job = room.xfer_jobs.get("job-10")
+    assert job["state"] == "error" and job["phase"] == "deliver"
+    assert "ended early" in job["error"]
+
+
+def test_an_agent_transfer_carries_no_job(tmp_path):
+    """代理自己发的文件没有 job id（它自己的调用在等结果），收件端照旧回答。"""
+    room = _room(tmp_path)
+    transport = _wire_clone(room)
+    src = tmp_path / "plan.txt"
+    src.write_text("hello")
+    transport.upload_transfer = lambda path, name, to_host, progress=None: {
+        "id": "t1",
+        "name": name,
+        "size": 5,
+    }
+    room.comm_send_human("bob", file_path=str(src))
+    assert transport.sent[0].body["job"] == ""
+
+
+def test_a_transfer_result_echoes_the_senders_job():
+    """收件端把 job id 原样带回来 —— 两种回答形状都要带（§49）。"""
+    cfg = config_mod.Config()
+    transport = _FakeTransport()
+    clone = Clone(
+        "bob:comm-alice",
+        transport,
+        cfg,
+        sink=lambda *a, **k: None,
+        on_transfer=lambda env: {"ok": True, "saved": "C:/bob/inbox/alice/plan.txt"},
+    )
+    env = Envelope(
+        id="t1",
+        src="alice:comm-bob",
+        dst="bob:comm-alice",
+        type="transfer",
+        body={"id": "t1", "name": "plan.txt", "size": 5, "job": "j-7"},
+    )
+    clone.run_turn(env)
+    (out,) = transport.sent
+    assert out.type == "result" and out.reply_to == "t1"
+    assert out.body["ok"] is True and out.body["job"] == "j-7"
+
+
+def test_a_failed_transfer_result_still_echoes_the_job():
+    """失败的那次尤其要带回来：发送端弹窗靠它说出原因，而不是显示「已收到」。"""
+    transport = _FakeTransport()
+    clone = Clone(
+        "bob:comm-alice",
+        transport,
+        config_mod.Config(),
+        sink=lambda *a, **k: None,
+        on_transfer=lambda env: {"ok": False, "error": "delivery ended early: 4 of 5 bytes"},
+    )
+    env = Envelope(
+        id="t2",
+        src="alice:comm-bob",
+        dst="bob:comm-alice",
+        type="transfer",
+        body={"name": "plan.rar", "size": 5, "job": "j-8"},
+    )
+    clone.run_turn(env)
+    (out,) = transport.sent
+    assert out.body["job"] == "j-8" and "ended early" in out.body["error"]
+
+
+def test_a_verdict_reaches_the_delivery_hook_in_both_shapes():
+    """发送端那一半：result（信使在）与 answer（信使关，房间代答）都要认出来。"""
+    seen: list[tuple] = []
+    clone = Clone(
+        "alice:comm-bob",
+        _FakeTransport(),
+        config_mod.Config(),
+        sink=lambda *a, **k: None,
+        on_delivery=lambda job, verdict: seen.append((job, verdict)),
+    )
+    clone.dispatch(
+        Envelope(
+            src="bob:comm-alice",
+            dst="alice:comm-bob",
+            type="result",
+            body={"ok": True, "saved": "C:/bob/inbox/alice/plan.txt", "job": "j-7"},
+            reply_to="t1",
+        )
+    )
+    clone.dispatch(
+        Envelope(
+            src="bob:local",
+            dst="alice:comm-bob",
+            type="answer",
+            body={"value": {"ok": False, "error": "declined by the receiving user"}, "job": "j-8"},
+            reply_to="t2",
+        )
+    )
+    # a transfer an agent started carries no id: nothing to report to a page
+    clone.dispatch(
+        Envelope(
+            src="bob:comm-alice",
+            dst="alice:comm-bob",
+            type="result",
+            body={"ok": True, "saved": "C:/bob/x"},
+            reply_to="t3",
+        )
+    )
+    assert [job for job, _ in seen] == ["j-7", "j-8"]
+    assert seen[0][1]["saved"].endswith("plan.txt")
+    assert seen[1][1]["error"] == "declined by the receiving user"
+
+
+def test_courier_off_answer_carries_the_job_back(tmp_path, monkeypatch):
+    """信使关掉时是房间自己答的：那个 answer 也得带上 job id（§49）。"""
+    monkeypatch.setattr(room_mod, "load_config", lambda: config_mod.Config(courier=False))
+    room = _room(tmp_path)
+    transport = _wire_clone(room)
+    room._local = _FakeClone("alice:local", transport)
+    env = Envelope(
+        id="t5",
+        src="bob:comm-alice",
+        dst="alice:local",
+        type="transfer",
+        body={"id": "t5", "name": "plan.txt", "size": 5, "job": "j-5"},
+    )
+    room._direct_transfers["ask-1"] = (env, "bob")
+    room._direct_download = lambda e, host: {"ok": True, "saved": f"C:/alice/inbox/{host}/plan.txt"}
+    room._send_answer(
+        Envelope(id="ask-1", src="bob:comm-alice", dst="alice:local", type="ask", body={}), "yes"
+    )
+
+    (out,) = transport.sent
+    assert out.type == "answer" and out.reply_to == "t5"
+    assert out.body["job"] == "j-5" and out.body["value"]["ok"] is True
 
 
 def test_a_failed_upload_marks_the_job(tmp_path):

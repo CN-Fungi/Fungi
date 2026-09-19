@@ -1093,8 +1093,9 @@ document.getElementById('friend-browse').addEventListener('click', async () => {
   } catch (e) {}
 });
 /* One file to one friend, with the progress modal: the bytes leave from this
-   host (the file is already on its disk) and the job the modal polls counts
-   them there — see FC.initTransfer. */
+   host (the file is already on its disk) and the job the modal polls follows
+   them to the hub, then waits for the peer's own verdict (§49) — the modal only
+   says "已收到" once the file is on their disk. See FC.initTransfer. */
 async function sendFileToFriend(path) {
   try {
     await Xfer.sendOne('发送文件给 ' + displayOf(friendView), friendView, path);

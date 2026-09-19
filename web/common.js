@@ -11,7 +11,7 @@
   /* Build marker: bump per web/ change so any WebUI instance can self-identify
      (console + window.__FUNGI_WEB_VER) — stale cache vs new server is otherwise
      indistinguishable from the outside. */
-  window.__FUNGI_WEB_VER = 'web-raw-upload';
+  window.__FUNGI_WEB_VER = 'web-delivery-verdict';
   try { console.info('[fungi-web]', window.__FUNGI_WEB_VER); } catch (e) {}
   /* ---------- http ---------- */
   /* One fetch wrapper. Mobile inits a token prefix + 403 hook; desktop inits
@@ -117,6 +117,10 @@
      /transfer-progress while the SERVER moves the upload to the hub
      (fungi/xfer.py). The phone has one hop more — the browser's own push to
      this host — which XHR measures client-side, so it gets a step of its own.
+     The last step belongs to the OTHER end (§49): the upload finishing only
+     means the room has the bytes, so the modal waits for the peer's verdict
+     (landed with a path, or refused/truncated with a reason) and never calls a
+     send "done" on the strength of its own upload.
      Both shells pass their step labels; every step shows its own bar + note.
      A shell without the modal markup still sends — the flows just skip the
      card (open() returns false and they fall back to the bare request). */
@@ -126,6 +130,7 @@
     const MB = 1024 * 1024;
     let steps = [];
     let autoClose = null;
+    let cancelled = false;  // the user closed the modal: stop watching the send
 
     function human(n) {
       n = Number(n) || 0;
@@ -144,6 +149,7 @@
       const overlay = document.getElementById('xfer-overlay');
       if (!overlay) return false;
       if (autoClose) { clearTimeout(autoClose); autoClose = null; }
+      cancelled = false;  // a new send: this modal is watching again
       document.getElementById('xfer-title').textContent = title;
       const box = document.getElementById('xfer-steps');
       box.innerHTML = '';
@@ -167,6 +173,12 @@
       const s = steps[i];
       if (s) s.note.textContent = text;
     }
+    function markDone(i) {
+      const s = steps[i];
+      if (!s) return;
+      s.bar.style.width = '100%';
+      s.el.classList.add('done');
+    }
     function finish(text) {
       // every hop is through by the time a flow finishes: close them all, and
       // say the last word on the last one
@@ -186,6 +198,9 @@
     }
     function close() {
       if (autoClose) { clearTimeout(autoClose); autoClose = null; }
+      // the delivery pump checks this on its next tick and ends itself; the
+      // timer is never cleared from here (that would leave it unwakeable)
+      cancelled = true;
       const overlay = document.getElementById('xfer-overlay');
       if (overlay) overlay.classList.remove('show');
     }
@@ -225,64 +240,103 @@
     /* hop 2 (both): this host's copy goes out to the peer through the hub.
        The POST answers only when the upload is done, so polling it is what
        feeds the bar; the job record is authoritative once the reply lands.
-       The pump is never cancelled from outside — the reply sets `settled` and
-       the pump's own next tick ends it (clearing its timer would leave the
-       promise with nothing to wake it, and the modal would never close). */
-    function sendToPeer(host, path, onProgress) {
+       The pump is never cancelled from outside — the job settling, or the user
+       closing the modal, ends it on its own next tick (clearing its timer would
+       leave the promise with nothing to wake it).
+
+       It is DETACHED, deliberately: the page's own flow resolves at the end of
+       the upload (the chat can refresh, the picker returns) while the modal
+       keeps watching for the peer's verdict. Awaiting the peer here would hang
+       the caller until the other human clicks — or forever (§49). */
+    function sendToPeer(host, path, upStep, onProgress) {
       const job = 'j-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
       // the job id on the element: the one handle onto the server-side record,
       // for a console and for the browser tests to read back
       const overlay = document.getElementById('xfer-overlay');
       if (overlay) overlay.dataset.job = job;
-      let settled = false;
-      const watch = new Promise(resolve => {
-        const poll = () => {
-          if (settled) return resolve(null);
-          http.fetchJSON('/transfer-progress?id=' + encodeURIComponent(job))
-            .then(r => r.json())
-            .then(j => {
-              if (j.state === 'done' || j.state === 'error') return resolve(j);
-              if (j.done && onProgress) onProgress(j.done, j.total);
-              setTimeout(poll, 200);
-            })
-            .catch(() => { setTimeout(poll, 400); });
-        };
-        poll();
-      });
+      let uploadFailed = false;
+      const pump = () => {
+        if (cancelled || uploadFailed) return;
+        http.fetchJSON('/transfer-progress?id=' + encodeURIComponent(job))
+          .then(r => r.json())
+          .then(j => {
+            if (cancelled) return;
+            if (j.state === 'sent') {
+              // every byte is in the room; what is left is the peer's own step
+              progress(upStep, 1, 1);
+              markDone(upStep);
+              note(upStep + 1, '对方正在接收…');
+              setTimeout(pump, 1000);
+              return;
+            }
+            if (j.state === 'done' || j.state === 'error') return settle(upStep, j);
+            if (j.done && onProgress) onProgress(j.done, j.total);
+            setTimeout(pump, 200);
+          })
+          .catch(() => { setTimeout(pump, 400); });
+      };
+      setTimeout(pump, 200);
       return http.postJSON('/comm-send', { host: host, file: path, job: job })
         .then(r => r.json())
         .then(
           d => {
-            settled = true;
-            if (d.error) throw new Error(d.error);
-            return watch.then(() => d);
+            if (d.error) { uploadFailed = true; throw new Error(d.error); }
+            return d;
           },
-          e => { settled = true; throw e; }  // a dead request must stop the pump too
+          e => { uploadFailed = true; throw e; }
         );
     }
 
-    /* the three flows the shells use */
+    /* The verdict is the only ending the sender may claim: "对方已收到" needs
+       the landing, and a failure has to stay on screen with its reason. */
+    function settle(upStep, j) {
+      const last = upStep + 1;
+      if (cancelled) return;
+      if (j.state === 'done') {
+        markDone(last);
+        finish(j.saved ? '对方已收到：' + j.saved : '对方已收到');
+      } else if (j.state === 'error') {
+        fail(j.error || '对方没有收下', last);
+      } else {
+        // still receiving when the modal stopped watching — never claim it landed
+        note(last, '对方仍在接收，结果会出现在会话里');
+      }
+    }
+
+    /* the two flows the shells use */
     function sendOne(title, host, path) {
-      if (!open(title, ['发送给对方'])) return sendToPeer(host, path, null);
+      // a refused upload fails on ITS step, with the server's own words
+      const send = () =>
+        sendToPeer(host, path, 0, (done, total) => progress(0, done, total)).catch(e => {
+          fail(e.message || String(e), 0);
+          throw e;
+        });
+      if (!open(title, ['① 上传到房间', '② 对方接收'])) return send();
       note(0, '正在发送…');
-      return sendToPeer(host, path, (done, total) => progress(0, done, total)).then(d => {
-        finish('已发出，等待对方接收');
-        return d;
-      }).catch(e => { fail(e.message || String(e)); throw e; });
+      return send();
     }
     function sendFromPhone(title, host, file) {
-      if (!open(title, ['① 上传到电脑', '② 由电脑发送给对方'])) {
-        return upload(file, null).then(path => sendToPeer(host, path, null));
+      const send = (path, onProgress) =>
+        sendToPeer(host, path, 1, onProgress).catch(e => {
+          fail(e.message || String(e), 1);
+          throw e;
+        });
+      if (!open(title, ['① 上传到电脑', '② 上传到房间', '③ 对方接收'])) {
+        return upload(file, null).then(path => send(path, null));
       }
       note(0, '正在上传…');
-      return upload(file, (done, total) => progress(0, done, total))
-        .then(path => {
+      return upload(file, (done, total) => progress(0, done, total)).then(
+        path => {
           progress(0, file.size, file.size);  // ① done, with the file's real bytes
-          note(1, '电脑已收到，正在送往对方…');
-          return sendToPeer(host, path, (done, total) => progress(1, done, total));
-        })
-        .then(d => { finish('已发出，等待对方接收'); return d; })
-        .catch(e => { fail(e.message || String(e)); throw e; });
+          markDone(0);
+          note(1, '正在送往对方…');
+          return send(path, (done, total) => progress(1, done, total));
+        },
+        e => {  // browser -> this host never made it
+          fail(e.message || String(e), 0);
+          throw e;
+        }
+      );
     }
 
     return { open, close, finish, fail, progress, note, upload, sendToPeer, sendOne, sendFromPhone };

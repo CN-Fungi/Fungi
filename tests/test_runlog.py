@@ -160,9 +160,13 @@ def test_a_broken_banner_does_not_stop_the_program(log_file, monkeypatch):
 def test_the_log_falls_back_when_the_program_folder_cannot_be_written(tmp_path, monkeypatch):
     """Unpacked into Program Files, the exe's own folder is read-only: a log that
     cannot be written is the same as no log."""
+    from fungi import config as config_mod
+
     monkeypatch.setattr(runlog, "logs_dir", lambda: tmp_path / "program-files" / "logs")
-    monkeypatch.setattr(runlog, "_writable", lambda folder: False)
-    monkeypatch.setattr(runlog, "_fallback_dir", lambda: tmp_path / "localappdata" / "logs")
+    # the writability rule lives in config (the inbox shares it, §49)
+    monkeypatch.setattr(
+        config_mod, "writable_dir", lambda preferred, name: tmp_path / "localappdata" / "logs"
+    )
     monkeypatch.setattr(runlog, "_path", None)  # as if this were the program's first run
 
     path = runlog.setup()

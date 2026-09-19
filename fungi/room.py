@@ -24,12 +24,13 @@ import webbrowser
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+from . import runlog
 from .agent import Agent
 from .cards import AskCards
 from .clone.base import Clone, LocalTransport, RemoteTransport
 from .clone.comm import SILENT_REPLY, build_comm_clone
 from .clone.local import build_local_clone
-from .config import PROJECT_ROOT, Config, load_config
+from .config import Config, load_config
 from .consent_rules import ConsentRules
 from .diary import bound as diary_bound
 from .diary import section as diary_section
@@ -37,6 +38,7 @@ from .events import Sink
 from .hub.app import Hub, safe_name
 from .hub.client import HubClient, HubError
 from .hub.relay import Inbox
+from .landing import inbox_root
 from .protocol import Envelope, clean_display, parse_addr, valid_host_name
 from .server import _BG_ABORTS, _PENDING_SPAWNS, WebUIRuntime, make_webui_server
 from .session import SESSIONS_DIR, SessionStore
@@ -387,6 +389,7 @@ class RoomBase:
                 peer, env_type, messages, agent
             ),
             on_direct=self._courier_direct,
+            on_delivery=self._delivery_result,
         )
         with self._guard:
             self._clones[peer] = clone
@@ -516,7 +519,9 @@ class RoomBase:
                     src=self.local_addr,
                     dst=env.src,
                     type="answer",
-                    body={"value": body},
+                    # the sender's job id rides along, so its modal learns the
+                    # verdict without any agent on either side (§49)
+                    body={"value": body, "job": str(env.body.get("job") or "")},
                     reply_to=env.id,
                 )
             )
@@ -605,11 +610,7 @@ class RoomBase:
     def _direct_download(self, env: Envelope, src_host: str) -> dict:
         """Courier-off accepted transfer: land the bytes like receive_transfer."""
         body = env.body
-        dest_dir = (
-            Path(self.cfg.inbox_dir) / src_host
-            if self.cfg.inbox_dir
-            else PROJECT_ROOT / "inbox" / src_host
-        )
+        dest_dir = inbox_root(self.cfg.inbox_dir) / src_host
         dest_dir.mkdir(parents=True, exist_ok=True)
         stem, suffix = (
             Path(safe_name(str(body.get("name") or "file"))).stem,
@@ -707,6 +708,23 @@ class RoomBase:
 
         return report
 
+    def _delivery_result(self, job: str, verdict: dict) -> None:
+        """The receiving host's word on a transfer this room sent (§49).
+
+        Reached from the comm clone's dispatch (the verdict echoes the page's
+        job id both ways a transfer can be answered). Nothing here needs a
+        waiting agent: the page is what polls the job.
+        """
+        ok = bool(verdict.get("ok"))
+        if not ok:
+            name = str(self.xfer_jobs.get(job).get("name") or "file")
+            runlog.problem(
+                "transfer %s (%s) was not delivered: %s", job, name, verdict.get("error")
+            )
+        self.xfer_jobs.deliver(
+            job, ok, str(verdict.get("error") or ""), str(verdict.get("saved") or "")
+        )
+
     # ── human direct sends (friend view composer) ──
     def comm_send_human(
         self,
@@ -754,12 +772,19 @@ class RoomBase:
                     "from": self.local_addr,
                     "from_human": True,
                     "sender_name": sender_name,
+                    # the modal's own id, echoed back by the receiver's verdict
+                    # (§49): the page waits for the landing, not for the upload
+                    "job": job or "",
                 },
             )
-            # Fire-and-forget: the peer's answer resolves on their side; no
-            # local agent is waiting on this transfer.
-            clone.transport.send(env)
-            self.xfer_jobs.finish(job or "")
+            # Fire-and-forget: the peer's answer resolves on the sender's comm
+            # clone, which hands it to _delivery_result; no agent is waiting.
+            out = clone.transport.send(env)
+            refused = str(out.get("error") or "") if isinstance(out, dict) else ""
+            if refused:
+                self.xfer_jobs.fail(job or "", refused)
+                return {"error": refused}
+            self.xfer_jobs.sent(job or "")
             return {"ok": True, "kind": "transfer", "name": name}
         text = (text or "").strip()
         if not text:

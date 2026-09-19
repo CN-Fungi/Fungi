@@ -12,13 +12,14 @@ import threading
 import time
 from pathlib import Path
 
-from .. import tools
+from .. import runlog, tools
 from ..agent import Agent, BoundTool
 from ..config import Config
 from ..events import Sink
 from ..hub.app import fs_via_hub
 from ..hub.client import HubClient
 from ..hub.relay import Relay
+from ..landing import atomic_landing
 from ..pending import PendingAsks
 from ..protocol import Envelope, parse_addr
 from ..trilayer import TriLayer
@@ -26,6 +27,24 @@ from ..trilayer import TriLayer
 TURN_TYPES = ("chat", "task", "transfer")
 DIRECT_TYPES = ("chat", "transfer")  # courier-off delivers these without a turn
 MAX_CHAT_HISTORY = 200  # chat messages kept per clone; older entries are dropped
+
+
+def delivery_verdict(body) -> tuple[str, dict]:
+    """(job id, the receiver's verdict) of a transfer result, or ("", {}).
+
+    Two shapes reach the sender: the comm clone answers with its own landing
+    result (courier on), or the room wraps that result as the answer's `value`
+    (courier off). Both echo the job id the sending page minted (§49). A
+    transfer an agent started carries no id — its own tool call is blocked on
+    the result instead.
+    """
+    if not isinstance(body, dict):
+        return "", {}
+    job = str(body.get("job") or "")
+    if not job:
+        return "", {}
+    value = body.get("value")
+    return job, value if isinstance(value, dict) and "ok" in value else body
 
 
 def _qa_lines(questions: list, value) -> str:
@@ -122,8 +141,12 @@ class LocalTransport:
         found = self.hub.transfers.fetchable(transfer_id, self.host)
         if found is None:
             raise RuntimeError("transfer not found or not for this host")
-        _rec, path = found
-        shutil.copyfile(path, dest)
+        rec, path = found
+        # Atomic, like the HTTP path: this runs on the hub's own host, where the
+        # staged file is a local copy — the same "no half file under the real
+        # name" guarantee has to hold (§49).
+        with atomic_landing(dest, int(rec["size"])) as out, path.open("rb") as src:
+            shutil.copyfileobj(src, out)
 
     def discard_transfer(self, transfer_id: str) -> None:
         if self.hub is not None:
@@ -185,6 +208,7 @@ class Clone:
         poll_timeout: float = 5.0,
         on_ask=None,
         on_transfer=None,
+        on_delivery=None,
         on_turn_end=None,
         subagents: bool = True,
         on_direct=None,
@@ -218,6 +242,10 @@ class Clone:
         # transfer envelopes: handled by comm clones (consent -> download);
         # None -> the transfer is answered with an error result.
         self.on_transfer = on_transfer
+        # a transfer this process sent, answered: called with the receiver's
+        # verdict dict when it carries the sender's job id (§49) — the send-file
+        # modal waits on that, not on the upload.
+        self.on_delivery = on_delivery
         # courier-off hook: called for chat/transfer envelopes BEFORE a turn
         # is queued. Returning True means "delivered directly to the user"
         # (friend-view transcript / consent card) — the LLM never wakes.
@@ -342,6 +370,14 @@ class Clone:
 
     def dispatch(self, env: Envelope) -> None:
         """Control envelopes wake blocked tools inline; turns are queued."""
+        if self.on_delivery is not None and env.type in ("result", "answer"):
+            # A verdict on a transfer this host's user sent from the friend view:
+            # the receiver echoes the page's job id, and the modal is waiting on
+            # it (§49). An agent-started transfer carries none — its own tool call
+            # blocks on the result below.
+            job, verdict = delivery_verdict(env.body)
+            if job:
+                self.on_delivery(job, verdict)
         if env.type == "answer" and env.reply_to:
             if not self.pending.resolve(env.reply_to, env.body.get("value")):
                 self._answer_turn(env)
@@ -476,7 +512,11 @@ class Clone:
         )
 
     def _run_transfer(self, env: Envelope) -> None:
-        """Incoming file transfer: consent via on_transfer, result back to src."""
+        """Incoming file transfer: consent via on_transfer, result back to src.
+
+        The result echoes the sender's job id when it carries one: that is how a
+        human send from the friend view learns whether the file landed (§49).
+        """
         if self.on_transfer is None:
             body: dict = {"ok": False, "error": "transfers not supported here"}
         else:
@@ -484,6 +524,20 @@ class Clone:
                 body = self.on_transfer(env)
             except Exception as exc:
                 body = {"ok": False, "error": str(exc)}
+        if not isinstance(body, dict):
+            body = {"ok": False, "error": f"malformed result: {body!r}"}
+        if not body.get("ok"):
+            # The receiver is the only one who knows why a file did not land
+            # (the sender's log says nothing about it): write it down (§45).
+            runlog.problem(
+                "%s: incoming transfer from %s failed: %s",
+                self.addr,
+                env.src,
+                body.get("error"),
+            )
+        job = str(env.body.get("job") or "")
+        if job:
+            body = {**body, "job": job}
         self.transport.send(
             Envelope(
                 src=self.addr,

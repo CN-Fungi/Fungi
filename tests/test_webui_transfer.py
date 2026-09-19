@@ -124,6 +124,19 @@ def mobile_page(browser, rooms):
         yield pg
 
 
+def _answer_peer_card(room, value: str, timeout_s: float = 10.0) -> None:
+    """The receiving user's click on the consent card (§49: nothing lands on
+    their disk without it, and the sender's last step waits for this answer)."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        cards = room.webui_runtime().pending_asks()
+        if cards:
+            assert room.webui_runtime().route_answer(cards[0]["id"], value) is True
+            return
+        time.sleep(0.05)
+    raise AssertionError("the peer never got a consent card")
+
+
 # Every paint of the modal, recorded: the flow can finish in a few hundred
 # milliseconds, so sampling it from outside would race the page.
 XFER_WATCH = """
@@ -200,9 +213,14 @@ def test_the_modal_renders_one_labelled_step_per_hop(page):
     page.evaluate("() => Xfer.close()")
 
 
-def test_desktop_send_shows_the_bar_and_stages_the_file(page, rooms, tmp_path):
-    """One hop: the file is already on this host, so one step covers it."""
-    server, _client = rooms
+def test_desktop_send_waits_for_the_peers_verdict(page, rooms, tmp_path):
+    """One hop out, and the last word belongs to the other end (§49).
+
+    The bar used to close when the upload ended — seconds on a local hub, while
+    the peer's own download can run for minutes. Whoever closed the room in
+    between left them with a truncated file wearing the real name.
+    """
+    server, client = rooms
     src = tmp_path / "notes.txt"
     src.write_text("会议纪要\n" * 2000, encoding="utf-8")
     # the peer's comm clone is built by the roster diff a moment after joining
@@ -211,6 +229,7 @@ def test_desktop_send_shows_the_bar_and_stages_the_file(page, rooms, tmp_path):
     page.evaluate("() => openFriendChat('beta')")
     page.evaluate(XFER_WATCH)
     page.evaluate("async (p) => { await sendFileToFriend(p); }", str(src))
+    _answer_peer_card(client, "yes")
     assert _wait(
         lambda: not page.evaluate(
             "() => document.getElementById('xfer-overlay').classList.contains('show')"
@@ -221,21 +240,52 @@ def test_desktop_send_shows_the_bar_and_stages_the_file(page, rooms, tmp_path):
     assert log, "the modal never painted"
     last = log[-1]
     assert last["title"] == "发送文件给 beta"
-    assert _labels(last) == ["发送给对方"]
+    assert _labels(last) == ["① 上传到房间", "② 对方接收"]
     assert "done" in _job_states(last)[-1] and last["steps"][-1]["width"] == "100%"
-    assert last["steps"][-1]["note"] == "已发出，等待对方接收"
+    assert "对方已收到" in last["steps"][-1]["note"]
     assert "show" not in last["cls"]
 
     job = server.webui_runtime().transfer_progress(last["job"])
-    assert job["state"] == "done" and job["done"] == job["total"] > 0
+    assert job["state"] == "done" and job["phase"] == "deliver"
+    assert job["done"] == job["total"] > 0
     assert job["name"] == "notes.txt"
+    landed = Path(job["saved"])  # on the PEER's disk, and byte for byte
+    try:
+        assert landed.read_bytes() == src.read_bytes()
+    finally:
+        landed.unlink(missing_ok=True)
     # the bytes really went out: the hub staged them and logged the envelope
     assert any("[file]" in row["text"] for row in server.hub.commlog.read("alpha", "beta"))
 
 
-def test_mobile_send_shows_two_steps_and_lands_both_hops(mobile_page, rooms, tmp_path, monkeypatch):
+def test_a_refused_delivery_stays_open_and_names_the_reason(page, rooms, tmp_path):
+    """The peer's "no" is an ending too — and the only honest one on screen."""
+    server, client = rooms
+    src = tmp_path / "refused.txt"
+    src.write_text("nope", encoding="utf-8")
+    assert _wait(lambda: server._clones.get("beta") is not None), "comm clone never appeared"
+
+    page.evaluate("() => openFriendChat('beta')")
+    page.evaluate(XFER_WATCH)
+    page.evaluate("async (p) => { await sendFileToFriend(p); }", str(src))
+    _answer_peer_card(client, "no")
+    assert _wait(lambda: "declined" in _log(page)[-1]["steps"][-1]["note"], timeout_s=10.0), (
+        f"the refusal never reached the modal: {_log(page)}"
+    )
+
+    last = _log(page)[-1]
+    assert "show" in last["cls"], "a refused send vanished as if it had landed"
+    assert "failed" in last["steps"][-1]["cls"]
+    job = server.webui_runtime().transfer_progress(last["job"])
+    assert job["state"] == "error" and job["phase"] == "deliver"
+    assert "declined" in job["error"]
+
+
+def test_mobile_send_shows_three_steps_and_lands_both_hops(
+    mobile_page, rooms, tmp_path, monkeypatch
+):
     """The phone needs one hop more, and each gets its own line."""
-    server, _client = rooms
+    server, client = rooms
     inbox = tmp_path / "inbox"
     monkeypatch.setattr(
         webui_server,
@@ -249,25 +299,31 @@ def test_mobile_send_shows_two_steps_and_lands_both_hops(mobile_page, rooms, tmp
         "#friend-file-input",
         {"name": "photo.bin", "mimeType": "application/octet-stream", "buffer": b"x" * 4096},
     )
+    _answer_peer_card(client, "yes")
     assert _wait(
         lambda: not mobile_page.evaluate(
             "() => document.getElementById('xfer-overlay').classList.contains('show')"
         )
-    ), "the modal never closed"
+    ), f"the modal never closed: {_log(mobile_page)}"
 
     log = _log(mobile_page)
     assert log, "the modal never painted"
     last = log[-1]
     assert last["title"] == "发送文件给 beta"
-    assert _labels(last) == ["① 上传到电脑", "② 由电脑发送给对方"]
-    assert _job_states(last) == ["xf-step done", "xf-step done"]
-    assert [s["width"] for s in last["steps"]] == ["100%", "100%"]
+    assert _labels(last) == ["① 上传到电脑", "② 上传到房间", "③ 对方接收"]
+    assert _job_states(last) == ["xf-step done", "xf-step done", "xf-step done"]
+    assert [s["width"] for s in last["steps"]] == ["100%", "100%", "100%"]
     assert "show" not in last["cls"]
 
     # hop 1 landed on this host, hop 2 on the hub
     assert [p.name for p in inbox.iterdir()] == ["photo.bin"]
     job = server.webui_runtime().transfer_progress(last["job"])
     assert job["state"] == "done" and job["name"] == "photo.bin"
+    landed = Path(job["saved"])
+    try:
+        assert landed.read_bytes() == b"x" * 4096  # hop 3 was byte for byte
+    finally:
+        landed.unlink(missing_ok=True)
 
 
 def test_a_failed_send_says_so_and_stays_open(page, rooms, tmp_path):
@@ -283,8 +339,10 @@ def test_a_failed_send_says_so_and_stays_open(page, rooms, tmp_path):
     assert log, "the modal never painted"
     last = log[-1]
     assert "show" in last["cls"], "the modal closed on a failure"
-    assert "failed" in last["steps"][-1]["cls"]
-    assert "no such file" in last["steps"][-1]["note"]
+    assert _labels(last) == ["① 上传到房间", "② 对方接收"]
+    # the failure belongs to the hop that failed: nothing ever went out
+    assert "failed" in last["steps"][0]["cls"]
+    assert "no such file" in last["steps"][0]["note"]
 
 
 def test_a_big_file_goes_through_from_either_role(browser, rooms, tmp_path):
@@ -307,14 +365,32 @@ def test_a_big_file_goes_through_from_either_role(browser, rooms, tmp_path):
                 "async ([host, p]) => { await Xfer.sendOne('发送文件给 ' + host, host, p); }",
                 [peer, str(big)],
             )
+            other = client if room is server else server
+            _answer_peer_card(other, "yes")
+            job_id = pg.evaluate("() => document.getElementById('xfer-overlay').dataset.job")
+            assert _wait(
+                lambda rid=room, jid=job_id: rid.webui_runtime().transfer_progress(jid)["state"]
+                == "done"
+            ), "the delivery never landed"
+            # the pump paints on its own tick: wait for the modal's own ending
+            # before reading what it shows
+            assert _wait(
+                lambda p=pg: not p.evaluate(
+                    "() => document.getElementById('xfer-overlay').classList.contains('show')"
+                )
+            ), f"the modal never closed: {_log(pg)}"
             last = _log(pg)[-1]
             assert "done" in last["steps"][-1]["cls"], last
             assert last["steps"][-1]["width"] == "100%"
-            job = room.webui_runtime().transfer_progress(last["job"])
-            assert job["state"] == "done", job
+            job = room.webui_runtime().transfer_progress(job_id)
             assert job["done"] == job["total"] == big.stat().st_size
+            landed = Path(job["saved"])
+            try:
+                assert landed.read_bytes() == big.read_bytes()  # byte for byte, all 4 MiB
+            finally:
+                landed.unlink(missing_ok=True)
 
-    # both sends staged the whole file on the hub, byte for byte (that the
-    # receiver then accepts and drops it is test_room's delivered-transfer case)
-    staged = sorted(Path(server.hub.transfers.root).glob("*__big.bin"))
-    assert [p.stat().st_size for p in staged] == [big.stat().st_size] * 2
+    # both sends staged the whole file on the hub, byte for byte — and both
+    # deliveries dropped their staged copy again (§48): nothing of a delivered
+    # transfer is left behind on the sender's disk
+    assert list(Path(server.hub.transfers.root).glob("*__big.bin")) == []

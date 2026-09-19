@@ -54,25 +54,15 @@ def current_path() -> Path:
     return _path or logs_dir() / f"fungi-{time.strftime('%Y%m%d')}.log"
 
 
-def _fallback_dir() -> Path:
-    """A folder that is writable even when the program's own is not.
+def _logs_folder() -> Path:
+    """`logs/` beside config.json, or the per-user folder when that is read-only.
 
-    Unpacking a release into Program Files (or any admin-owned place) makes the
-    exe's folder read-only; a log that cannot be written is the same as no log.
+    The fallback rule lives in config.writable_dir: the inbox depends on the very
+    same decision (§49), and two copies of it would drift.
     """
-    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    return Path(base) / "Fungi" / FOLDER
+    from .config import writable_dir  # noqa: PLC0415 (deferred: config imports us back)
 
-
-def _writable(folder: Path) -> bool:
-    try:
-        folder.mkdir(parents=True, exist_ok=True)
-        probe = folder / ".write-probe"
-        probe.touch()
-        probe.unlink()
-        return True
-    except OSError:
-        return False
+    return writable_dir(logs_dir(), FOLDER)
 
 
 def setup(path: Path | None = None, level: int = logging.INFO) -> Path:
@@ -86,10 +76,7 @@ def setup(path: Path | None = None, level: int = logging.INFO) -> Path:
     with _lock:
         if _path is not None and path is None:
             return _path
-        folder = path.parent if path is not None else logs_dir()
-        if path is None and not _writable(folder):
-            folder = _fallback_dir()
-            folder.mkdir(parents=True, exist_ok=True)
+        folder = path.parent if path is not None else _logs_folder()
         target = path or folder / f"fungi-{time.strftime('%Y%m%d')}.log"
         target.parent.mkdir(parents=True, exist_ok=True)
         handler = logging.FileHandler(target, encoding="utf-8")

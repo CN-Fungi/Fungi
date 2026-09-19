@@ -18,9 +18,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from fungi import runlog, session
+from fungi import landing, runlog, session
 from fungi.agent import SYSTEM_PROMPT, Agent, public_messages
-from fungi.config import PROJECT_ROOT, RESOURCE_ROOT, load_config, save_config
+from fungi.config import RESOURCE_ROOT, load_config, save_config
 from fungi.events import Sink
 from fungi.hub.app import safe_name
 from fungi.tools.ask import resolve_ask
@@ -94,8 +94,7 @@ _STATIC_ROUTES = frozenset(
 def _inbox_path(filename: str) -> Path:
     """Where an uploaded file lands (same dir the comm-clone transfer flow
     uses), sanitizing the name and numbering collisions."""
-    cfg = load_config()
-    inbox = Path(cfg.inbox_dir) if cfg.inbox_dir else PROJECT_ROOT / "inbox"
+    inbox = landing.inbox_root(load_config().inbox_dir)
     inbox.mkdir(parents=True, exist_ok=True)
     dest = inbox / safe_name(filename)
     stem, suffix = dest.stem, dest.suffix
@@ -834,7 +833,8 @@ class YesSirHandler(BaseHTTPRequestHandler):
     def _handle_upload(self) -> None:
         """Phone -> PC file upload: raw bytes, name in X-Fungi-Filename.
 
-        Lands in the configured inbox (default PROJECT_ROOT/inbox); the mobile
+        Lands in the configured inbox (default: inbox/ beside the program, or
+        the per-user folder when that is read-only); the mobile
         UI inserts the returned absolute path into the message box, so the
         agent reads it like any local file.
 

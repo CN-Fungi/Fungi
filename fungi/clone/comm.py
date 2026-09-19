@@ -69,6 +69,7 @@ def build_comm_clone(
     inbox_dir: Path | None = None,
     on_turn_end=None,
     on_direct=None,
+    on_delivery=None,
 ) -> Clone:
     addr = f"{host}:comm-{peer}"
     pending = PendingAsks()
@@ -118,6 +119,7 @@ def build_comm_clone(
         subagents=False,  # a courier relays; it does not fan out (2026-09-10)
         on_turn_end=on_turn_end,
         on_direct=on_direct,
+        on_delivery=on_delivery,
         # No native base tools: file work only via the guarded fs tools; the
         # spawned workers inherit exactly that surface (spec 6.1).
         tool_names=frozenset(),

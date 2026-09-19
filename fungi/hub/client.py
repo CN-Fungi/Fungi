@@ -9,6 +9,7 @@ import urllib.request
 from pathlib import Path
 
 from .. import runlog
+from ..landing import atomic_landing
 from ..protocol import Envelope, ProtocolError, deserialize
 
 POLL_CAP = 25.0
@@ -178,15 +179,23 @@ class HubClient:
         )
 
     def download_transfer(self, transfer_id: str, dest) -> None:
-        """Stream a staged transfer to a local file path."""
+        """Stream a staged transfer to a local file path.
+
+        Lands atomically: the bytes go to `<dest>.part` and the hub's announced
+        length is checked before the rename, so a delivery that dies mid-stream
+        leaves nothing behind (§49).
+        """
         url = f"{self.base}/api/transfer?id={transfer_id}&host={self.host}&token={self.token}"
         req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=120) as resp, Path(dest).open("wb") as fh:
-            while True:
-                chunk = resp.read(64 * 1024)
-                if not chunk:
-                    break
-                fh.write(chunk)
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            announced = (resp.headers.get("Content-Length") or "").strip()
+            expect = int(announced) if announced.isdigit() else None
+            with atomic_landing(Path(dest), expect) as fh:
+                while True:
+                    chunk = resp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
 
     def discard_transfer(self, transfer_id: str) -> dict:
         """Receiver-side: drop the hub's staged copy after a delivery."""

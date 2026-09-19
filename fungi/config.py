@@ -17,6 +17,41 @@ CONFIG_PATH = PROJECT_ROOT / "config.json"
 # Bundled read-only resources (web/); PyInstaller unpacks them to _MEIPASS.
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", PROJECT_ROOT))
 
+
+def _writable(folder: Path) -> bool:
+    """Can this user actually create a file in `folder`?
+
+    A probe file, not `os.access`: on Windows os.access answers about the
+    read-only attribute and knows nothing about ACLs, so a Program Files
+    folder looks writable and then raises WinError 5 on the first write.
+    """
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        probe = folder / ".write-probe"
+        probe.touch()
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def writable_dir(preferred: Path, name: str) -> Path:
+    """`preferred` when this user can write there, else %LOCALAPPDATA%\\Fungi\\<name>.
+
+    Unpacking a release into Program Files (or any admin-owned place) makes the
+    program's own folder read-only. Everything that writes beside the exe needs
+    somewhere to go instead — the log directory has fallen back this way since
+    §45, and the file inbox needs the same rule or every incoming transfer dies
+    on the receiver's disk (§49).
+    """
+    if _writable(preferred):
+        return preferred
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    fallback = Path(base) / "Fungi" / name
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
+
+
 DEFAULT_API_KEY = "sk-your-key-here"
 DEFAULT_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 DEFAULT_MODEL = "deepseek-v4-pro"

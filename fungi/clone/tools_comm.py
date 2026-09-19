@@ -10,8 +10,8 @@ host's user consents before anything touches their local disk.
 import contextlib
 from pathlib import Path
 
+from .. import landing
 from ..agent import BoundTool
-from ..config import PROJECT_ROOT
 from ..hub.app import safe_name
 from ..pending import PendingAsks
 from ..protocol import Envelope, parse_addr, valid_host_name
@@ -32,7 +32,9 @@ class CommTools:
         self.transport = transport
         self.pending = pending
         self.ask_timeout_s = ask_timeout_s
-        self.inbox_dir = Path(inbox_dir) if inbox_dir else PROJECT_ROOT / "inbox"
+        # Landing dir for received files: the configured one, else the program's
+        # own inbox, else the per-user folder when that cannot be written (§49).
+        self.inbox_dir = Path(inbox_dir) if inbox_dir else landing.inbox_root()
         self.consent_id: str | None = None  # last granted consent (envelope id)
 
     # ── helpers ──
