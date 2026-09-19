@@ -11,8 +11,10 @@ green.
 """
 
 import contextlib
+import json
 import time
 import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -479,6 +481,25 @@ def test_the_phone_sees_a_file_the_computer_dropped(mobile_page, rooms, tmp_path
         "the transfer session is not the first thing in the list"
     )
 
+    # 样式契约（§56）：通道 vs 选中的聊天 —— 左边条是「你在这」的语言，通道用描边+图标。
+    # 这条在移动端真的坏过：`.session-row.active` 在那个文件里写在后面，同特异度把它盖回
+    # 了 chat 的底色 + 左边条，桌面（顺序相反）却是对的 —— 所以两个 shell 都要断言。
+    def _look(selector: str) -> dict:
+        return mobile_page.evaluate(
+            """(sel) => {
+              const r = document.querySelector(sel);
+              const cs = getComputedStyle(r);
+              const bar = getComputedStyle(r, '::before');
+              return { bg: cs.backgroundColor, border: cs.borderTopColor,
+                       bar: bar.content === 'none' ? 'none' : bar.backgroundColor };
+            }""",
+            selector,
+        )
+
+    shuttle_look = _look(".session-row.shuttle")
+    assert shuttle_look["bar"] == "none", shuttle_look
+    assert shuttle_look["bg"] == "rgb(245, 246, 252)", shuttle_look  # 中性底，不是 accent 混色
+
     # 界面上先说清楚它是什么（§54）：带图标的独立样式，且没有改名/删除两个按钮
     row_state = mobile_page.evaluate(
         """() => {
@@ -530,6 +551,67 @@ def test_the_phone_sees_a_file_the_computer_dropped(mobile_page, rooms, tmp_path
         in mobile_page.evaluate("() => document.getElementById('messages').textContent"),
         timeout_s=12,
     ), "the upload never showed up in the session"
+
+
+def test_a_sent_path_arrives_as_a_card_that_pulls(mobile_page, rooms, tmp_path):
+    """§56: the computer hands the phone a file by sending its path, and what the
+    phone gets is a card — name, size, where it is, and the button that fetches
+    it. No hunting for a link in a paragraph."""
+    server, _client = rooms
+    payload = b"card-bytes" * 4096  # 40 KiB: one window, a fast pull
+    src = tmp_path / "handover.bin"
+    src.write_bytes(payload)
+
+    # the computer side, exactly as the desktop page does it: a message in the
+    # transfer session that names a file
+    body = json.dumps({"sessionId": "file-transfer", "message": f"给手机 {src}"}).encode()
+    req = urllib.request.Request(
+        server.open_webui(False) + "/chat?t=" + WEBUI_TOKEN,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        assert b'"done"' in resp.read(), "the transfer session ran something other than a row"
+
+    mobile_page.evaluate("async () => { await loadSessions(); }")
+    shuttle_id = mobile_page.evaluate("() => allSessions.find(s => s.shuttle).id")
+    mobile_page.evaluate("(id) => switchSession(id)", shuttle_id)
+
+    # The room (and so this session) is shared across the module: earlier tests
+    # have already put cards here, so find OUR card by name instead of taking the
+    # first one (this is the same trap §55.5 records for the row counts).
+    def _card(name: str) -> dict:
+        return mobile_page.evaluate(
+            """(want) => {
+              const cards = Array.from(document.querySelectorAll('#messages .file-card'));
+              const c = cards.find(el => el.querySelector('.fc-name').textContent === want);
+              if (!c) return null;
+              return {
+                name: c.querySelector('.fc-name').textContent,
+                size: c.querySelector('.fc-size').textContent,
+                where: c.querySelector('.fc-where').textContent,
+                path: c.querySelector('.fc-path').textContent,
+                pull: !!c.querySelector('.fc-pull'),
+                links: c.querySelectorAll('.file-link').length,
+              };
+            }""",
+            name,
+        )
+
+    assert _wait(lambda: _card("handover.bin") is not None, timeout_s=12), "the card never arrived"
+    card = _card("handover.bin")
+    assert card["name"] == "handover.bin" and card["size"] == "40.0 KB", card
+    assert card["where"] == "电脑发送" and card["path"] == str(src), card
+    assert card["pull"] is True, card
+    assert card["links"] == 0, "the path inside the card must not also be a link"
+
+    with mobile_page.expect_download(timeout=30000) as caught:
+        mobile_page.click("#messages .file-card:has-text('handover.bin') .fc-pull")
+    saved = tmp_path / "pulled.bin"
+    caught.value.save_as(str(saved))
+    assert saved.read_bytes() == payload, "the card's button did not fetch the file"
+    assert caught.value.suggested_filename == "handover.bin"
 
 
 def test_the_transfer_session_only_appends_what_is_new(mobile_page, rooms):

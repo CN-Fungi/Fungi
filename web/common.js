@@ -1151,7 +1151,7 @@
     while (walker.nextNode()) texts.push(walker.currentNode);
     for (const node of texts) {
       const parent = node.parentNode;
-      if (!parent || (parent.closest && parent.closest('a'))) continue;
+      if (!parent || (parent.closest && parent.closest('a, .file-card'))) continue;
       const text = node.nodeValue || '';
       const frag = document.createDocumentFragment();
       let at = 0;
@@ -1175,6 +1175,43 @@
     }
   }
 
+  /* ---------- transfer card (§56) ----------
+     One row of the file-transfer session, as a card: what was sent, how big,
+     which side sent it, and where it is. A phone that can pull files gets the
+     action right here — the path is not something to hunt for in a paragraph. */
+  function humanBytes(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+    return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+  }
+
+  function buildFileCard(file, opts) {
+    const d = document.createElement('div');
+    d.className = 'msg file-card';
+    const who = file.direction === 'phone' ? '手机上传' : '电脑发送';
+    d.innerHTML =
+      '<div class="fc-head"><span class="fc-icon">&#x1F4C1;</span>'
+      + '<span class="fc-name">' + escapeHtml(file.name || '文件') + '</span>'
+      + '<span class="fc-size">' + humanBytes(file.size) + '</span></div>'
+      + '<div class="fc-where">' + who + '</div>'
+      + '<div class="fc-path"></div>';
+    d.querySelector('.fc-path').textContent = file.path || '';
+    if (opts && opts.canPull && file.path) {
+      const btn = document.createElement('button');
+      btn.className = 'fc-pull';
+      btn.textContent = '下载到手机';
+      btn.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        opts.canPull(file.path);
+      });
+      d.appendChild(btn);
+    }
+    return d;
+  }
+
   function renderTranscript(p, messages, asks, opts) {
     const side = opts.side || {};
     const userSide = side.user || '';
@@ -1189,6 +1226,11 @@
     });
     for (const m of messages || []) {
       if (m.role === 'user') {
+        if (m.file) {
+          // A transfer (§53/§56): the card IS the row.
+          p.append(markTs(buildFileCard(m.file, { canPull: opts.fileLink }), m.ts));
+          continue;
+        }
         const c = String(m.content || '');
         const echo = opts.friend ? humanEcho(c) : null; // only the friend thread merges mail
         if (echo) {
@@ -1333,6 +1375,7 @@
     buildToolCard, fillToolResult, attachSpawnClick,
     initAsks, initPendingAsks, initMailUnread,
     initPane, stripSilent, humanEcho,
-    markTs, insertByTs, askTextOfCall, linkifyPaths, renderTranscript, renderLiveEvents, whenLabel,
+    markTs, insertByTs, askTextOfCall, linkifyPaths, buildFileCard, humanBytes,
+    renderTranscript, renderLiveEvents, whenLabel,
   };
 })();

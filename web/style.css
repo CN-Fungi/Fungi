@@ -30,14 +30,28 @@ html,body{font-family:var(--font);font-size:var(--fs-md);line-height:1.6;color:v
 .session-row-act{background:none;border:none;color:var(--dim);cursor:pointer;font-size:12px;padding:3px 5px;border-radius:4px;opacity:0;transition:opacity var(--t-fast),background var(--t-fast),color var(--t-fast)}
 .session-row:hover .session-row-act,.session-row.active .session-row-act{opacity:1}
 .session-row-act:hover{color:var(--text);background:rgba(0,0,0,0.04)}
-/* 文件传输助手（§53/§54）：两台设备之间的搬运通道，不是聊天会话 —— 常驻置顶、
-   有图标、底色与左边条常显（不靠 hover），并且没有改名/删除按钮可点。 */
-.session-row.shuttle{background:color-mix(in srgb,var(--accent) 7%,transparent);color:var(--text)}
-.session-row.shuttle::before{content:"";position:absolute;left:0;top:18%;bottom:18%;width:3px;border-radius:2px;background:var(--accent);opacity:.5}
-.session-row.shuttle.active::before{opacity:1}
+/* 文件传输助手（§53/§54/§56）：用「描边 + 图标」这套语言，**左边条留给「当前会话」**
+   —— 之前两者都是 accent 底色 + 左边条，撞衫了分不出「这是通道」还是「你现在在这」。
+   现在：聊天会话选中 = 左边条；通道 = 描边盒子 + 图标；通道被选中时描边加重 + 一圈光晕。 */
+/* 这三条带上 `.active` 是为了**不靠顺序**：两个 shell 的 `.session-row.active`
+   规则有的在本文件后面，同特异度时后写的赢 —— 光写 `.session-row.shuttle` 会让
+   「选中的通道」在移动端又变回 chat 的底色 + 左边条（桌面上是对的，靠的就是顺序）。 */
+.session-row.shuttle,.session-row.shuttle.active{border:1px solid var(--border);background:var(--surface2);color:var(--text)}
+.session-row.shuttle::before,.session-row.shuttle.active::before{content:none}
+.session-row.shuttle.active{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-glow)}
 .session-row.shuttle .session-row-title{font-weight:600}
-.session-row.shuttle .session-row-meta{font-size:11px;letter-spacing:.02em;color:var(--accent)}
+.session-row.shuttle .session-row-meta{font-size:11px;letter-spacing:.02em}
 .session-row-icon{font-size:13px;line-height:1;color:var(--accent)}
+/* 传输卡片（§56）：一次传输一张卡 —— 名字、大小、方向、路径（+ 手机端的下载按钮） */
+.file-card{border:1px solid var(--tool-border);background:var(--tool-bg);border-radius:var(--radius-sm);padding:10px 12px;max-width:520px}
+.fc-head{display:flex;align-items:center;gap:8px}
+.fc-icon{font-size:15px;line-height:1}
+.fc-name{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fc-size{color:var(--text2);font-size:12px;white-space:nowrap}
+.fc-where{color:var(--dim);font-size:11px;margin-top:3px}
+.fc-path{font-family:var(--mono);font-size:11px;color:var(--text2);word-break:break-all;margin-top:6px;user-select:text}
+.fc-pull{margin-top:9px;border:none;border-radius:var(--radius-xs);padding:6px 14px;cursor:pointer;background:var(--accent);color:var(--on-accent);font-size:12px}
+.fc-pull:hover{background:var(--accent-hover)}
 .session-row-act.del:hover{color:#ef4444;background:rgba(239,68,68,0.08)}
 .session-row input.rename-input{flex:1;background:var(--bg);border:1px solid var(--accent);border-radius:var(--radius-xs);color:var(--text);font-family:var(--font);font-size:12px;padding:4px 10px;outline:none;min-width:0}
 #session-list-empty{padding:44px 16px;text-align:center;color:var(--dim);font-size:var(--fs-sm);line-height:1.9}

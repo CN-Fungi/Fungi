@@ -115,6 +115,36 @@ def test_a_phone_upload_writes_its_own_row(shuttle_env):
     assert rows[0]["content"].count("\n") == 1, "the path belongs on its own line"
 
 
+def test_a_phone_upload_row_carries_its_card(shuttle_env):
+    """§56: the row is a record, not prose — the page renders a card from these
+    fields, so nothing has to be parsed out of a sentence."""
+    base, inbox = shuttle_env
+    _upload(base, "拾荒集.zip", b"zipzip")
+    card = _rows(base)[0]["file"]
+    assert card == {
+        "name": "拾荒集.zip",
+        "size": 6,
+        "path": str(inbox / "拾荒集.zip"),
+        "direction": "phone",
+    }
+
+
+def test_a_message_naming_a_real_file_becomes_a_card(shuttle_env, tmp_path):
+    """The computer's side of §53: send a path, and the phone gets a card it can
+    act on. A path that is not a file stays a plain message — that is a typo,
+    not a transfer."""
+    base, _inbox = shuttle_env
+    src = tmp_path / "handover.bin"
+    src.write_bytes(b"x" * 2048)
+    _send(base, f"给手机 {src} 收")
+    card = _rows(base)[0]["file"]
+    assert (card["name"], card["size"], card["direction"]) == ("handover.bin", 2048, "computer")
+    assert card["path"] == str(src)
+
+    _send(base, r"C:\nope\missing.bin")
+    assert "file" not in _rows(base)[1]
+
+
 def test_a_phone_upload_that_never_landed_writes_nothing(shuttle_env):
     """Half an upload is not a transfer: no row while the file is not whole."""
     base, _inbox = shuttle_env

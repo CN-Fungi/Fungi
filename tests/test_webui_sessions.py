@@ -92,6 +92,16 @@ def test_the_transfer_session_stands_apart_and_cannot_be_touched(page):
     assert row.locator(".session-row-act").count() == 0, "rename/delete must not be offered"
     assert row.locator(".session-row-meta").text_content().startswith("只搬文件")
 
+    look = page.evaluate(
+        """() => {
+          const row = document.querySelector('.session-row.shuttle');
+          const cs = getComputedStyle(row);
+          const bar = getComputedStyle(row, '::before');
+          return { bg: cs.backgroundColor, bar: bar.content === 'none' ? 'none' : bar.backgroundColor };
+        }"""
+    )
+    assert look == {"bg": "rgb(245, 246, 252)", "bar": "none"}, look
+
     refused = page.evaluate(
         """async () => {
           const del = await fetch('/session?id=file-transfer', { method: 'DELETE' });

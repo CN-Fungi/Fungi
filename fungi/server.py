@@ -9,6 +9,7 @@ card answers back out as answer envelopes.
 
 import contextlib
 import json
+import re
 import secrets
 import socket
 import sys
@@ -161,12 +162,19 @@ def shuttle_ensure(runtime) -> None:
         runtime.sessions_save(SHUTTLE_ID, SHUTTLE_TITLE, [])
 
 
-def shuttle_post(runtime, text: str) -> None:
-    """Append one transfer to the shuttle; both directions land here (§53)."""
+def shuttle_post(runtime, text: str, file: dict | None = None) -> None:
+    """Append one transfer to the shuttle; both directions land here (§53).
+
+    `file` is what turns the row into a card (§56): the name, the size, where it
+    is and which side sent it. Without it the row is just a message.
+    """
     with _session_lock(SHUTTLE_ID):
         stored = runtime.sessions_load(SHUTTLE_ID) or {}
         messages = list(stored.get("messages") or [])
-        messages.append({"role": "user", "content": text, "ts": time.time()})
+        row: dict = {"role": "user", "content": text, "ts": time.time()}
+        if file:
+            row["file"] = file
+        messages.append(row)
         runtime.sessions_save(
             SHUTTLE_ID,
             SHUTTLE_TITLE,
@@ -177,8 +185,36 @@ def shuttle_post(runtime, text: str) -> None:
 
 
 def _shuttle_row(who: str, landed: dict) -> str:
-    """What a landed transfer looks like in the session: what, how big, where."""
+    """What a landed transfer says in the session, in words (the card carries it
+    as fields too — §56; the text stays for logs and for anything that reads the
+    transcript without the web UI)."""
     return f"{who}：{landed['name']}（{human_size(landed['size'])}）\n{landed['path']}"
+
+
+FILE_PATH_RE = re.compile(
+    r"[A-Za-z]:[\\/][^\s\"'<>|*?\u3002\uff0c\uff09\uff1f\uff01\u3011\u3015\uff1b\uff1a]+"
+)
+TRAILING_CHARS = "\\.,;:\uff09)]"
+
+
+def file_in(text: str, direction: str) -> dict | None:
+    """The transfer a message carries, if it carries one.
+
+    The computer hands the phone a file by *sending its path* (§53) — but a row
+    that names a file the machine can actually open is a transfer, and it should
+    look like one. Anything else stays a plain message: a path that is not
+    there is not a card, it is a typo.
+    """
+    for match in FILE_PATH_RE.finditer(text or ""):
+        candidate = Path(match.group(0).rstrip(TRAILING_CHARS))
+        if candidate.is_file():
+            return {
+                "name": candidate.name,
+                "size": candidate.stat().st_size,
+                "path": str(candidate),
+                "direction": direction,
+            }
+    return None
 
 
 class UploadParts:
@@ -873,8 +909,9 @@ class YesSirHandler(BaseHTTPRequestHandler):
         self.close_connection = True
         sink = WebSink(self, SHUTTLE_ID)
         try:
-            if text.strip():
-                shuttle_post(self.runtime, text.strip())
+            message = text.strip()
+            if message:
+                shuttle_post(self.runtime, message, file_in(message, "computer"))
             sink.emit("sessionId", SHUTTLE_ID)
         except Exception as exc:
             sink.emit("error", str(exc))
@@ -1183,7 +1220,16 @@ class YesSirHandler(BaseHTTPRequestHandler):
         must not turn a successful upload into a failure (§53).
         """
         try:
-            shuttle_post(self.runtime, _shuttle_row("手机上传", landed))
+            shuttle_post(
+                self.runtime,
+                _shuttle_row("手机上传", landed),
+                file={
+                    "name": landed["name"],
+                    "size": landed["size"],
+                    "path": landed["path"],
+                    "direction": "phone",
+                },
+            )
         except Exception as exc:
             runlog.warn_once("shuttle-post", "could not write the transfer session: %s", exc)
 
