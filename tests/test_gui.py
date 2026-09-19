@@ -756,6 +756,24 @@ def test_join_page_webui_button_lifecycle(window, monkeypatch):
     assert not page.webui_row.isVisibleTo(page)
 
 
+def _settle(predicate, timeout_s: float = 5.0) -> bool:
+    """Pump the Qt event loop until `predicate()` holds.
+
+    Worker threads answer on a signal, so a *fixed number* of processEvents()
+    calls can run out before the thread is even scheduled — that is how the scan
+    tests flaked while the suite was busy (2026-09-19, seen once in a full run
+    and green in isolation twice). Wall-clock deadline instead.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        QApplication.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    QApplication.processEvents()
+    return bool(predicate())
+
+
 def test_join_page_reports_scan_miss(window, monkeypatch):
     monkeypatch.setattr(gui.net, "discover_room", lambda *_a, **_k: None)
     monkeypatch.setattr(gui.net, "start_client_room", lambda *_: pytest.fail("must not join"))
@@ -764,10 +782,7 @@ def test_join_page_reports_scan_miss(window, monkeypatch):
     page.token_edit.setText("tok")  # empty IP: full subnet discovery
     page.name_edit.setText("pc-alpha")
     page._join()
-    for _ in range(200):
-        QApplication.processEvents()
-        if page.join_btn.isEnabled():
-            break
+    assert _settle(lambda: page.join_btn.isEnabled()), "the scan never came back"
     assert page.room is None
     assert page.ip_edit.text() == ""  # nothing discovered, nothing filled
     assert "没有找到" in page.status.text()
@@ -778,10 +793,7 @@ def test_join_page_refresh_fills_ip(window, monkeypatch):
     monkeypatch.setattr(gui.net, "discover_room", lambda *_a, **_k: ("10.0.0.9", gui.GUI_PORT))
     page.token_edit.setText("tok")
     page._refresh_ip()
-    for _ in range(200):
-        QApplication.processEvents()
-        if page.ip_edit.text() == "10.0.0.9":
-            break
+    assert _settle(lambda: page.ip_edit.text() == "10.0.0.9"), "the refresh never filled the IP"
     assert page.ip_edit.text() == "10.0.0.9"
     assert page.ip_refresh_btn.isEnabled()
 
