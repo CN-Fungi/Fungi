@@ -2562,3 +2562,61 @@ file_in() → None      ← 没有 file 字段，页面就照字段画成一条�
 - **已经存在的那一行不会自己变成卡片**：`file` 是写入那一刻算的，老行补不回来。
   要么重新发一次（反正那一次也没真传过去），要么在读取时对没有 `file` 的行补判一次 ——
   后者等于让卡片依赖「此刻文件还在不在」，与 §56「行是记录」的语义有出入，**留给用户定**。
+
+## 59. 卡片该站在哪一边（2026-09-19 用户裁决）：自己在右、对方在左，手机端也别再回填路径
+
+**用户的两句话**：先是 §57 那一轮「移动和电脑端都靠右 —— 不应该是自己在左边吗」，
+然后本轮「你这不对啊，怎么还是统一靠左？」，外加「移动端发送完文件后不用自动填入路径（因为文件已经上传了）」。
+
+两句合起来读才清楚：他不接受**一律同侧**。§57 只把卡片从「被 `.msg` 拉满、贴右边」修成 `align-self:flex-start`，
+于是自己的卡和对方的卡都靠左 —— 换了一种糊法。**要的是分侧，不是换边。**
+
+### 59.1 判据：卡片站在「发它那台设备」那边，每个 shell 各算各的自己
+
+行里本来就有 `file.direction`（§56：`computer` / `phone`），缺的只是**这个 shell 是谁**：
+
+- 桌面页（`app.js` 的 `renderOpts`）→ `my: 'computer'`；
+- 手机页（`m.js` 的 `renderOpts`）→ `my: 'phone'`。
+
+`common.js::buildFileCard` 据此给卡片加 `fc-mine` / `fc-peer`（不猜方向、也不按 shell 写死）：
+
+| 看的人 | 电脑发送的卡 | 手机上传的卡 |
+|---|---|---|
+| 电脑（桌面页） | **右**（自己） | 左（对方） |
+| 手机（手机页） | 左（对方） | **右**（自己） |
+
+CSS 只加两条（`style.css` / `m.css`）：`.msg.file-card.fc-mine{align-self:flex-end}` ·
+`.msg.file-card.fc-peer{align-self:flex-start}` —— 三个类，稳赢 `.msg` / `.msg.file-card`，
+不靠「谁写在后面」（§57 那个坑的规矩）。自己那张卡的时间戳一起挪到右下
+（`.msg.file-card.fc-mine[data-when]::after`，与 `.msg.user` 同一套语言）。
+没传 `my` 的 shell 保持原样（基数规则仍是 `flex-start`）。
+
+### 59.2 手机上传完不再回填路径
+
+§51 当初是「上传完把落点路径塞进输入框，发给 agent 让它读那个文件」。用户现在点名不要：
+**文件已经在电脑上了**，塞一条路径只是噪音 —— 那条路径卡片自己写着（`fc-path`）。
+于是 `m.js` 去掉 `input.value = …` 与随之的 `autoGrow()`。
+桌面端「📎 选文件 → 发送」两步**没动**：它填输入框是流程本身，不是回填。
+
+### 59.3 验收
+
+- 修前先复现（`git stash` 掉 `web/` 再跑，三条都红）：
+  - `test_webui_sessions.py::test_the_desktop_sides_the_cards_and_stops_saying_thinking`：
+    自己那张卡修前是 `flex-start`（应为 `flex-end` 且贴右边缘 < 40px）；同一页再来一行 `direction: phone`
+    （服务端 `shuttle_post` 写的就是手机上传那一行），断言它 `flex-start` 且贴左 ——
+    **两边不一样，这才是他报的那件事**。§57 的两条断言保留（`max-width:520px`、`1px` 边框）：
+    它们证明规则真的生效，而不是被 `.msg` 盖掉。
+  - `test_webui_transfer.py::test_the_phone_sees_a_file_the_computer_dropped`：手机页上自己上传的卡修前 `flex-start`。
+  - `test_webui_transfer.py::test_mobile_upload_cuts_a_big_file_into_windows`：修前输入框里躺着落点路径
+    （`…\inbox\big.bin`）；现在先等传输面板自己关掉（`#xfer-overlay` 去掉 `show`，`finish()` 后 900 ms）
+    再断言输入框是空的 —— 「还没有回填」和「永远不会回填」是两件事，所以要等流程真的走完。
+- 用例里等的是**自己那一行**（按文件名找卡），不是「有一张卡」：这几个浏览器模块共用一个页面，
+  上一个用例的行还在屏上（同一个坑 §56 已踩过一次）。等「手机上传」这四个字更是假的，卡片本来就是这四个字。
+- 门禁：`python -m ruff check .` 干净 · `python -m ruff format --check fungi tests` 干净 ·
+  `PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **698 passed**（与 §58 同数：此刻没有新增用例，改的是既有的三条）。
+
+### 59.4 没做 / 待定
+
+- **不带文件的普通消息行仍然一律靠右**：传输助手里那些行都是 `role: "user"`，行里**没有**「谁发的」这个信息
+  （只有带文件的行走 `file.direction`），文字行要分侧就得在服务端多存一个字段。等他真的在意再说。
+- 卡片在**好友视图**里不会出现（那边走 comm 消息，不读 `file`），所以 `my` 只作用于会话视图。

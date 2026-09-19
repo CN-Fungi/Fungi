@@ -42,8 +42,12 @@ html,body{font-family:var(--font);font-size:var(--fs-md);line-height:1.6;color:v
 .session-row.shuttle .session-row-title{font-weight:600}
 .session-row.shuttle .session-row-meta{font-size:11px;letter-spacing:.02em}
 .session-row-icon{font-size:13px;line-height:1;color:var(--accent)}
-/* 传输卡片（§56）：一次传输一张卡 —— 名字、大小、方向、路径（+ 手机端的下载按钮） */
+/* 传输卡片（§56）：一次传输一张卡 —— 名字、大小、方向、路径（+ 手机端的下载按钮）。
+   卡片站在「发它的那台设备」那边（§59）：自己发的靠右、对方发来的靠左 —— 桌面页是电脑，
+   手机页是手机，所以同一行在两个 shell 里各是各的「自己」。 */
 .msg.file-card{align-self:flex-start;border:1px solid var(--tool-border);background:var(--tool-bg);border-radius:var(--radius-sm);padding:10px 12px;max-width:520px}
+.msg.file-card.fc-peer{align-self:flex-start}
+.msg.file-card.fc-mine{align-self:flex-end}
 .msg.file-card .fc-head{display:flex;align-items:center;gap:8px}
 .msg.file-card .fc-icon{font-size:15px;line-height:1}
 .msg.file-card .fc-name{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -261,6 +265,7 @@ html,body{font-family:var(--font);font-size:var(--fs-md);line-height:1.6;color:v
 .msg.user[data-when]::after{left:auto;right:0}
 .msg.friend-peer[data-when]::after{left:0;right:auto}
 .msg.friend-mine[data-when]::after{left:auto;right:0}
+.msg.file-card.fc-mine[data-when]::after{left:auto;right:0}  /* 自己那张卡的时间也在右下（§59） */
 /* 我方的思考/工具卡跟着我方走（2026-09-10 用户报告：话说在右边，思考还贴左边） */
 .msg.reasoning.friend-mine,.msg.tool.friend-mine,.msg.error.friend-mine{align-self:flex-end}
 

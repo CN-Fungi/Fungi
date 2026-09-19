@@ -1221,9 +1221,15 @@
     return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
   }
 
+  /* Which side a card sits on is the *shell's* question, not the row's (§59): the
+     desktop page is the computer, the phone page is the phone — so the same row
+     is "mine" on one shell and "the other device's" on the other. */
   function buildFileCard(file, opts) {
     const d = document.createElement('div');
     d.className = 'msg file-card';
+    if (opts && opts.my && file.direction) {
+      d.classList.add(file.direction === opts.my ? 'fc-mine' : 'fc-peer');
+    }
     const who = file.direction === 'phone' ? '手机上传' : '电脑发送';
     d.innerHTML =
       '<div class="fc-head"><span class="fc-icon">&#x1F4C1;</span>'
@@ -1262,7 +1268,7 @@
       if (m.role === 'user') {
         if (m.file) {
           // A transfer (§53/§56): the card IS the row.
-          p.append(markTs(buildFileCard(m.file, { canPull: opts.fileLink }), m.ts));
+          p.append(markTs(buildFileCard(m.file, { canPull: opts.fileLink, my: opts.my }), m.ts));
           continue;
         }
         const c = String(m.content || '');

@@ -396,9 +396,17 @@ def test_mobile_upload_cuts_a_big_file_into_windows(mobile_page, rooms, tmp_path
     assert sorted(lo for lo, _size in covered)[0] == 0
     assert {lo for lo, _size in covered} == {i * 4 * 1024 * 1024 for i in range(len(covered))}
 
-    # the path the page got back is the one it puts in the message box
+    # §59: the file is already on the computer, so nothing is dropped into the
+    # message box — there is nothing left to send back. Wait for the flow itself
+    # to be over (its sheet closes 900 ms after the last hop), then read the box.
     assert _wait(
-        lambda: str(landed) in mobile_page.evaluate("() => document.getElementById('input').value")
+        lambda: mobile_page.evaluate(
+            "() => !document.getElementById('xfer-overlay').classList.contains('show')"
+        ),
+        timeout_s=15,
+    ), "the upload sheet never closed"
+    assert mobile_page.evaluate("() => document.getElementById('input').value") == "", (
+        "the landing path was written into the message box"
     )
     landed.unlink(missing_ok=True)
 
@@ -567,11 +575,26 @@ def test_the_phone_sees_a_file_the_computer_dropped(mobile_page, rooms, tmp_path
     assert _wait(lambda: (inbox / "from-phone.bin").exists(), timeout_s=30), (
         "the upload never landed"
     )
+    # the rows above are from other tests in this module: wait for *this* one by
+    # name, never for "a card" or for the word 手机上传 (§56's trap, third time).
     assert _wait(
-        lambda: "手机上传"
-        in mobile_page.evaluate("() => document.getElementById('messages').textContent"),
+        lambda: mobile_page.evaluate(
+            "() => Array.from(document.querySelectorAll('#messages .file-card'))"
+            ".some(c => c.querySelector('.fc-name').textContent === 'from-phone.bin')"
+        ),
         timeout_s=12,
     ), "the upload never showed up in the session"
+
+    # §59: the file the phone itself sent sits on the right, and the flow that
+    # put it there leaves the message box alone (the file is already on the PC).
+    own = mobile_page.evaluate(
+        """() => {
+          const c = Array.from(document.querySelectorAll('#messages .file-card'))
+            .find(el => el.querySelector('.fc-name').textContent === 'from-phone.bin');
+          return c ? getComputedStyle(c).alignSelf : null;
+        }"""
+    )
+    assert own == "flex-end", own
 
 
 def test_a_sent_path_arrives_as_a_card_that_pulls(mobile_page, rooms, tmp_path):
@@ -629,6 +652,7 @@ def test_a_sent_path_arrives_as_a_card_that_pulls(mobile_page, rooms, tmp_path):
 
     # §57: the layout rule has to be *in effect*, not merely written — the card
     # used to stretch to the right edge because `.msg` was defined after it.
+    # §59: this one is the *computer's* file seen from the phone, so it sits left.
     layout = mobile_page.evaluate(
         """() => {
           const cards = Array.from(document.querySelectorAll('#messages .file-card'));

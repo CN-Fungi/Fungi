@@ -16,6 +16,7 @@ import urllib.request
 
 import pytest
 
+from fungi import server as webui_server
 from fungi.config import Config
 from fungi.events import NullSink
 from fungi.llm import LLMResult
@@ -92,12 +93,12 @@ def _titles(page) -> list:
     return page.evaluate("() => allSessions.map(s => s.title)")
 
 
-def test_the_desktop_shows_the_card_left_and_stops_saying_thinking(page, room, tmp_path):
-    """§57, both from the user's report on the desktop shell:
-    the card stretched to the right edge (`.msg` is defined after my rule, so
-    `max-width`/`align-self` never applied), and the progress line stayed on
-    "Thinking..." forever — no model runs in the transfer session, so nothing
-    else ever cleared it."""
+def test_the_desktop_sides_the_cards_and_stops_saying_thinking(page, room, tmp_path):
+    """§57 + §59, both from the user's reports on the desktop shell: the card
+    stretched to the right edge (`.msg` is defined after my rule, so
+    `max-width`/`align-self` never applied) — and once that was pinned, every
+    card sat on the same side. A card belongs to the device it came from: the
+    computer's on the right, the phone's on the left."""
     payload = b"desktop-card" * 256
     src = tmp_path / "from-pc.bin"
     src.write_bytes(payload)
@@ -113,21 +114,55 @@ def test_the_desktop_shows_the_card_left_and_stops_saying_thinking(page, room, t
 
     page.evaluate("async () => { await loadSessions(); }")
     page.evaluate("() => switchSession(allSessions.find(s => s.shuttle).id)")
-    page.wait_for_selector("#messages .file-card", timeout=10000)
-    look = page.evaluate(
-        """() => {
-          const cards = Array.from(document.querySelectorAll('#messages .file-card'));
-          const c = cards.find(el => el.querySelector('.fc-name').textContent === 'from-pc.bin');
-          const cs = getComputedStyle(c);
-          const pane = document.getElementById('messages').getBoundingClientRect();
-          return { align: cs.alignSelf, maxWidth: cs.maxWidth, border: cs.borderTopWidth,
-                   gapFromPaneLeft: Math.round(c.getBoundingClientRect().left - pane.left) };
-        }"""
+    assert _wait(
+        lambda: page.evaluate(
+            "() => Array.from(document.querySelectorAll('#messages .file-card'))"
+            ".some(c => c.querySelector('.fc-name').textContent === 'from-pc.bin')"
+        ),
+        timeout_s=12,
+    ), "the computer's own row never showed up"
+
+    def _look(name: str) -> dict:
+        return page.evaluate(
+            """(name) => {
+              const cards = Array.from(document.querySelectorAll('#messages .file-card'));
+              const c = cards.find(el => el.querySelector('.fc-name').textContent === name);
+              const cs = getComputedStyle(c);
+              const pane = document.getElementById('messages').getBoundingClientRect();
+              const box = c.getBoundingClientRect();
+              return { align: cs.alignSelf, maxWidth: cs.maxWidth, border: cs.borderTopWidth,
+                       gapLeft: Math.round(box.left - pane.left),
+                       gapRight: Math.round(pane.right - box.right) };
+            }""",
+            name,
+        )
+
+    mine = _look("from-pc.bin")
+    assert mine["align"] == "flex-end", mine  # §59: this computer sent it
+    assert mine["maxWidth"] == "520px", mine  # §57: the rule is in effect, not overridden
+    assert mine["border"] == "1px", mine
+    assert mine["gapRight"] < 40, mine  # hugging the right, not pushed left
+
+    # the other device's file — the row a real phone upload writes
+    landed = tmp_path / "from-phone.bin"
+    landed.write_bytes(b"phone-side" * 64)
+    webui_server.shuttle_post(
+        room.webui_runtime(),
+        f"手机上传：from-phone.bin（{landed.stat().st_size} B）\n{landed}",
+        {
+            "name": "from-phone.bin",
+            "size": landed.stat().st_size,
+            "path": str(landed),
+            "direction": "phone",
+        },
     )
-    assert look["align"] == "flex-start", look
-    assert look["maxWidth"] == "520px", look  # the rule is in effect, not overridden
-    assert look["border"] == "1px", look
-    assert look["gapFromPaneLeft"] < 40, look  # hugging the left, not pushed right
+    assert _wait(
+        lambda: page.evaluate("() => !!document.querySelector('#messages .file-card.fc-peer')"),
+        timeout_s=12,
+    ), "the phone's row never reached the desktop transcript"
+    peer = _look("from-phone.bin")
+    assert peer["align"] == "flex-start", peer
+    assert peer["gapLeft"] < 40, peer
 
     page.fill("#input", "记一笔")
     page.click("#send")

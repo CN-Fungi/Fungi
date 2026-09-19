@@ -145,6 +145,7 @@ const renderOpts = extra => Object.assign({
   asks: { buildAnsweredAskCard },
   spawnLookup: callId => specByCall[callId] || archivedByCall[callId],
   argsMax: 80,
+  my: 'computer',   // a card sits on the side of the device it came from (§59)
   reasoningHtml: t => '<div style="white-space:pre-wrap;max-height:200px;overflow-y:auto">' + escapeHtml(t) + '</div>',
   liveText: r => { const text = FC.stripSilent(r.text); return text ? marked.parse(text) : ''; },
 }, extra || {});

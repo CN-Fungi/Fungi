@@ -258,6 +258,7 @@ const renderOpts = extra => Object.assign({
   reasoningHtml: t => '<div>' + escapeHtml(t) + '</div>',
   liveText: r => { const text = FC.stripSilent(r.text); return text ? escapeHtml(text) : ''; },
   fileLink: path => pullFromPc(path),   // 手机：点路径就把文件取过来（§52）
+  my: 'phone',                          // 卡片站在「发它的那台设备」那一边（§59）
 }, extra || {});
 /* 好友视图的两侧：对面在左（素底），我方在右——与桌面同一套 side 类
    （顶栏的会话视图不受影响，它本来就不分侧）。 */
@@ -1070,7 +1071,7 @@ async function pullFromPc(path) {
   }
 }
 
-/* ---------- file upload: phone picker -> PC inbox, path dropped in the box ---------- */
+/* ---------- file upload: phone picker -> PC inbox (nothing goes in the box) ---------- */
 const fileInput = document.getElementById('file-input');
 document.getElementById('btn-file').addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', async () => {
@@ -1081,10 +1082,10 @@ fileInput.addEventListener('change', async () => {
   for (const [i, f] of files.entries()) {
     Xfer.note(i, '正在上传…');
     try {
-      const path = await Xfer.upload(f, (done, total) => Xfer.progress(i, done, total));
+      await Xfer.upload(f, (done, total) => Xfer.progress(i, done, total));
+      // 文件已经在电脑上了：不往输入框里塞那条落点路径（用户 2026-09-19 点名）——
+      // 想跟 agent 说这个文件，它自己在传输助手那张卡上看得见（§59）。
       Xfer.finish('已保存到电脑'); // 完成后自动关闭
-      input.value = (input.value ? input.value + ' ' : '') + path;
-      autoGrow();
     } catch (e) {
       Xfer.fail('上传失败：' + (e.message || f.name), i);
       return;
