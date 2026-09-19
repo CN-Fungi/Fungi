@@ -95,20 +95,25 @@ def test_renaming_a_session_updates_the_list_not_only_the_file(page):
     )
     page.click("#btn-new-session")
     page.wait_for_function("() => document.querySelectorAll('.session-row').length > 0")
-    assert page.locator(".session-row-title").first.text_content() == "(new session)"
+    # Rows are painted in list order, and the list has a pinned transfer session
+    # at the top (§53) — address this test's own row, not "the first one".
+    index = page.evaluate("() => allSessions.findIndex(s => s.title === '(new session)')")
+    assert index >= 0, page.evaluate("() => allSessions.map(s => s.title)")
+    row = page.locator(".session-row").nth(index)
+    assert row.locator(".session-row-title").text_content() == "(new session)"
 
     # A second /sessions fetch — what the 3 s resume poll does — replaces the list
     # objects while the row (and its ✎ handler) is reused: the stale-closure setup.
     page.evaluate("async () => { await loadSessions(); }")
-    page.click(".session-row-act:not(.del)")
+    row.locator(".session-row-act:not(.del)").click()
     page.fill(".rename-input", "改名要立刻生效")
     page.keyboard.press("Enter")
     page.wait_for_timeout(500)
 
-    assert page.locator(".session-row-title").first.text_content() == "改名要立刻生效"
-    assert _titles(page) == ["改名要立刻生效"]
+    assert row.locator(".session-row-title").text_content() == "改名要立刻生效"
+    assert "改名要立刻生效" in _titles(page)
     served = page.evaluate(
         "async () => (await (await fetch('/sessions')).json()).sessions.map(s => s.title)"
     )
-    assert served == ["改名要立刻生效"], "the save must have reached the server too"
+    assert "改名要立刻生效" in served, "the save must have reached the server too"
     assert errors == [], "the rename must not throw on its way out (Enter then blur)"

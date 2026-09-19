@@ -77,6 +77,9 @@ testpaths = ["tests"]
 "fungi/tools/ghostworld.py" = ["RUF001", "RUF002", "RUF003"]
 # …and the warning a hand-edited config.json gets when it does not parse
 "fungi/config.py" = ["RUF001"]
+# …and the rows the file-transfer session writes (what was sent, how big, where
+# it landed — spec §53), which are Chinese UI text like the tray's
+"fungi/server.py" = ["RUF001"]
 # Tests: Chinese docstrings and test data (RUF00x), deferred imports of optional
 # deps and fixtures (PLC0415), unused fixture/lambda arguments (ARG*), and
 # class-level lookup tables (RUF012) are all deliberate test idioms here.

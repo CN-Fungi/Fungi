@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from fungi import server as webui
+from fungi import session as session_mod
 from fungi.config import Config
 
 
@@ -29,6 +30,9 @@ def upload_env(tmp_path, monkeypatch):
         "load_config",
         lambda: Config(api_key="k", endpoint="e", model="m", inbox_dir=str(inbox)),
     )
+    # A landed upload also writes a row in the transfer session (§53): keep that
+    # out of the developer's own store.
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path / "sessions")
 
     class _TouchRuntime(webui.WebUIRuntime):
         pass

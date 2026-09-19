@@ -1130,6 +1130,15 @@ loadSessions().then(() => {
 pollPendingAsks();
 loadPeers();
 setInterval(loadPeers, 5000);
+/* 文件传输助手（§53）：两个设备往同一个会话里落行（手机上传的落点、电脑要发给
+   手机的文件），谁都不点刷新也得看得到 —— 只在这个会话里轮询，别的会话一个都不动。
+   哪个 id 是它由服务端在 /sessions 里标（entry.shuttle），前端不重复写一份常量。 */
+setInterval(() => {
+  if (document.hidden || processing || !currentSessionId) return;
+  if (!pane.is('session')) return;   // 好友视图握着 #messages
+  const open = (allSessions || []).find(s => s.id === currentSessionId);
+  if (open && open.shuttle) reloadSessionFromServer();
+}, 3000);
 
 /* ---------- mail unread: per-peer badges on the friend list ---------- */
 const MailUnread = FC.initMailUnread({ http: FC, onChange: renderFriendList });

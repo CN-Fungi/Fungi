@@ -1034,6 +1034,14 @@ function renderFriendChat(d) {
 }
 
 setInterval(loadPeers, 5000);
+/* The file-transfer session (§53) is written by the *other* device too: poll it
+   while it is open so a file the phone sent shows up here without a reload.
+   Which id that is comes from /sessions (entry.shuttle), never a copy here. */
+setInterval(() => {
+  if (document.hidden || !currentSessionId) return;
+  const open = (allSessions || []).find(s => s.id === currentSessionId);
+  if (open && open.shuttle) reloadSessionFromServer();
+}, 3000);
 loadPeers();
 
 /* theme: light default, persisted; the switch flips html[data-theme] */

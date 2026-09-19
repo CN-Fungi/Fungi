@@ -133,6 +133,54 @@ def _int_or_none(value: str) -> int | None:
     return int(text) if text.isdigit() else None
 
 
+# ── the file-transfer session (§53) ──
+#
+# One session both devices share for moving files: the phone drops what it picks
+# there, the computer drops what it wants the phone to have, and every row is a
+# transfer with a path that is tappable on the phone (it pulls the file back,
+# §52). It is a shuttle, not a conversation: nothing here runs a model, because
+# "send a file to my phone" must not cost a turn (and a model cannot be trusted
+# to hand a path back unedited).
+
+SHUTTLE_ID = "file-transfer"
+SHUTTLE_TITLE = "文件传输助手"
+
+
+def human_size(n: int) -> str:
+    size = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def shuttle_ensure(runtime) -> None:
+    """The transfer session exists — made the first time anyone looks."""
+    if runtime.sessions_load(SHUTTLE_ID) is None:
+        runtime.sessions_save(SHUTTLE_ID, SHUTTLE_TITLE, [])
+
+
+def shuttle_post(runtime, text: str) -> None:
+    """Append one transfer to the shuttle; both directions land here (§53)."""
+    with _session_lock(SHUTTLE_ID):
+        stored = runtime.sessions_load(SHUTTLE_ID) or {}
+        messages = list(stored.get("messages") or [])
+        messages.append({"role": "user", "content": text, "ts": time.time()})
+        runtime.sessions_save(
+            SHUTTLE_ID,
+            SHUTTLE_TITLE,
+            messages,
+            subagents=stored.get("subagents") or [],
+            asks=stored.get("asks") or [],
+        )
+
+
+def _shuttle_row(who: str, landed: dict) -> str:
+    """What a landed transfer looks like in the session: what, how big, where."""
+    return f"{who}：{landed['name']}（{human_size(landed['size'])}）\n{landed['path']}"
+
+
 class UploadParts:
     """The windows of one phone upload, while the pieces are still arriving (§51).
 
@@ -586,7 +634,14 @@ class YesSirHandler(BaseHTTPRequestHandler):
         elif route == "/asks":
             self._send_json({"asks": self.runtime.pending_asks()})
         elif route == "/sessions":
+            shuttle_ensure(self.runtime)
             sessions = self.runtime.sessions_list()
+            # Pinned first, and flagged: it is a device-to-device channel, not a
+            # chat, and the shells poll it so the other device's files show up
+            # without anyone reloading (§53).
+            for entry in sessions:
+                entry["shuttle"] = str(entry.get("id")) == SHUTTLE_ID
+            sessions.sort(key=lambda entry: not entry["shuttle"])
             with _TURNS_LOCK:
                 for s in sessions:
                     tape = _TURN_TAPES.get(str(s.get("id")))
@@ -596,6 +651,10 @@ class YesSirHandler(BaseHTTPRequestHandler):
             self._send_json({"sessions": sessions})
         elif route == "/session":
             session_id = (parse_qs(url.query).get("id") or [None])[0]
+            if session_id == SHUTTLE_ID:
+                # Opening it is a reason for it to exist (§53): the phone must
+                # not find a 404 where the transfer session should be.
+                shuttle_ensure(self.runtime)
             data = self.runtime.sessions_load(session_id) if session_id else None
             if data is None:
                 self._send_json({"error": "not found"}, status=404)
@@ -765,7 +824,35 @@ class YesSirHandler(BaseHTTPRequestHandler):
 
     def _handle_chat(self) -> None:
         data = self._read_body()
-        self._run_turn(data.get("sessionId"), user_msg=str(data.get("message") or ""))
+        session_id = data.get("sessionId")
+        if session_id == SHUTTLE_ID:
+            self._shuttle_turn(str(data.get("message") or ""))
+            return
+        self._run_turn(session_id, user_msg=str(data.get("message") or ""))
+
+    def _shuttle_turn(self, text: str) -> None:
+        """A send in the transfer session: one row, and no model runs (§53).
+
+        The page streams turns, so it gets the same NDJSON shape as any other
+        turn — only there are no tokens behind it: the row is already on disk by
+        the time `done` arrives, and the shells' usual reload paints it.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Connection", "close")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.close_connection = True
+        sink = WebSink(self, SHUTTLE_ID)
+        try:
+            if text.strip():
+                shuttle_post(self.runtime, text.strip())
+            sink.emit("sessionId", SHUTTLE_ID)
+        except Exception as exc:
+            sink.emit("error", str(exc))
+        sink.emit("done", None)
+        with contextlib.suppress(OSError):
+            self.wfile.flush()
 
     def _handle_retry(self) -> None:
         """Alt+R: rerun the last turn with no new prompt, continuing from real
@@ -1058,7 +1145,19 @@ class YesSirHandler(BaseHTTPRequestHandler):
         reply = land_upload(up)
         if reply["done"]:
             UPLOADS.drop(sid)  # the part has been renamed; the session is done
+            self._note_transfer(reply)
         self._send_json(reply)
+
+    def _note_transfer(self, landed: dict) -> None:
+        """A phone upload that landed is worth a row in the transfer session.
+
+        Best effort: the file is on disk either way, and a broken session store
+        must not turn a successful upload into a failure (§53).
+        """
+        try:
+            shuttle_post(self.runtime, _shuttle_row("手机上传", landed))
+        except Exception as exc:
+            runlog.warn_once("shuttle-post", "could not write the transfer session: %s", exc)
 
     def _handle_upload_status(self, url) -> None:
         """How far a windowed upload has got — and whether it is already whole.

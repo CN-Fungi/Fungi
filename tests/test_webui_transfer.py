@@ -461,6 +461,57 @@ def test_paths_in_the_transcript_are_taps(mobile_page):
     assert "inside.zip" not in "".join(found), "an existing link was rewritten"
 
 
+def test_the_phone_sees_a_file_the_computer_dropped(mobile_page, rooms, tmp_path, monkeypatch):
+    """The transfer session (§53): the computer hands over a path, the phone
+    shows it — and the phone does not have to touch anything, because that
+    session is the one it polls."""
+    server, _client = rooms
+    runtime = server.webui_runtime()
+    inbox = tmp_path / "inbox"
+    monkeypatch.setattr(
+        webui_server,
+        "load_config",
+        lambda: Config(api_key="k", endpoint="e", model="m", inbox_dir=str(inbox)),
+    )
+    webui_server.shuttle_ensure(runtime)
+    mobile_page.evaluate("() => loadSessions()")
+    assert _wait(lambda: mobile_page.evaluate("() => (allSessions[0] || {}).shuttle === true")), (
+        "the transfer session is not the first thing in the list"
+    )
+
+    mobile_page.evaluate("() => switchSession(allSessions.find(s => s.shuttle).id)")
+    assert _wait(lambda: mobile_page.evaluate("() => currentSessionId && !processing"))
+
+    # the computer side: a file it wants the phone to have
+    dropped = r"C:\Users\someone\Desktop\gift.bin"
+    webui_server.shuttle_post(runtime, dropped)
+
+    def _seen() -> bool:
+        return mobile_page.evaluate(
+            "() => Array.from(document.querySelectorAll('#messages .file-link'))"
+            ".some(a => a.textContent.indexOf('gift.bin') >= 0)"
+        )
+
+    assert _wait(_seen, timeout_s=12), "the phone never showed the row: " + str(
+        mobile_page.evaluate("() => document.getElementById('messages').textContent")
+    )
+
+    # and the other direction lands in the same session: a phone upload writes
+    # its own row, with the path it landed at
+    mobile_page.set_input_files(
+        "#file-input",
+        {"name": "from-phone.bin", "mimeType": "application/octet-stream", "buffer": b"z" * 2048},
+    )
+    assert _wait(lambda: (inbox / "from-phone.bin").exists(), timeout_s=30), (
+        "the upload never landed"
+    )
+    assert _wait(
+        lambda: "手机上传"
+        in mobile_page.evaluate("() => document.getElementById('messages').textContent"),
+        timeout_s=12,
+    ), "the upload never showed up in the session"
+
+
 def test_a_failed_send_says_so_and_stays_open(page, rooms, tmp_path):
     """A bar that cannot finish must say why, not vanish as if it had."""
     _server, _client = rooms
