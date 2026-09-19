@@ -12,6 +12,7 @@ green.
 
 import contextlib
 import time
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -98,7 +99,8 @@ def browser():
 
 @contextlib.contextmanager
 def _page(browser, room, path="/"):
-    url = f"{room.open_webui(False)}{path}?t={WEBUI_TOKEN}"
+    sep = "&" if "?" in path else "?"
+    url = f"{room.open_webui(False)}{path}{sep}t={WEBUI_TOKEN}"
     ctx = browser.new_context(viewport={"width": 1280, "height": 900})
     page = ctx.new_page()
     page.goto(url)
@@ -334,6 +336,129 @@ def test_mobile_send_shows_three_steps_and_lands_both_hops(
         assert landed.read_bytes() == b"x" * 4096  # hop 3 was byte for byte
     finally:
         landed.unlink(missing_ok=True)
+
+
+def test_mobile_upload_cuts_a_big_file_into_windows(mobile_page, rooms, tmp_path, monkeypatch):
+    """A phone's uplink is one connection until we make it several (§51): the
+    page asks whether the host takes windows, then sends the file as ranges that
+    travel at once — and the host's own coverage decides when it lands."""
+    _server, _client = rooms
+    inbox = tmp_path / "inbox"
+    monkeypatch.setattr(
+        webui_server,
+        "load_config",
+        lambda: Config(api_key="k", endpoint="e", model="m", inbox_dir=str(inbox)),
+    )
+    payload = bytes(range(256)) * (12 * 1024 * 1024 // 256)  # 12 MiB: 3 windows
+
+    # What the page really put on the wire (the probe is a fetch, a window an
+    # XHR): counting them is the only honest way to see the cut from outside.
+    mobile_page.evaluate(
+        """() => {
+          window.__posts = []; window.__asks = [];
+          const open = XMLHttpRequest.prototype.open;
+          XMLHttpRequest.prototype.open = function (m, u) {
+            if (String(u).indexOf('/upload') === 0) window.__posts.push(String(u));
+            return open.apply(this, arguments);
+          };
+          const of = window.fetch;
+          window.fetch = function (u, o) {
+            if (String(u).indexOf('/upload') === 0) window.__asks.push(String(u));
+            return of.apply(this, arguments);
+          };
+        }"""
+    )
+    mobile_page.set_input_files(
+        "#file-input",
+        {"name": "big.bin", "mimeType": "application/octet-stream", "buffer": payload},
+    )
+    landed = inbox / "big.bin"
+    assert _wait(lambda: landed.exists(), timeout_s=60), (
+        f"the upload never landed: {mobile_page.evaluate('() => window.__posts')}"
+    )
+    assert landed.read_bytes() == payload, "the windows did not reassemble byte for byte"
+    assert [p.name for p in inbox.iterdir()] == ["big.bin"], "a part file was left"
+
+    posts = mobile_page.evaluate("() => window.__posts")
+    asks = mobile_page.evaluate("() => window.__asks")
+    assert asks, "the page never asked whether the host takes windows"
+    assert len(posts) >= 2, posts
+    covered = []
+    for target in posts:
+        q = urllib.parse.parse_qs(target.split("?", 1)[1])
+        lo, size = int(q["offset"][0]), int(q["size"][0])
+        assert int(q["size"][0]) == len(payload), target
+        covered.append((lo, size))
+    assert len({lo for lo, _size in covered}) == len(covered), "two windows share an offset"
+    assert min(lo for lo, _size in covered) == 0
+    assert sorted(lo for lo, _size in covered)[0] == 0
+    assert {lo for lo, _size in covered} == {i * 4 * 1024 * 1024 for i in range(len(covered))}
+
+    # the path the page got back is the one it puts in the message box
+    assert _wait(
+        lambda: str(landed) in mobile_page.evaluate("() => document.getElementById('input').value")
+    )
+    landed.unlink(missing_ok=True)
+
+
+def test_the_phone_pulls_a_file_from_the_pc_in_windows(mobile_page, rooms, tmp_path):
+    """The other direction (§52): the file is on the PC, the phone fetches it as
+    ranges at once, and what the browser saves is byte for byte what was there."""
+    _server, _client = rooms
+    payload = bytes(range(256)) * (12 * 1024 * 1024 // 256)  # 12 MiB: three windows
+    src = tmp_path / "gift.bin"
+    src.write_bytes(payload)
+
+    mobile_page.evaluate(
+        """() => {
+          window.__gets = [];
+          const of = window.fetch;
+          window.fetch = function (u, o) {
+            const target = String(u);
+            if (target.indexOf('/download') === 0) {
+              window.__gets.push({ url: target, range: (o && o.headers && o.headers.Range) || '' });
+            }
+            return of.apply(this, arguments);
+          };
+        }"""
+    )
+    with mobile_page.expect_download(timeout=60000) as caught:
+        mobile_page.evaluate("(p) => { Xfer.download(p); }", str(src))
+    saved = tmp_path / "on-the-phone.bin"
+    caught.value.save_as(str(saved))
+
+    assert saved.read_bytes() == payload, "the windows did not reassemble byte for byte"
+    gets = mobile_page.evaluate("() => window.__gets")
+    assert any("meta=1" in g["url"] for g in gets), gets  # it asked how big before cutting
+    windows = [g["range"] for g in gets if g["range"]]
+    assert len(windows) >= 2, windows
+    covered = []
+    for spec in windows:
+        lo, _, hi = spec.replace("bytes=", "").partition("-")
+        covered.append((int(lo), int(hi)))
+    assert min(lo for lo, _hi in covered) == 0
+    assert max(hi for _lo, hi in covered) == len(payload) - 1
+    assert sum(hi - lo + 1 for lo, hi in covered) == len(payload)
+    assert caught.value.suggested_filename == "gift.bin"
+
+
+def test_paths_in_the_transcript_are_taps(mobile_page):
+    """A path the user can see is a path the phone can fetch: it becomes a link,
+    and the rewrite never happens inside markup (a link inside an href is how
+    this kind of thing breaks a page)."""
+    found = mobile_page.evaluate(
+        r"""() => {
+          const box = document.createElement('div');
+          box.innerHTML = marked.parse('做完了 C:\\tmp\\a.zip 和 C:\\tmp\\b.zip。')
+            + '<a href="http://x/">C:\\tmp\\inside.zip</a>';
+          document.body.appendChild(box);
+          FC.linkifyPaths(box, () => {});
+          return Array.from(box.querySelectorAll('a.file-link')).map(a => a.textContent);
+        }"""
+    )
+    assert found == ["C:\\tmp\\a.zip", "C:\\tmp\\b.zip"], found
+    assert "。" in mobile_page.evaluate("() => document.body.textContent")
+    assert "inside.zip" not in "".join(found), "an existing link was rewritten"
 
 
 def test_a_failed_send_says_so_and_stays_open(page, rooms, tmp_path):

@@ -248,6 +248,7 @@ const renderOpts = extra => Object.assign({
   spawnTitle: '点按查看子代理详情',
   reasoningHtml: t => '<div>' + escapeHtml(t) + '</div>',
   liveText: r => { const text = FC.stripSilent(r.text); return text ? escapeHtml(text) : ''; },
+  fileLink: path => pullFromPc(path),   // 手机：点路径就把文件取过来（§52）
 }, extra || {});
 /* 好友视图的两侧：对面在左（素底），我方在右——与桌面同一套 side 类
    （顶栏的会话视图不受影响，它本来就不分侧）。 */
@@ -459,7 +460,7 @@ function handleTurnEvent(obj) {
       if (visible) {
         status.textContent = 'Thinking...'; // tool done: the next LLM round starts
         const block = document.getElementById('tool-' + obj.content.id);
-        if (block) FC.fillToolResult(block, obj.content.content);
+        if (block) FC.fillToolResult(block, obj.content.content, pullFromPc);
         else renderTurnLive();
       }
       break;
@@ -522,7 +523,12 @@ function updateLastText() {
   const idx = t.entries.map(x => x.kind).lastIndexOf('text');
   if (idx < 0) return renderTurnLive();
   const el = document.getElementById('live-text-' + idx);
-  if (el) { const stick = isNearBottom(msgs); el.innerHTML = marked.parse(FC.stripSilent(t.entries[idx].content)) + '<span class="live-cursor"></span>'; if (stick) S.stick(); }
+  if (el) {
+    const stick = isNearBottom(msgs);
+    el.innerHTML = marked.parse(FC.stripSilent(t.entries[idx].content)) + '<span class="live-cursor"></span>';
+    FC.linkifyPaths(el, pullFromPc);
+    if (stick) S.stick();
+  }
   else renderTurnLive();
 }
 function updateLastReasoning() {
@@ -557,6 +563,7 @@ function renderTurnLive() {
       const ad = document.createElement('div');
       ad.className = 'msg assistant live-node'; ad.id = 'live-text-' + i;
       ad.innerHTML = marked.parse(text) + '<span class="live-cursor"></span>';
+      FC.linkifyPaths(ad, pullFromPc);
       S.append(ad);
     } else if (e.kind === 'tool') {
       const d = FC.buildToolCard({ id: e.id, name: e.name, args: e.args, result: e.result }, { argsMax: 60 });
@@ -1041,6 +1048,19 @@ function autoGrow() {
   if (!processing) setBusy(false); // ↻/↑ follows the input content responsively
 }
 input.addEventListener('input', autoGrow);
+/* ---------- file pull: a path on screen -> the phone (§52) ---------- */
+async function pullFromPc(path) {
+  const name = String(path).split(/[\\/]/).pop() || '文件';
+  if (!Xfer.open('从电脑取文件', ['下载到手机 · ' + name])) return;
+  Xfer.note(0, '正在取…');
+  try {
+    const saved = await Xfer.download(path, (done, total) => Xfer.progress(0, done, total));
+    Xfer.finish(saved === '交给浏览器下载' ? '大文件已交给浏览器下载' : '已保存到手机：' + saved);
+  } catch (e) {
+    Xfer.fail('下载失败：' + (e.message || String(e)), 0);
+  }
+}
+
 /* ---------- file upload: phone picker -> PC inbox, path dropped in the box ---------- */
 const fileInput = document.getElementById('file-input');
 document.getElementById('btn-file').addEventListener('click', () => fileInput.click());

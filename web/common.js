@@ -206,20 +206,43 @@
     }
     document.getElementById('xfer-close')?.addEventListener('click', close);
 
-    /* hop 1 (phone): push the picked file to this host's inbox over XHR, whose
-       upload events are the only place those bytes are countable. Raw bytes
-       with the name in a header: the host streams it to disk, so a phone video
-       of any size lands (no size cap — see spec §48), and a percent-encoded
-       name survives the ascii-only header line. */
-    function upload(file, onProgress) {
+    /* hop 1 (phone): push the picked file to this host's inbox.
+       One connection does not fill a phone's uplink on its own, and a window is
+       also what makes a dropped one cheap, so the file is cut into windows that
+       travel at once and the host puts them together (§51). Raw bytes with the
+       name in a header either way — the host streams them to disk, so a phone
+       video of any size lands (no cap, §48), and a percent-encoded name survives
+       the ascii-only header line. The host has the last word: it lands the file
+       only when every byte is covered, and answers with the ranges it is still
+       missing, so a repair re-sends exactly those instead of guessing from what
+       the socket said it had handed over. A host that does not take windows
+       (anything before §51) answers the one-and-only probe and gets one body,
+       which is exactly what this used to send. */
+    const PART_MIN = 4 * 1024 * 1024;  // keep in step with fungi/server.py
+    const PART_COUNT = 4;
+    const PART_TRIES = 3;
+    const PART_ROUNDS = 3;  // send, then repair what the host reports missing
+    let partsAsked = null;  // the capability answer, asked once per page
+
+    /* `?parts=N` on the page URL pins how many windows may travel at once, in
+       both directions — the measurement knob (§51/§52), where 1 is the
+       single-connection shape this had before any of it. */
+    function pinned() {
+      return Number(new URLSearchParams(location.search).get('parts')) || 0;
+    }
+
+    function partsFor(file) {
+      const asked = pinned() || PART_COUNT;
+      return Math.max(1, Math.min(Math.floor(asked), Math.floor(file.size / PART_MIN)));
+    }
+
+    function sendBody(target, blob, name, onProgress) {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        xhr.open('POST', url('/upload'));
-        xhr.setRequestHeader('X-Fungi-Filename', encodeURIComponent(file.name));
-        if (xhr.upload) {
-          xhr.upload.onprogress = e => {
-            if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total);
-          };
+        xhr.open('POST', target);
+        xhr.setRequestHeader('X-Fungi-Filename', encodeURIComponent(name));
+        if (xhr.upload && onProgress) {
+          xhr.upload.onprogress = e => { if (e.lengthComputable) onProgress(e.loaded); };
         }
         xhr.onload = () => {
           if (xhr.status === 403) {
@@ -229,12 +252,205 @@
           }
           let d = {};
           try { d = JSON.parse(xhr.responseText || '{}'); } catch (e) {}
-          if (xhr.status === 200 && d.path) resolve(d.path);
-          else reject(new Error(d.error || ('upload failed: HTTP ' + xhr.status)));
+          resolve({ status: xhr.status, body: d });
         };
         xhr.onerror = () => reject(new Error('upload failed'));
-        xhr.send(file);
+        xhr.send(blob);
       });
+    }
+
+    function uploadWhole(file, onProgress) {
+      return sendBody(url('/upload'), file, file.name, n => onProgress && onProgress(n, file.size))
+        .then(r => {
+          if (r.status === 200 && r.body.path) return r.body.path;
+          throw new Error(r.body.error || ('upload failed: HTTP ' + r.status));
+        });
+    }
+
+    function uploadWindows(file, windows, onProgress) {
+      const sid = 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      const total = file.size;
+      const peak = [];  // what each window has most recently reported: the sum only grows
+      const drawn = () => {
+        if (!onProgress) return;
+        let done = 0;
+        for (const n of peak) done += n || 0;
+        onProgress(Math.min(done, total), total);
+      };
+      const sendWindow = (index, lo, hi, tries) =>
+        sendBody(
+          // the query goes INSIDE the path: the shell's prefix appends its own
+          // token with `?` or `&`, and a second `?` would swallow the window
+          url('/upload?sid=' + sid + '&offset=' + lo + '&size=' + total),
+          file.slice(lo, hi),
+          file.name,
+          n => { peak[index] = Math.max(peak[index] || 0, n); drawn(); }
+        ).then(r => {
+          if (r.status === 200) return r.body;
+          if (tries > 0) {
+            peak[index] = 0;  // this window starts over, so its count does too
+            return new Promise(res => setTimeout(res, tries * 500)).then(() =>
+              sendWindow(index, lo, hi, tries - 1)
+            );
+          }
+          throw new Error(r.body.error || ('upload failed: HTTP ' + r.status));
+        });
+
+      const round = (ranges, base) =>
+        Promise.all(ranges.map(([lo, hi], i) => sendWindow(base + i, lo, hi, PART_TRIES)));
+
+      const repair = n => {
+        if (n >= PART_ROUNDS) return Promise.reject(new Error('上传未完成：还有分片没到'));
+        return http.fetchJSON('/upload?sid=' + sid)
+          .then(r => {
+            if (r.ok || r.status === 404) return r.json();
+            throw new Error('upload failed: HTTP ' + r.status);
+          })
+          .then(d => {
+            if (d.done && d.path) return d.path;
+            // A session the host no longer knows (it restarted, or swept it as
+            // stale) is not something to report: sending everything again
+            // reopens it under the same id.
+            const ranges = (d.missing || [[0, total]]).filter(g => g[1] > g[0]);
+            if (!ranges.length) throw new Error(d.error || '上传未完成');
+            return round(ranges, n * 1000).then(() => repair(n + 1));
+          });
+      };
+
+      return round(windows, 0).then(replies => {
+        const landed = replies.filter(r => r && r.done && r.path).pop();
+        return landed ? landed.path : repair(1);
+      });
+    }
+
+    function upload(file, onProgress) {
+      const count = partsFor(file);
+      if (count < 2) return uploadWhole(file, onProgress);
+      if (partsAsked === null) {
+        partsAsked = http.fetchJSON('/upload')
+          .then(r => (r.ok ? r.json() : {}))
+          .then(d => !!d.parts)
+          .catch(() => false);
+      }
+      return partsAsked.then(ok => {
+        if (!ok) return uploadWhole(file, onProgress);
+        const step = Math.ceil(file.size / count);
+        const windows = [];
+        for (let lo = 0; lo < file.size; lo += step) {
+          windows.push([lo, Math.min(lo + step, file.size)]);
+        }
+        return uploadWindows(file, windows, onProgress);
+      });
+    }
+
+    /* the other way round: PC -> phone (§52). The same cut — windows travel at
+       once, and a window that dies resumes from the byte it reached — but the
+       pieces are put together in the page, because a phone cannot write at an
+       offset over plain HTTP (the File System Access API wants a secure
+       context, and this page is http:// on the LAN). So the assembly costs
+       memory, and a file too big for that goes to the browser's own downloader
+       in one connection, which streams to disk (no progress, no memory). */
+    const PULL_MIN = 4 * 1024 * 1024;
+    const PULL_COUNT = 4;
+    const PULL_TRIES = 3;
+    const PULL_MEM_MAX = 192 * 1024 * 1024;  // what a phone should hold in RAM
+
+    function saveBlob(blob, name) {
+      const href = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = href;
+      a.download = name || 'download.bin';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(href), 60000);  // the save needs a moment
+    }
+
+    function saveViaBrowser(path) {
+      const a = document.createElement('a');
+      a.href = url('/download?path=' + encodeURIComponent(path));
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+
+    function pullWindows(path, meta, windows, onProgress) {
+      const total = meta.size;
+      const got = new Array(windows.length).fill(0);
+      const pieces = windows.map(() => []);
+      const drawn = () => {
+        if (!onProgress) return;
+        let done = 0;
+        for (const n of got) done += n;
+        onProgress(Math.min(done, total), total);
+      };
+      const pull = (index, lo, hi, tries) =>
+        new Promise((resolve, reject) => {
+          const from = lo + got[index];
+          fetch(url('/download?path=' + encodeURIComponent(path)), {
+            headers: { Range: 'bytes=' + from + '-' + (hi - 1) },
+          })
+            .then(resp => {
+              if (!resp.ok) throw new Error('HTTP ' + resp.status);
+              // A host that ignores Range answers 200 with the whole file: only
+              // a window that starts at byte zero can use that.
+              if (resp.status === 200 && index !== 0) throw new Error('range ignored');
+              const reader = resp.body.getReader();
+              const pump = () =>
+                reader.read().then(({ done, value }) => {
+                  if (done) return;
+                  pieces[index].push(value);
+                  got[index] += value.length;
+                  drawn();
+                  return pump();
+                });
+              return pump();
+            })
+            .then(() => {
+              if (lo + got[index] >= hi) return;
+              throw new Error('中断在 ' + (lo + got[index]) + ' 字节');
+            })
+            .catch(err => {
+              if (tries > 0) {
+                return new Promise(res => setTimeout(res, tries * 500)).then(() =>
+                  pull(index, lo, hi, tries - 1)
+                );
+              }
+              throw err;
+            })
+            .then(resolve, reject);
+        });
+
+      return Promise.all(windows.map(([lo, hi], i) => pull(i, lo, hi, PULL_TRIES))).then(() => {
+        const reached = got.reduce((a, b) => a + b, 0);
+        if (reached !== total) {
+          // Never hand over a file that is not whole: this is the §49 rule at
+          // the last hop, and the only check the phone itself can make.
+          throw new Error('只收到 ' + reached + ' / ' + total + ' 字节');
+        }
+        saveBlob(new Blob(pieces.flat(), { type: 'application/octet-stream' }), meta.name);
+        return meta.name;
+      });
+    }
+
+    function download(path, onProgress) {
+      return http.fetchJSON('/download?meta=1&path=' + encodeURIComponent(path))
+        .then(r => r.json())
+        .then(meta => {
+          if (!meta.ok) throw new Error(meta.error || '取不到这个文件');
+          const total = Number(meta.size) || 0;
+          const count = Math.max(1, Math.min(pinned() || PULL_COUNT, Math.floor(total / PULL_MIN)));
+          if (count < 2 || total > PULL_MEM_MAX) {
+            saveViaBrowser(path);  // the browser's downloader: one connection, to disk
+            return '交给浏览器下载';
+          }
+          const step = Math.ceil(total / count);
+          const windows = [];
+          for (let lo = 0; lo < total; lo += step) {
+            windows.push([lo, Math.min(lo + step, total)]);
+          }
+          return pullWindows(path, meta, windows, onProgress);
+        });
     }
 
     /* hop 2 (both): this host's copy goes out to the peer through the hub.
@@ -342,7 +558,7 @@
       );
     }
 
-    return { open, close, finish, fail, progress, note, upload, sendToPeer, sendOne, sendFromPhone };
+    return { open, close, finish, fail, progress, note, upload, download, sendToPeer, sendOne, sendFromPhone };
   }
 
   /* ---------- tool card rendering ----------
@@ -358,10 +574,13 @@
     const args = spec.args || '';
     const argsHtml = args ? ' <code>' + escapeHtml(args.length > argsMax ? args.slice(0, argsMax) + '...' : args) + '</code>' : '';
     d.innerHTML = '<div class="tool-label">&#x1F527; ' + escapeHtml(spec.name || 'tool') + argsHtml + '</div><div class="tool-result">' + (spec.result ? '<pre>' + escapeHtml(spec.result) + '</pre>' : '') + '</div>';
+    if (spec.result && opts && opts.fileLink) linkifyPaths(d, opts.fileLink);
     return d;
   }
-  function fillToolResult(block, content) {
-    block.querySelector('.tool-result').innerHTML = '<pre>' + escapeHtml(content) + '</pre>';
+  function fillToolResult(block, content, onPick) {
+    const out = block.querySelector('.tool-result');
+    out.innerHTML = '<pre>' + escapeHtml(content) + '</pre>';
+    linkifyPaths(out, onPick);  // tool output is where the paths show up (§52)
   }
   /* Spawn/background cards deep-link into the client's agent replay store.
      lookup(callId) -> spec id; the modal itself stays client-side (different
@@ -916,6 +1135,46 @@
     } catch (e) { return ''; }
   }
 
+  /* Absolute paths in the transcript become taps (§52): on the phone, tapping
+     one pulls that file over. Only the shells that pass `fileLink` get links —
+     the desktop already has the file it is looking at.
+
+     The rewrite walks text nodes, never the HTML string: what comes in is
+     marked's output, and a regex over markup is how tags get broken (or a link
+     ends up inside an href). */
+  const PATH_RE = /[A-Za-z]:[\\/][^\s"'<>|*?\u3002\uff0c\uff09\uff1f\uff01\u3011\u3015\uff1b\uff1a]+/g;
+
+  function linkifyPaths(root, onPick) {
+    if (!root || !onPick) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    const texts = [];
+    while (walker.nextNode()) texts.push(walker.currentNode);
+    for (const node of texts) {
+      const parent = node.parentNode;
+      if (!parent || (parent.closest && parent.closest('a'))) continue;
+      const text = node.nodeValue || '';
+      const frag = document.createDocumentFragment();
+      let at = 0;
+      let m;
+      PATH_RE.lastIndex = 0;
+      while ((m = PATH_RE.exec(text)) !== null) {
+        const path = m[0].replace(/[\\.,;:\uff09)]+$/, '');  // trailing punctuation is prose
+        if (m.index > at) frag.appendChild(document.createTextNode(text.slice(at, m.index)));
+        const a = document.createElement('a');
+        a.className = 'file-link';
+        a.href = '#';
+        a.textContent = path;
+        a.addEventListener('click', e => { e.preventDefault(); onPick(path); });
+        frag.appendChild(a);
+        at = m.index + path.length;
+        PATH_RE.lastIndex = at;
+      }
+      if (!at) continue;  // nothing matched: the node stays untouched
+      if (at < text.length) frag.appendChild(document.createTextNode(text.slice(at)));
+      parent.replaceChild(frag, node);
+    }
+  }
+
   function renderTranscript(p, messages, asks, opts) {
     const side = opts.side || {};
     const userSide = side.user || '';
@@ -1005,6 +1264,9 @@
       if (typeof rec.ts === 'number') insertByTs(p, node, rec.ts);
       else p.prepend(node);
     });
+    // Last, over the finished pane: the phone turns absolute paths into taps
+    // (opts.fileLink); a shell that passes none is left untouched (§52).
+    linkifyPaths(p.el(), opts.fileLink);
   }
 
   /* In-flight turn tape (a comm clone's live events, friend view): merge
@@ -1071,6 +1333,6 @@
     buildToolCard, fillToolResult, attachSpawnClick,
     initAsks, initPendingAsks, initMailUnread,
     initPane, stripSilent, humanEcho,
-    markTs, insertByTs, askTextOfCall, renderTranscript, renderLiveEvents, whenLabel,
+    markTs, insertByTs, askTextOfCall, linkifyPaths, renderTranscript, renderLiveEvents, whenLabel,
   };
 })();

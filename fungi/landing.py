@@ -106,6 +106,32 @@ class Spans:
                 at = last
         return at
 
+    def gaps(self, start: int, end: int) -> list[tuple[int, int]]:
+        """The stretches of `[start, end)` that nothing has reported yet.
+
+        What a sender needs to know to finish a job it cannot see the far side
+        of: the receiver of an upload (the host, fungi/server.py) answers with
+        these, so the page re-sends exactly what is missing instead of guessing
+        from what the socket said it had handed over (§51).
+        """
+        out: list[tuple[int, int]] = []
+        at = int(start)
+        end = int(end)
+        with self._lock:
+            for first, last in self._parts:  # sorted
+                if last <= at:
+                    continue
+                if first >= end:
+                    break
+                if first > at:
+                    out.append((at, min(first, end)))
+                at = max(at, last)
+                if at >= end:
+                    break
+        if at < end:
+            out.append((at, end))
+        return out
+
 
 def _part_path(dest: Path, tag: str) -> Path:
     """The part file a delivery writes before it earns the real name.

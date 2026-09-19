@@ -16,13 +16,13 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from fungi import landing, runlog, session
 from fungi.agent import SYSTEM_PROMPT, Agent, public_messages
-from fungi.config import RESOURCE_ROOT, load_config, save_config
+from fungi.config import PROJECT_ROOT, RESOURCE_ROOT, load_config, save_config
 from fungi.events import Sink
-from fungi.hub.app import safe_name
+from fungi.hub.app import RangeNotSatisfiableError, range_window, safe_name
 from fungi.tools.ask import resolve_ask
 from fungi.tools.mcp import mcp_extra_tools
 from fungi.trilayer import TriLayer
@@ -91,11 +91,17 @@ _STATIC_ROUTES = frozenset(
 )
 
 
+def _inbox_dir() -> Path:
+    """The inbox, created if need be (same dir the comm-clone flow lands in)."""
+    inbox = landing.inbox_root(load_config().inbox_dir)
+    inbox.mkdir(parents=True, exist_ok=True)
+    return inbox
+
+
 def _inbox_path(filename: str) -> Path:
     """Where an uploaded file lands (same dir the comm-clone transfer flow
     uses), sanitizing the name and numbering collisions."""
-    inbox = landing.inbox_root(load_config().inbox_dir)
-    inbox.mkdir(parents=True, exist_ok=True)
+    inbox = _inbox_dir()
     dest = inbox / safe_name(filename)
     stem, suffix = dest.stem, dest.suffix
     n = 1
@@ -103,6 +109,140 @@ def _inbox_path(filename: str) -> Path:
         dest = inbox / f"{stem}-{n}{suffix}"
         n += 1
     return dest
+
+
+# ── phone uploads, in windows (§51) ──
+
+UPLOAD_TTL_S = 1800.0  # a page that walked away: its parts stop claiming disk
+UPLOAD_PART_MIN = 4 * 1024 * 1024  # the smallest window worth its own connection
+UPLOAD_READ = 64 * 1024  # one read/write step while streaming a body
+DOWNLOAD_CHUNK = 256 * 1024  # one read/write step while serving a file (as the hub does)
+SID_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+
+
+def upload_sid(value: str) -> str:
+    """A client's session id if it is safe to put into a file name, else ""."""
+    sid = str(value or "")
+    if not sid or len(sid) > 64 or not set(sid) <= SID_CHARS:
+        return ""
+    return sid
+
+
+def _int_or_none(value: str) -> int | None:
+    text = str(value or "").strip()
+    return int(text) if text.isdigit() else None
+
+
+class UploadParts:
+    """The windows of one phone upload, while the pieces are still arriving (§51).
+
+    A phone upload used to be one long POST; split across several connections it
+    is several short ones, and nothing on the wire says which window a body
+    belongs to unless the host remembers. So it keeps the name, the announced
+    size and the byte ranges that have really landed — `landing.Spans`, a union,
+    so a window retried after a drop does not count twice — writes each window in
+    place at its offset in one part file, and lets the real name appear only once
+    every byte is covered (§49, one hop earlier in the flow: this is the host's
+    disk, not the receiver's).
+
+    Sessions are cheap and rare (one per upload in flight); a page that goes away
+    mid-upload leaves one behind, and `sweep()` takes it — and its part file —
+    after UPLOAD_TTL_S.
+    """
+
+    def __init__(self) -> None:
+        self._sessions: dict[str, dict] = {}
+        self._guard = threading.Lock()
+
+    def sweep(self) -> None:
+        """Forget the sessions nobody came back for, and their parts with them."""
+        cutoff = time.time() - UPLOAD_TTL_S
+        with self._guard:
+            stale = [(sid, s) for sid, s in self._sessions.items() if s["ts"] < cutoff]
+            for sid, _session in stale:
+                self._sessions.pop(sid, None)
+        for _sid, up in stale:
+            with contextlib.suppress(OSError):
+                up["part"].unlink()
+
+    def session(self, sid: str, name: str, total: int, inbox: Path) -> dict:
+        """The upload `sid` names, created by whichever window arrives first.
+
+        Every window carries the same name and size, so any of them can be the
+        one that starts the session; the lock is what keeps two concurrent
+        firsts from making two part files.
+        """
+        with self._guard:
+            found = self._sessions.get(sid)
+            if found is None:
+                part = inbox / f"{safe_name(name)}.{sid}{landing.PART_SUFFIX}"
+                part.parent.mkdir(parents=True, exist_ok=True)
+                part.touch()
+                found = {
+                    "name": safe_name(name),
+                    "total": int(total),
+                    "part": part,
+                    "spans": landing.Spans(),
+                    "ts": time.time(),
+                }
+                self._sessions[sid] = found
+            found["ts"] = time.time()
+            return found
+
+    def get(self, sid: str) -> dict | None:
+        with self._guard:
+            up = self._sessions.get(sid)
+        if up is not None:
+            up["ts"] = time.time()
+        return up
+
+    def drop(self, sid: str) -> None:
+        """Forget a session and delete whatever part it left."""
+        with self._guard:
+            up = self._sessions.pop(sid, None)
+        if up is not None:
+            with contextlib.suppress(OSError):
+                up["part"].unlink()
+
+    def missing(self, up: dict) -> list[tuple[int, int]]:
+        return up["spans"].gaps(0, int(up["total"]))
+
+
+UPLOADS = UploadParts()
+
+
+def land_upload(up: dict) -> dict:
+    """Put the part in place if it is whole; the §49 rule, one hop earlier.
+
+    The reply is the page's answer either way: `done` with the path it landed at,
+    or the byte ranges that are still missing, so a sender that cannot see this
+    disk re-sends exactly those instead of guessing.
+    """
+    total = int(up["total"])
+    spans = up["spans"]
+    part = up["part"]
+    if not spans.covers(0, total) or part.stat().st_size != total:
+        return {
+            "ok": True,
+            "done": False,
+            "received": min(total, spans.bytes),
+            "total": total,
+            "missing": spans.gaps(0, total),
+        }
+    # The name is chosen now, not when the upload started: a file that landed
+    # under this name while the bytes were in flight gets its own "-1" instead
+    # of being overwritten.
+    dest = _inbox_path(up["name"])
+    part.replace(dest)
+    return {
+        "ok": True,
+        "done": True,
+        "path": str(dest),
+        "name": dest.name,
+        "size": total,
+        "received": total,
+        "total": total,
+    }
 
 
 RETRY_STRIP_PREFIXES = ("(LLM error:", "(Hit max tool rounds", "(Aborted")
@@ -482,6 +622,15 @@ class YesSirHandler(BaseHTTPRequestHandler):
                 self._send_json(self.runtime.comm_log(host))
         elif route == "/mail":
             self._send_json(self.runtime.mail())
+        elif route == "/download":
+            # PC -> phone (§52): the file itself, or `?meta=1` for its name and
+            # size so a downloader can plan windows before any bytes travel.
+            self._handle_download(url)
+        elif route == "/upload":
+            # No sid: the capability question ("do you take windows?"), which a
+            # page asks once before cutting a file up (§51). With one: how far
+            # it has got, and which ranges are still missing.
+            self._handle_upload_status(url)
         elif route == "/transfer-progress":
             job = (parse_qs(url.query).get("id") or [""])[0]
             self._send_json(self.runtime.transfer_progress(job))
@@ -579,7 +728,7 @@ class YesSirHandler(BaseHTTPRequestHandler):
                 self.runtime.set_consent_mode(host, mode)
                 self._send_json({"ok": True, "mode": mode})
         elif url.path == "/upload":
-            self._handle_upload()
+            self._handle_upload(url)
         elif url.path == "/pickfile":
             self._handle_pickfile()
         elif url.path == "/comm-send":
@@ -830,18 +979,23 @@ class YesSirHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
 
-    def _handle_upload(self) -> None:
+    def _handle_upload(self, url) -> None:
         """Phone -> PC file upload: raw bytes, name in X-Fungi-Filename.
 
         Lands in the configured inbox (default: inbox/ beside the program, or
-        the per-user folder when that is read-only); the mobile
-        UI inserts the returned absolute path into the message box, so the
-        agent reads it like any local file.
+        the per-user folder when that is read-only); the mobile UI inserts the
+        returned absolute path into the message box, so the agent reads it like
+        any local file.
 
-        Streamed straight to disk in 64 KiB chunks: the body used to be read
-        into memory whole, which is the only reason a size cap existed (spec
-        §48). The name rides in a header — percent-encoded, so a CJK filename
-        survives the latin-1 header line that multipart used to mangle.
+        One POST or several (§51): with `sid`/`offset`/`size` in the query this
+        body is one window of a file whose other windows are arriving on other
+        connections; without them it is the whole file — which is what every
+        page written before this one sends, and the two shapes land the same way.
+        The bytes stream straight to disk (spec §48: no cap, no buffer) into
+        `<name>.<sid>.part`, and the real name appears only once every byte is
+        covered (§49): a phone that walks away, a host killed mid-body, a link
+        that dies — none of them can leave a file under the real name that is
+        not the whole file.
         """
         name = unquote(self.headers.get("X-Fungi-Filename") or "")
         if not name:
@@ -856,25 +1010,170 @@ class YesSirHandler(BaseHTTPRequestHandler):
         if length <= 0:
             self._send_json({"error": "empty upload"}, status=400)
             return
-        dest = _inbox_path(name)
-        left = length
+        params = parse_qs(url.query)
+        offset_raw = (params.get("offset") or [""])[0]
+        size_raw = (params.get("size") or [""])[0]
+        sid = upload_sid((params.get("sid") or [""])[0])
+        windowed = bool(offset_raw or size_raw)
+        if windowed:
+            offset = _int_or_none(offset_raw)
+            total = _int_or_none(size_raw)
+            # A session id becomes part of a file name, so an unusable one is a
+            # refusal — never a quiet fallback to "then this body is the file".
+            if not sid or offset is None or total is None or total <= 0 or offset + length > total:
+                self._send_json({"error": "bad upload window"}, status=400)
+                return
+        else:
+            # The page handed over the file in one body: it is a window too, the
+            # one that covers everything, and the id is ours to mint.
+            sid = secrets.token_hex(4)
+            offset, total = 0, length
+        UPLOADS.sweep()
+        up = UPLOADS.session(sid, name, total, _inbox_dir())
+        if up["total"] != total or up["name"] != safe_name(name):
+            self._send_json({"error": "this upload session belongs to another file"}, status=400)
+            return
         try:
-            with dest.open("wb") as out:
-                while left > 0:
-                    chunk = self.rfile.read(min(65536, left))
-                    if not chunk:
-                        break
-                    out.write(chunk)
-                    left -= len(chunk)
+            got = self._receive_upload(up, offset, length)
         except OSError as exc:
-            dest.unlink(missing_ok=True)
+            UPLOADS.drop(sid)
             self._send_json({"error": f"cannot save {name}: {exc}"}, status=507)
             return
-        if left:
-            dest.unlink(missing_ok=True)  # a half file is worse than none
-            self._send_json({"error": "truncated upload"}, status=400)
+        if got < length:
+            # The body stopped early (the phone went away, the link dropped).
+            # The bytes that did arrive stay: the page is told what is missing
+            # and re-sends just that. In one body there is nothing to resume —
+            # the part goes, exactly as it did before this change.
+            if not windowed:
+                UPLOADS.drop(sid)
+                self._send_json({"error": "truncated upload"}, status=400)
+                return
+            reply = {
+                "error": "truncated upload",
+                "received": up["spans"].bytes,
+                "missing": UPLOADS.missing(up),
+            }
+            self._send_json(reply, status=400)
             return
-        self._send_json({"ok": True, "path": str(dest), "name": dest.name, "size": length})
+        reply = land_upload(up)
+        if reply["done"]:
+            UPLOADS.drop(sid)  # the part has been renamed; the session is done
+        self._send_json(reply)
+
+    def _handle_upload_status(self, url) -> None:
+        """How far a windowed upload has got — and whether it is already whole.
+
+        No `sid` is the capability question a page asks once, before cutting a
+        file up: an old host answers 404 and the page sends one body, which it
+        always did. With a `sid` it is the answer a sender cannot get any other
+        way: which byte ranges the host is still missing (§51).
+        """
+        sid = upload_sid((parse_qs(url.query).get("sid") or [""])[0])
+        if not sid:
+            self._send_json({"ok": True, "parts": True, "min_part": UPLOAD_PART_MIN})
+            return
+        UPLOADS.sweep()
+        up = UPLOADS.get(sid)
+        if up is None:
+            self._send_json({"error": "unknown upload session"}, status=404)
+            return
+        reply = land_upload(up)
+        if reply["done"]:
+            UPLOADS.drop(sid)
+        self._send_json(reply)
+
+    def _receive_upload(self, up: dict, offset: int, length: int) -> int:
+        """Stream this request's body into the part at `offset`; bytes that arrived.
+
+        Streaming is the point (§48): the heap cost of a gigabyte is one read's
+        worth. Coverage is recorded after the handle is closed, so what is
+        counted as landed is what is really on the disk.
+        """
+        at = offset
+        left = length
+        with up["part"].open("r+b") as out:
+            out.seek(offset)
+            while left > 0:
+                chunk = self.rfile.read(min(UPLOAD_READ, left))
+                if not chunk:
+                    break
+                out.write(chunk)
+                at += len(chunk)
+                left -= len(chunk)
+        if at > offset:
+            up["spans"].add(offset, at)
+        return at - offset
+
+    def _handle_download(self, url) -> None:
+        """PC -> phone: hand the phone a file that is on this machine (§52).
+
+        `?meta=1` answers what a downloader needs to plan with — name and size —
+        without sending bytes; without it this is the file itself, and `Range`
+        is the hub's contract (§50): 206 for the window asked for, 416 when it
+        starts past the end, 200 for the whole file when no Range is asked. So
+        the phone can fetch several windows at once and resume one that died,
+        while a plain link, `curl`, or the browser's own downloader takes it in
+        one piece.
+
+        The WebUI token is the door, and it means "the owner's own device" — the
+        phone that scanned the host's QR code (room friends hold the *room*
+        token, which opens nothing here). That is the same standing as the
+        agent's own `read` tool, which takes any path on this disk: this route
+        adds no new kind of access, only a quicker way to get the bytes.
+        """
+        params = parse_qs(url.query)
+        raw = (params.get("path") or [""])[0]
+        if not raw:
+            self._send_json({"error": "missing path"}, status=400)
+            return
+        target = Path(raw)
+        if not target.is_absolute():
+            target = PROJECT_ROOT / target
+        if not target.is_file():
+            self._send_json({"error": f"no such file: {raw}"}, status=404)
+            return
+        size = target.stat().st_size
+        if (params.get("meta") or [""])[0]:
+            self._send_json({"ok": True, "name": target.name, "size": size})
+            return
+        try:
+            window = range_window(self.headers.get("Range") or "", size)
+        except RangeNotSatisfiableError:
+            # Past the last byte: the size is the correction, and no bytes travel.
+            self.send_response(416)
+            self.send_header("Content-Range", f"bytes */{size}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        first, last = window if window is not None else (0, size - 1)
+        length = last - first + 1
+        # Headers are latin-1 only: RFC 5987 the unicode name, as the hub does.
+        quoted = quote(target.name, safe="")
+        try:
+            with target.open("rb") as fh:
+                fh.seek(first)
+                self.send_response(206 if window is not None else 200)
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header(
+                    "Content-Type", _mime.get(target.suffix.lower(), "application/octet-stream")
+                )
+                self.send_header("Content-Length", str(length))
+                if window is not None:
+                    self.send_header("Content-Range", f"bytes {first}-{last}/{size}")
+                self.send_header(
+                    "Content-Disposition",
+                    f"attachment; filename=\"{quoted}\"; filename*=UTF-8''{quoted}",
+                )
+                self.end_headers()
+                sent = 0
+                while sent < length:
+                    chunk = fh.read(min(DOWNLOAD_CHUNK, length - sent))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    sent += len(chunk)
+        except OSError:
+            pass  # the phone stopped asking (it closed the tab); nothing to repair
 
     def _handle_pickfile(self) -> None:
         try:

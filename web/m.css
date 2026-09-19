@@ -37,6 +37,9 @@ html,body{font-family:var(--font);font-size:16px;line-height:1.6;color:var(--tex
 .msg table{border-collapse:collapse;margin:0.55rem 0;font-size:0.84rem;width:100%}
 .msg th,.msg td{border:1px solid var(--border);padding:0.45rem 0.7rem;text-align:left}
 .msg a{color:var(--accent2)}
+/* 可点的绝对路径（§52）：点一下把这个文件从电脑取到手机。虚线表明它是动作，
+   不是普通的 markdown 链接；长路径要能在窄屏上折行。 */
+.file-link{color:var(--accent2);text-decoration:underline dotted;text-underline-offset:2px;word-break:break-all;cursor:pointer}
 /* live streaming cursor */
 .live-cursor{display:inline-block;width:0.5em;height:1em;background:var(--accent);vertical-align:-0.15em;margin-left:2px;border-radius:2px;animation:cursorBlink 1s ease-in-out infinite}
 @keyframes cursorBlink{0%,100%{opacity:1}50%{opacity:0.15}}

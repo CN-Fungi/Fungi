@@ -2153,3 +2153,113 @@ fetch 的情况。」三个现象：**从 0 重来**、**反复多次**、**最�
   两台都在线之后按 §50.1 补三行数字（脚本 `C:/tmp/scratch/fungi-xfer-speed/streams.py`：
   在 `pc` 上把大文件发往 `OwO` 把字节暂存在 pc 的 hub 上，本机戴着 `--id` 拉 1/2/4 次，
   同时差分本机网卡 `ReceivedBytes` 证明字节真的过了网卡）。
+
+## 51. 手机上传（2026-09-19 用户追问）：一条腿的窗口化，以及「终名下半个文件」在这一层的修复
+
+**触发**：用户问「从移动端上传到服务器的你也做分流吗」——没有，§50 只改了 hub→收件端那一段。这一节把手机这一段补上。
+先把边界说清：Fungi 里手机**只有上传**一条腿（`fungi/server.py` 的 GET 路由表里没有任何 file-serving 路由，
+`web/m.js` 里也没有 Blob/download 的影子），所以「手机端分流」在那时只可能是上传。
+
+### 51.1 这一层原来有什么缺陷（同一个 §49 缺陷类，早了一跳）
+
+`_handle_upload` 直接 `dest.open("wb")` **写终名**，只在「抛异常」和「长度不够」两条路上才 `unlink`。于是手机传一半、
+电脑上的 Fungi 被杀掉（或断电），`inbox/` 里就留一个名字正常、内容是半截的文件 —— 与 §49 里 WinRAR 抱怨的同一件事，
+只是发生在手机这一跳。现在换成 §49 的规矩：字节先写 `<名字>.<sid>.part`，**长度对 + 每个字节都有窗口认领**才 rename。
+
+### 51.2 协议形状（三个形状，新旧都能跑）
+
+| 请求 | 含义 |
+|---|---|
+| `POST /upload`（无 query） | 老行为：整个文件一个 body。**一个字节没变**（老页面、curl、脚本继续能用），落地改走 part + rename |
+| `POST /upload?sid&offset&size` | 一个窗口：body 是 `[offset, offset+len)`；`sid` 由浏览器铸，同一份文件的所有窗口共用一个 |
+| `GET /upload` | 能力探针：新 host 回 `{ok, parts:true, min_part}`；老 host 没有这条 GET → 页面回落到单 body |
+| `GET /upload?sid=` | 这一单的现状 `{done, received, total, missing:[[lo,hi],…]}`；覆盖已满时顺手落地并回 `path` |
+
+- 落地判据 = **长度 == 声明值 且 `[0,size)` 全覆盖**（`landing.Spans` 的并集）；同一窗口重发不重复计数，计数也不倒退。
+- `sid` 会进文件名 → 只收 `[A-Za-z0-9_-]{1,64}`；**给了一个不合法的 sid 就 400，绝不悄悄退化成「那这个 body 就是整个文件」**。
+- 名字在**落地那一刻**才挑（`_inbox_path` 的 `-1` 编号）：传输途中别人落了同名文件，不会互相覆盖。
+- 会话 30 分钟没人碰就扫掉（连同 part）；进程被杀留下的 `.part` 会留在 inbox —— 名字带 sid，不冒充真名，
+  也不会挡下一次上传（与 §49 的 part 命名同一套）。
+- 写盘仍是 64 KiB 流式，§48 那条「24 MiB 上传堆峰值 < 6 MiB」的用例继续过。
+
+### 51.3 手机页那一半（`web/common.js::Xfer.upload`）
+
+- 切窗规则与 §50 一致：每窗口 ≥ 4 MiB、最多 4 条，小文件自适应退化成单流；页面 URL 上挂 `?parts=N` 可以钉住条数
+  （**测量用的旋钮**：`?parts=1` 就是改造前的一条流）。
+- 每条各自重试 3 次（0.5s/1s 退避；重试时这条从头再来，进度计数取峰值 → 只增不减）。
+- **谁说了算**：全部窗口发完之后页面**问 host** ——`missing` 为空才算成，不空就只补那几段（最多 3 轮）。
+  这样「socket 说发出去了」与「host 真收到了」之间那道缝（中途断连、body 被截）不用猜。
+- 老 host（没有 `GET /upload`）→ 回落成一条 body，行为与改造前一致。
+- 一个踩过的坑写在这里：**query 必须放进传给 `url()` 的 path 里**。页面的 token 前缀会自己追加 `?t=…` 或 `&t=…`，
+  我自己再拼一个 `?sid=` 就变成 `…?t=TOKEN?sid=…` —— token 被吞进 sid，整条流变 403（浏览器测试抓到的）。
+
+### 51.4 没做
+
+- **手机下载**（电脑→手机）在这一节里仍然不存在：见 §52，那是另一条腿，用户当晚点名要开。
+- 手机端并发条数**没有真机实测**（与 §50.7 同一件事）：手机上行是否单连接吃不满，得在手机上量 1/2/4 条。
+
+### 51.5 验收
+
+- `tests/test_webui_upload.py`（19 例，§48 那次是 11）：能力探针 · 乱序窗口逐字节落地且不留 part ·
+  同一窗口重发不重复计数 · 缺一段时**终名下什么都没有**且 `missing` 精确 · 截断的窗口保留已到的字节并报出缺哪一段
+  （单 body 那条仍然删掉不留）· 落名在 commit 时决定（`-1` 编号）· 越界/非法 sid/空 sid 一律 400 ·
+  被扫掉的会话连 part 一起没、状态回 404 · 单 body 路径与 24 MiB 堆峰值不变。
+- `tests/test_webui_transfer.py::test_mobile_upload_cuts_a_big_file_into_windows`（真 Chromium 真页面）：
+  12 MiB 从手机页发出 → 观测到页面真的发了 3 个互不重叠、每 4 MiB 一段、首段从 0 起的 `?offset=` POST +
+  一次能力探针，落盘逐字节相同、不留 part，页面把落点路径写进了输入框。
+
+## 52. 手机下载（2026-09-19 用户点名）：PC → 手机这条腿，同样支持分流
+
+**触发**：用户问「手机端下载服务器的文件呢？有分流吗」，然后拍板「我真的想开这条腿，都支持分流」。
+这条腿在 Fungi 里原本**不存在**（不是慢，是没有）：手机页只能上传，看得到文件路径、拿不到字节。
+
+### 52.1 路由与权限（门口就是 WebUI token）
+
+`GET /download?path=<路径>`：
+
+| 形状 | 回答 |
+|---|---|
+| `?meta=1` | `{ok, name, size}` —— 只报名字和大小，零字节，供下载器切窗用 |
+| 无 `Range` | `200` 全量 + `Accept-Ranges: bytes` + `Content-Disposition: attachment; filename*=UTF-8''…` |
+| `bytes=a-b` / `bytes=a-` | `206` + `Content-Range` + 该窗口的 `Content-Length` |
+| 起点越过末尾 | `416` + `Content-Range: bytes */size`，不发字节 |
+| 不是文件 / 不存在 | `404`（目录、`nope.bin`、越界相对路径都走这条） |
+
+- **Range 契约与 hub 是同一份代码**：`server.py` 直接用 `fungi/hub/app.py::range_window` 与 `RangeNotSatisfiableError`
+  —— 一个实现在两个服务器上，免得两处各写一遍 206/416 的边界（§50 定的那条）。
+- 权限口径写明白：**WebUI token ＝ 主人的设备**（扫过房主二维码的那台手机；房间好友拿的是**房间 token**，
+  它在这里开不了任何门）。这与 agent 自己的 `read` 工具是同一种身份 —— 那个工具对路径没有任何根限制，
+  所以这条路由**不新增一类权限**，只是把「让 agent 读出来贴进对话」变成「直接取字节」。
+
+### 52.2 手机那一半（`web/common.js::Xfer.download` + `m.js` 的可点路径）
+
+- 先 `?meta=1` 问大小 → 按 §50/§51 同一套规则切窗（每窗 ≥ 4 MiB、最多 4 条）。
+- 各窗口并发 `fetch` 带 `Range`，**某窗口断了从它真到的字节续**（`Range: bytes=(lo+got)-(hi-1)`）。
+- **组装只能在页面里做**：手机在 `http://` 页面上**没有** File System Access（那是 secure context 才有的），
+  所以窗口是按顺序拼成 Blob 后交给浏览器保存 —— 代价是内存。因此：
+  - `total > 192 MiB` 或切不出 ≥ 2 条 → **交给浏览器自己的下载器**（一条连接、落盘流式、没有进度条）；
+  - 拼装前校验「收到的字节数 == meta 里的 size」，不等就**不接受**（§49 那条铁律在最后一跳的客户端形态）。
+- 落地形态：`URL.createObjectURL(blob)` + `<a download=名字>`（`Content-Disposition` 已经带了名字）。
+- **可点路径**：手机端把消息/工具结果里的绝对路径（`C:\…`）变成 `.file-link`，点一下就是「取这个文件」。
+  实现在 `common.js::linkifyPaths`，只走 **text 节点**（`TreeWalker`），绝不改 HTML 字符串 ——
+  在标记上跑正则正是把标签改坏、或把链接塞进 `href` 的经典做法。桌面端不传 `fileLink`，行为不变（文件本来就在它手上）。
+- 手机上的进度条复用同一个发送模态（一步「下载到手机」）；交给浏览器下载时不假装有进度，直接说明。
+
+### 52.3 没做
+
+- **不在服务端拼装**（不做 `/download?sid&offset` 那种多请求会话）：手机要的是**保存到手机**，
+  拼在服务端再传一遍等于把字节走两趟。§50 的两份实现（服务端 Range + 客户端窗口）在这里是「Range 用服务端那份、组装用客户端这份」。
+- **HTTPS**：上了 HTTPS，手机就能用 File System Access 在**盘上就地写**（内存只占一个窗口），
+  这是这条腿的下一步；自签证书要手机手动信任，属于另一件事。
+- 手机端 1/2/4 条的真机数字同样**待测**（见 §50.7 的口径）。
+
+### 52.4 验收
+
+- `tests/test_webui_upload.py`：`?meta=1` 只回名字与大小 · 整份下载带 `Accept-Ranges` 与
+  `Content-Disposition` · Range 逐字节（含开区间与按 RFC 夹末尾）· 越界 416 且不发字节 · 看不懂的 Range 忽略当 200 ·
+  目录/不存在/越界相对路径 404。
+- `tests/test_webui_transfer.py`（真 Chromium）：
+  `test_the_phone_pulls_a_file_from_the_pc_in_windows` —— 12 MiB 从手机页拉取，观测到 1 次 `meta=1` +
+  3 个 `Range` 窗口（互不重叠、覆盖 `[0,size)`、每 4 MiB 一段），**浏览器另一个保存下来的文件与源逐字节相同**，
+  建议文件名取自 `Content-Disposition`；`test_paths_in_the_transcript_are_taps` —— 路径变可点链接、
+  已有的 `<a>` 不被改写、句读不吞进路径。
