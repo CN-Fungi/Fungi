@@ -2359,3 +2359,54 @@ fetch 的情况。」三个现象：**从 0 重来**、**反复多次**、**最�
   改成等 `allSessions` 里真的出现 `(new session)`。
 - 门禁：`python -m ruff check .` 干净 · `python -m ruff format --check fungi tests` 干净 ·
   `PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **691 passed**（209s；§53 那次是 688）。
+
+## 55. 轮询不该让页面抖（2026-09-19 用户现场报告）：只追加新增行，没新行一个 DOM 都不碰
+
+**用户的原话**：「我发现你这个会刷新导致页面出现频繁变化（有无滚动条等）移动端也是，会话列表频繁刷新重载」。
+
+### 55.1 根因：是 §53 那个轮询走了「整表重画」，不是老代码
+
+`reloadSessionFromServer()` 是现成的、给「回合结束/切换会话」用的重载，它做两件事：
+
+1. `S.clearMsgs()` + 整表重画 —— 滚动条忽隐忽现、选区与图片被重建，一眼就是「页面在刷新」；
+2. 顺手 `loadSessions()` —— **移动端的 `renderSessionList` 是先删掉所有行再逐行重建 + GSAP 淡入**，
+   所以看起来就是「会话列表频繁刷新重载」。
+
+§53 的轮询每 3 秒调它一次 → 用户看到的抖动。**移动端本来就有的两个 3 秒轮询不背这个锅**：
+`pollPendingAsks` 只在真有新卡片时挂卡片、`resumeIfPending` 只在有后台任务时才动（都读过代码确认）。
+
+### 55.2 修法（三层）
+
+1. **服务端给一个游标**：`GET /session?id=X&after=N` → 只回第 N 行之后的行 + `total`；不带 `after` 时仍是整份
+   （切换会话、回合结束那些路径行为一个字节没变）。
+2. **两个 shell 的轮询改成 `pollShuttle()`**：只取新增行、只**追加**这几行（复用同一个 `renderTranscript` 渲染器，
+   asks 传空），并且**永不调用 `loadSessions()`**。
+3. **没有新行就直接 return** —— 不重绘、不碰列表、连一个 DOM 属性都不写。
+
+游标就是渲染器手里那份 `rawMessages.length`，所以「整份载入」（切换会话）之后游标自然对齐，不需要额外状态。
+
+### 55.3 现在保证什么（都写进了用例）
+
+- **空转 4.5 秒**（> 一个轮询周期）：`#messages` 上的 MutationObserver 记到 **0** 次变更；
+  `/sessions` 请求 **0** 次（会话列表在这条路径上永不重载）。
+- **有新行**：只多一行（`rows + 1`），而且**原来那一行还是同一个 DOM 节点**（打 `data-probe` 验身份 ——
+  重画会把节点换掉，追加不会）。
+- 于是「有无滚动条」的抖动消失：容器高度只在真的多了一行时才变，且是往下长。
+
+### 55.4 没做
+
+- **没有改成推送**：`/events` 那条流是回合制的（磁带 + 直播），要让「追加一行」也走它，得给会话加一层
+  发布订阅 —— 值得做，但不是这次修抖动的最小改动。
+- 3 秒仍是周期：它现在是一个**几乎什么都不做**的轮询（一次小 GET，通常零 DOM 变更）。
+
+### 55.5 验收
+
+- `tests/test_shuttle.py::test_after_returns_only_what_is_new`：`after=1` 只回第 2 行、`after=2` 回空、
+  `after=99` 回空且 `total` 仍是 2；不带 `after` 的整份形状不变。
+- `tests/test_webui_transfer.py::test_the_transfer_session_only_appends_what_is_new`（真 Chromium）：
+  进入传输会话 → 安静 4.5 秒断言 **0 变更 / 0 次 `/sessions`** → 电脑侧丢一条 → 新行出现、
+  老行节点身份不变、总行数只 +1、`/sessions` 仍是 0。
+- 这类用例的**共享状态陷阱**（写下来免得下次再踩）：传输会话是**模块级 room** 里的同一个会话，
+  前面的用例会往里丢过行 —— 断言必须相对「进入时屏幕上已有几行」，不能假设空会话（第一版就是这么 flaky 的）。
+- 门禁：`python -m ruff check .` 干净 · `python -m ruff format --check fungi tests` 干净 ·
+  `PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **693 passed**（§54 那次是 691）。

@@ -650,7 +650,8 @@ class YesSirHandler(BaseHTTPRequestHandler):
                     )
             self._send_json({"sessions": sessions})
         elif route == "/session":
-            session_id = (parse_qs(url.query).get("id") or [None])[0]
+            params = parse_qs(url.query)
+            session_id = (params.get("id") or [None])[0]
             if session_id == SHUTTLE_ID:
                 # Opening it is a reason for it to exist (§53): the phone must
                 # not find a 404 where the transfer session should be.
@@ -658,8 +659,24 @@ class YesSirHandler(BaseHTTPRequestHandler):
             data = self.runtime.sessions_load(session_id) if session_id else None
             if data is None:
                 self._send_json({"error": "not found"}, status=404)
-            else:
+                return
+            after = _int_or_none((params.get("after") or [""])[0])
+            if after is None:
                 self._send_json(data)
+            else:
+                # `after=N`: only the rows added since the caller's cursor, so a
+                # page watching for new transfers can append them instead of
+                # repainting the transcript (which flickers: the scrollbar, the
+                # selection, the images — §55).
+                messages = data.get("messages") or []
+                self._send_json(
+                    {
+                        "id": data.get("id"),
+                        "title": data.get("title"),
+                        "messages": messages[max(0, after) :],
+                        "total": len(messages),
+                    }
+                )
         elif route == "/peers":
             self._send_json({"peers": self.runtime.peers()})
         elif route == "/consent-mode":

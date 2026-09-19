@@ -1050,12 +1050,27 @@ function renderFriendChat(d) {
 setInterval(loadPeers, 5000);
 /* The file-transfer session (§53) is written by the *other* device too: poll it
    while it is open so a file the phone sent shows up here without a reload.
-   Which id that is comes from /sessions (entry.shuttle), never a copy here. */
-setInterval(() => {
+   Which id that is comes from /sessions (entry.shuttle), never a copy here.
+
+   Incremental on purpose (§55): only the rows added since our cursor, appended;
+   with nothing new the DOM is not touched at all (a full repaint every 3 s made
+   the scrollbar come and go) and the session list is never reloaded from here. */
+async function pollShuttle() {
   if (document.hidden || !currentSessionId) return;
   const open = (allSessions || []).find(s => s.id === currentSessionId);
-  if (open && open.shuttle) reloadSessionFromServer();
-}, 3000);
+  if (!open || !open.shuttle) return;
+  try {
+    const r = await fetch('/session?id=' + encodeURIComponent(open.id) + '&after=' + rawMessages.length);
+    if (!r.ok) return;
+    const fresh = (await r.json()).messages || [];
+    if (!fresh.length) return;
+    rawMessages = rawMessages.concat(fresh);
+    const stick = isNearBottom(msgs);
+    FC.renderTranscript(S, fresh, [], renderOpts());
+    if (stick && S.stick()) updateScrollBtn();
+  } catch (e) {}
+}
+setInterval(pollShuttle, 3000);
 loadPeers();
 
 /* theme: light default, persisted; the switch flips html[data-theme] */

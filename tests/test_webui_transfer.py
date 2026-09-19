@@ -532,6 +532,77 @@ def test_the_phone_sees_a_file_the_computer_dropped(mobile_page, rooms, tmp_path
     ), "the upload never showed up in the session"
 
 
+def test_the_transfer_session_only_appends_what_is_new(mobile_page, rooms):
+    """§55, from the user's report: a poll that repaints the transcript makes the
+    scrollbar come and go every few seconds, and reloading the session list
+    rebuilds (and re-animates) every row. So: nothing new → not one DOM change,
+    a new file → one appended row, and never a /sessions fetch from the poll."""
+    server, _client = rooms
+    runtime = server.webui_runtime()
+    webui_server.shuttle_ensure(runtime)
+    mobile_page.evaluate("async () => { await loadSessions(); }")
+    shuttle_id = mobile_page.evaluate("() => allSessions.find(s => s.shuttle).id")
+    mobile_page.evaluate("(id) => switchSession(id)", shuttle_id)
+    assert _wait(lambda: mobile_page.evaluate("() => currentSessionId") == shuttle_id), (
+        "never landed in the transfer session"
+    )
+
+    # The room (and so the session) is shared across this module: count from what
+    # is already on screen rather than assuming an empty transcript.
+    def _count(selector: str) -> int:
+        return mobile_page.evaluate("(sel) => document.querySelectorAll(sel).length", selector)
+
+    links, rows = _count("#messages .file-link"), _count("#messages .msg")
+    webui_server.shuttle_post(runtime, r"C:\one\first.bin")  # the first row, entered live
+    assert _wait(lambda: _count("#messages .file-link") == links + 1), (
+        "the first transfer never showed up"
+    )
+    rows += 1
+
+    # Tag the rendered row BEFORE watching: writing that attribute is itself a
+    # mutation, and the observer must not be blamed for the test's own poke.
+    mobile_page.evaluate(
+        "() => { document.querySelector('#messages .msg').dataset.probe = 'kept'; }"
+    )
+    mobile_page.evaluate(
+        """() => {
+          window.__mut = 0; window.__sessions = 0;
+          new MutationObserver(ms => { window.__mut += ms.length; }).observe(
+            document.getElementById('messages'),
+            { childList: true, subtree: true, characterData: true, attributes: true }
+          );
+          const of = window.fetch;
+          window.fetch = function (u, o) {
+            if (String(u).indexOf('/sessions') === 0) window.__sessions++;
+            return of.apply(this, arguments);
+          };
+
+        }"""
+    )
+    # A quiet window longer than the poll period: this is the part the user saw
+    # as "frequent refreshing" — it must be a complete no-op.
+    assert _wait(lambda: False, timeout_s=4.5) is False
+    quiet = mobile_page.evaluate("() => ({ mut: window.__mut, sessions: window.__sessions })")
+    assert quiet == {"mut": 0, "sessions": 0}, f"the idle poll touched the page: {quiet}"
+
+    # Something new arrives (the computer drops a file): one row appended, and
+    # the row that was already there is the same DOM node as before.
+    webui_server.shuttle_post(runtime, r"C:\two\second.bin")
+    assert _wait(lambda: _count("#messages .file-link") == links + 2, timeout_s=12), (
+        "the new transfer never appeared"
+    )
+    after = mobile_page.evaluate(
+        """() => ({
+          kept: !!document.querySelector('#messages [data-probe=kept]'),
+          sessions: window.__sessions,
+          rows: document.querySelectorAll('#messages .msg').length,
+        })"""
+    )
+    assert after["kept"] is True, "the transcript was repainted instead of appended to"
+    assert after["sessions"] == 0, "the poll reloaded the session list"
+    assert after["rows"] == rows + 1, after  # exactly one row appended, nothing rebuilt
+
+
 def test_a_failed_send_says_so_and_stays_open(page, rooms, tmp_path):
     """A bar that cannot finish must say why, not vanish as if it had."""
     _server, _client = rooms

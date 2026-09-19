@@ -144,6 +144,24 @@ def test_a_broken_store_does_not_fail_the_upload(shuttle_env, monkeypatch):
     assert out["done"] is True and (inbox / "note.txt").read_bytes() == b"fine"
 
 
+def test_after_returns_only_what_is_new(shuttle_env):
+    """A page watching for transfers gets the rows it has not seen (§55): that is
+    what lets it append instead of repainting the whole transcript."""
+    base, _inbox = shuttle_env
+    _upload(base, "one.bin", b"1")
+    _status, first = _get(base, "/session?id=" + webui.SHUTTLE_ID)
+    assert len(first["messages"]) == 1 and "total" not in first
+
+    _upload(base, "two.bin", b"22")
+    _status, tail = _get(base, f"/session?id={webui.SHUTTLE_ID}&after=1")
+    assert tail["total"] == 2 and len(tail["messages"]) == 1
+    assert "two.bin" in tail["messages"][0]["content"]
+    _status, nothing = _get(base, f"/session?id={webui.SHUTTLE_ID}&after=2")
+    assert nothing["messages"] == [] and nothing["total"] == 2
+    _status, past = _get(base, f"/session?id={webui.SHUTTLE_ID}&after=99")
+    assert past["messages"] == [] and past["total"] == 2
+
+
 def test_it_cannot_be_renamed(shuttle_env):
     """Its name is its identity (§54): a save that carries another title keeps
     the real one — the UI hides the ✎, and the server does not need the UI."""

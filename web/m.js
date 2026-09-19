@@ -1140,14 +1140,30 @@ pollPendingAsks();
 loadPeers();
 setInterval(loadPeers, 5000);
 /* 文件传输助手（§53）：两个设备往同一个会话里落行（手机上传的落点、电脑要发给
-   手机的文件），谁都不点刷新也得看得到 —— 只在这个会话里轮询，别的会话一个都不动。
-   哪个 id 是它由服务端在 /sessions 里标（entry.shuttle），前端不重复写一份常量。 */
-setInterval(() => {
+   手机的文件），谁都不点刷新也得看得到。
+
+   只取**新增的行**、只**追加**它们 —— 早先这里是 reloadSessionFromServer()，
+   整表清空重画 + 顺手重载会话列表，于是每 3 秒抖一次（滚动条忽隐忽现、列表重建
+   动画；§55）。没有新行时一个 DOM 都不碰，会话列表也永远不因为这里而重载。 */
+async function pollShuttle() {
   if (document.hidden || processing || !currentSessionId) return;
   if (!pane.is('session')) return;   // 好友视图握着 #messages
   const open = (allSessions || []).find(s => s.id === currentSessionId);
-  if (open && open.shuttle) reloadSessionFromServer();
-}, 3000);
+  if (!open || !open.shuttle) return;
+  try {
+    const r = await fetchJSON(
+      '/session?id=' + encodeURIComponent(open.id) + '&after=' + rawMessages.length
+    );
+    if (!r.ok) return;
+    const fresh = (await r.json()).messages || [];
+    if (!fresh.length) return;               // 没有新的：不重绘、不动列表
+    rawMessages = rawMessages.concat(fresh);
+    const stick = isNearBottom(msgs);
+    FC.renderTranscript(S, fresh, [], renderOpts());   // 只追加这几行
+    if (stick && S.stick()) updateScrollBtn();
+  } catch (e) { if (e.message !== 'unauthorized') console.error('pollShuttle:', e); }
+}
+setInterval(pollShuttle, 3000);
 
 /* ---------- mail unread: per-peer badges on the friend list ---------- */
 const MailUnread = FC.initMailUnread({ http: FC, onChange: renderFriendList });
