@@ -2617,6 +2617,51 @@ CSS 只加两条（`style.css` / `m.css`）：`.msg.file-card.fc-mine{align-self
 
 ### 59.4 没做 / 待定
 
-- **不带文件的普通消息行仍然一律靠右**：传输助手里那些行都是 `role: "user"`，行里**没有**「谁发的」这个信息
-  （只有带文件的行走 `file.direction`），文字行要分侧就得在服务端多存一个字段。等他真的在意再说。
+- **不带文件的普通消息行也分侧了**（用户 2026-09-19「要分侧加字段」→ §60）：行里现在存 `direction`，
+  由发消息的那个 shell 声明。原来这里写的是「等他真的在意再说」。
 - 卡片在**好友视图**里不会出现（那边走 comm 消息，不读 `file`），所以 `my` 只作用于会话视图。
+
+## 60. 普通消息行也分侧（2026-09-19 用户裁决「要分侧加字段」）：行里存下发送方
+
+§59 只把**卡片**分了侧，他补了一句：传输助手里还有**没有文件的文字行**，那些行当时一律靠右（§59.4 如实记着）。
+卡片自带 `file.direction`，文字行没有 —— 所以要**在行上存一个字段**。
+
+### 60.1 行上存 `direction`，由发消息的 shell 声明
+
+- 客户端在**发的时候声明**：`POST /chat` 的 body 多一个 `side`（`app.js` 的 `MY_SIDE = 'computer'`、
+  `m.js` 的 `MY_SIDE = 'phone'`，与渲染用的 `my` 是同一个常量，所以不可能两边各说一套）。
+- 服务端 `shuttle_post(..., side=)` 把它写进行里：`row["direction"]`。带文件的行仍取 `file.direction` ——
+  也就是**同一个字段名、同一个含义**，不再造第二个名字。不认识的 `side` 一律当没声明：
+  **猜一个错的边，比空着更坏**。
+- 没声明的行保持原样（老页面、脚本、旧数据都不受影响）：还是 `.msg.user` 的默认（靠右）。
+- 服务端这一层还顺手修了个不一致：**手机**发一条路径时，那张卡的 `direction` 以前被写死成 `computer`
+  （`file_in(message, "computer")`），现在是「谁发的就是谁的」——他手机上打一条电脑上的路径，卡片会说「手机上传」。
+
+### 60.2 渲染：一处算，两处用
+
+`common.js::renderTranscript` 里算一次侧类（`mine` / `peer`），卡片与文字行共用：
+`dir = m.direction || m.file.direction` → `dir === opts.my ? ' mine' : ' peer'`。
+于是 `.fc-mine` / `.fc-peer` 那对名字并成 `mine` / `peer`（卡片 = `msg file-card mine`，文字行 = `msg user mine`），
+CSS 里全是**三个类**（`.msg.file-card.mine` / `.msg.user.peer`），照旧不靠「谁写在后面」。
+自己那一行的时间戳跟着走（`.msg.user.peer[data-when]::after`）。
+
+### 60.3 验收
+
+- 修前先红，分两层取证：
+  - 只 `git stash` 掉 `web/`（服务端那半留着）：`test_the_phone_sees_a_file_the_computer_dropped` 里
+    「电脑那头的一句话」仍是 `flex-end` —— 行里有了发送方、页面还不会用。
+  - 连 `fungi/server.py` 一起 stash：`test_a_plain_row_keeps_the_side_that_typed_it` → `KeyError: 'direction'`；
+    `test_a_message_naming_a_real_file_becomes_a_card` → 手机发的那条路径仍是 `computer`。
+- `tests/test_shuttle.py::test_a_plain_row_keeps_the_side_that_typed_it`：`side="phone"` 的行记住 `phone` ·
+  不声明的行没有这个字段 · `side="tablet"` 也不认。
+- `tests/test_webui_sessions.py::test_the_desktop_sides_the_cards_and_stops_saying_thinking`（真 Chromium）：
+  桌面自己打的那句靠右、`side="phone"` 那行靠左。
+- `tests/test_webui_transfer.py::test_the_phone_sees_a_file_the_computer_dropped`（真 Chromium）：
+  手机自己打的那句靠右、电脑那行靠左。
+- 门禁：`python -m ruff check .` 干净 · `python -m ruff format --check fungi tests` 干净 ·
+  `PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **699 passed / 271s**（§59 那次 698：本轮新增 `test_a_plain_row_keeps_the_side_that_typed_it`）。
+
+### 60.4 仍然没做
+
+- 好友视图那套 `friend-mine` / `friend-peer` **没有**并进 `mine` / `peer`：它两侧的语义（对面在左、信使在右）
+  是另一回事，合并只为了少两个名字，得不偿失。

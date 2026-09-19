@@ -145,11 +145,15 @@ const renderOpts = extra => Object.assign({
   asks: { buildAnsweredAskCard },
   spawnLookup: callId => specByCall[callId] || archivedByCall[callId],
   argsMax: 80,
-  my: 'computer',   // a card sits on the side of the device it came from (§59)
+  my: MY_SIDE,   // a row sits on the side of the device it came from (§59)
   reasoningHtml: t => '<div style="white-space:pre-wrap;max-height:200px;overflow-y:auto">' + escapeHtml(t) + '</div>',
   liveText: r => { const text = FC.stripSilent(r.text); return text ? marked.parse(text) : ''; },
 }, extra || {});
 const FRIEND_SIDE = { user: ' friend-peer', agent: ' friend-mine' }; // peer left, courier right (style.css)
+/* This shell *is* the computer: it renders its own rows on the right and the
+   phone's on the left, and it tells the server the same thing when it sends, so
+   a plain message row can be sided too (§59). */
+const MY_SIDE = 'computer';
 
 async function newSession() {
   leaveFriendView();
@@ -422,7 +426,7 @@ async function send() {
   input.value = ''; btn.disabled = true; status.textContent = 'Thinking...';
   _liveCount = 0; window.fungiMotion?.waveOn?.(status);
   renderTurnLive();
-  await pumpStream('/chat', { message: text, sessionId: sid });
+  await pumpStream('/chat', { message: text, sessionId: sid, side: MY_SIDE });
   if (currentSessionId === sid) input.focus();
 }
 

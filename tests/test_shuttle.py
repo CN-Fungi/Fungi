@@ -51,10 +51,15 @@ def _get(base: str, path: str) -> tuple[int, dict]:
         return resp.status, json.loads(resp.read())
 
 
-def _send(base: str, text: str) -> dict:
-    body = json.dumps({"sessionId": webui.SHUTTLE_ID, "message": text}).encode()
+def _send(base: str, text: str, side: str | None = None) -> dict:
+    payload: dict = {"sessionId": webui.SHUTTLE_ID, "message": text}
+    if side:
+        payload["side"] = side  # which device typed this (§59)
     req = urllib.request.Request(
-        base + "/chat", data=body, headers={"Content-Type": "application/json"}, method="POST"
+        base + "/chat",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
         events = [json.loads(line) for line in resp.read().decode().splitlines() if line]
@@ -102,6 +107,22 @@ def test_sending_in_it_records_a_row_and_runs_no_turn(shuttle_env):
     assert _rows(base)[0]["ts"] > time.time() - 60
 
 
+def test_a_plain_row_keeps_the_side_that_typed_it(shuttle_env):
+    """§59: a card carries who sent it (`file.direction`), a plain message has no
+    such field — so the shell declares itself when it sends. Without that the
+    other shell cannot put the row on the left, and everything looks like one
+    side again. A shell that says nothing (or says something unknown) is left
+    unsided rather than guessed."""
+    base, _inbox = shuttle_env
+    _send(base, "在吗", side="phone")
+    _send(base, "在")
+    _send(base, "喂", side="tablet")
+    rows = _rows(base)
+    assert rows[0]["direction"] == "phone"
+    assert "direction" not in rows[1], "a silent shell must not be guessed"
+    assert "direction" not in rows[2], "an unknown sender is not a side"
+
+
 def test_a_phone_upload_writes_its_own_row(shuttle_env):
     """The other direction, and the whole point of the session: what the phone
     sent lands, and both devices can see where it went."""
@@ -143,6 +164,10 @@ def test_a_message_naming_a_real_file_becomes_a_card(shuttle_env, tmp_path):
 
     _send(base, r"C:\nope\missing.bin")
     assert "file" not in _rows(base)[1]
+
+    # the same path, typed on the phone: the phone's row and the phone's card
+    _send(base, str(src), side="phone")
+    assert _rows(base)[2]["file"]["direction"] == "phone"
 
 
 def test_a_file_name_with_blanks_is_still_a_card(shuttle_env, tmp_path):

@@ -596,6 +596,28 @@ def test_the_phone_sees_a_file_the_computer_dropped(mobile_page, rooms, tmp_path
     )
     assert own == "flex-end", own
 
+    # §59 for plain rows too: the phone's own line hugs the right, the computer's
+    # hugs the left — the row keeps the side the shell declared when it sent.
+    webui_server.shuttle_post(runtime, "电脑那头的一句话", side="computer")
+    mobile_page.fill("#input", "在吗")
+    mobile_page.click("#btn-send")
+
+    def _bubble(text: str) -> str:
+        return mobile_page.evaluate(
+            """(text) => {
+              const el = Array.from(document.querySelectorAll('#messages .msg.user'))
+                .find(e => e.textContent.trim() === text);
+              return el ? getComputedStyle(el).alignSelf : null;
+            }""",
+            text,
+        )
+
+    assert _wait(lambda: _bubble("在吗") is not None, timeout_s=12), (
+        "the phone's own line never showed up"
+    )
+    assert _bubble("在吗") == "flex-end", "the phone's own line belongs on the right"
+    assert _bubble("电脑那头的一句话") == "flex-start", "the computer's line belongs on the left"
+
 
 def test_a_sent_path_arrives_as_a_card_that_pulls(mobile_page, rooms, tmp_path):
     """§56: the computer hands the phone a file by sending its path, and what the

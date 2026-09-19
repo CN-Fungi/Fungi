@@ -157,7 +157,7 @@ def test_the_desktop_sides_the_cards_and_stops_saying_thinking(page, room, tmp_p
         },
     )
     assert _wait(
-        lambda: page.evaluate("() => !!document.querySelector('#messages .file-card.fc-peer')"),
+        lambda: page.evaluate("() => !!document.querySelector('#messages .file-card.peer')"),
         timeout_s=12,
     ), "the phone's row never reached the desktop transcript"
     peer = _look("from-phone.bin")
@@ -171,6 +171,27 @@ def test_the_desktop_sides_the_cards_and_stops_saying_thinking(page, room, tmp_p
     )
     status = page.evaluate("() => document.getElementById('status').textContent")
     assert status == "", f"the progress line never cleared: {status!r}"
+
+    # §59 for plain rows too: what this computer typed sits right, what the phone
+    # typed sits left — which only works because the shell declares its side when
+    # it sends, and the row keeps it.
+    webui_server.shuttle_post(room.webui_runtime(), "手机那头的一句话", side="phone")
+
+    def _bubble(text: str) -> str:
+        return page.evaluate(
+            """(text) => {
+              const el = Array.from(document.querySelectorAll('#messages .msg.user'))
+                .find(e => e.textContent.trim() === text);
+              return el ? getComputedStyle(el).alignSelf : null;
+            }""",
+            text,
+        )
+
+    assert _wait(lambda: _bubble("手机那头的一句话") is not None, timeout_s=12), (
+        "the phone's message never reached the desktop transcript"
+    )
+    assert _bubble("手机那头的一句话") == "flex-start"
+    assert _bubble("记一笔") == "flex-end", "the computer's own line belongs on the right"
 
 
 def test_the_transfer_session_stands_apart_and_cannot_be_touched(page):

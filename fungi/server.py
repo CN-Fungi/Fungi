@@ -163,11 +163,13 @@ def shuttle_ensure(runtime) -> None:
         runtime.sessions_save(SHUTTLE_ID, SHUTTLE_TITLE, [])
 
 
-def shuttle_post(runtime, text: str, file: dict | None = None) -> None:
+def shuttle_post(runtime, text: str, file: dict | None = None, side: str | None = None) -> None:
     """Append one transfer to the shuttle; both directions land here (§53).
 
     `file` is what turns the row into a card (§56): the name, the size, where it
-    is and which side sent it. Without it the row is just a message.
+    is and which side sent it. Without it the row is just a message — and then
+    `side` is the only thing that says which device typed it, which is what puts
+    a row on the right side of the transcript (§59).
     """
     with _session_lock(SHUTTLE_ID):
         stored = runtime.sessions_load(SHUTTLE_ID) or {}
@@ -175,6 +177,9 @@ def shuttle_post(runtime, text: str, file: dict | None = None) -> None:
         row: dict = {"role": "user", "content": text, "ts": time.time()}
         if file:
             row["file"] = file
+        who = (file or {}).get("direction") or side
+        if who:
+            row["direction"] = who
         messages.append(row)
         runtime.sessions_save(
             SHUTTLE_ID,
@@ -929,11 +934,11 @@ class YesSirHandler(BaseHTTPRequestHandler):
         data = self._read_body()
         session_id = data.get("sessionId")
         if session_id == SHUTTLE_ID:
-            self._shuttle_turn(str(data.get("message") or ""))
+            self._shuttle_turn(str(data.get("message") or ""), data.get("side"))
             return
         self._run_turn(session_id, user_msg=str(data.get("message") or ""))
 
-    def _shuttle_turn(self, text: str) -> None:
+    def _shuttle_turn(self, text: str, side: str | None = None) -> None:
         """A send in the transfer session: one row, and no model runs (§53).
 
         The page streams turns, so it gets the same NDJSON shape as any other
@@ -950,7 +955,14 @@ class YesSirHandler(BaseHTTPRequestHandler):
         try:
             message = text.strip()
             if message:
-                shuttle_post(self.runtime, message, file_in(message, "computer"))
+                if side not in ("phone", "computer"):
+                    side = None  # an unknown sender beats a wrong side (§59)
+                shuttle_post(
+                    self.runtime,
+                    message,
+                    file_in(message, side or "computer"),
+                    side=side,
+                )
             sink.emit("sessionId", SHUTTLE_ID)
         except Exception as exc:
             sink.emit("error", str(exc))

@@ -1221,15 +1221,12 @@
     return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
   }
 
-  /* Which side a card sits on is the *shell's* question, not the row's (§59): the
-     desktop page is the computer, the phone page is the phone — so the same row
-     is "mine" on one shell and "the other device's" on the other. */
+  /* The card wears the side it is handed (§59): "which device is mine" is the
+     shell's question, not the row's, so `renderTranscript` picks between `mine`
+     and `peer` — this function only draws. */
   function buildFileCard(file, opts) {
     const d = document.createElement('div');
-    d.className = 'msg file-card';
-    if (opts && opts.my && file.direction) {
-      d.classList.add(file.direction === opts.my ? 'fc-mine' : 'fc-peer');
-    }
+    d.className = 'msg file-card' + (opts && opts.side ? opts.side : '');
     const who = file.direction === 'phone' ? '手机上传' : '电脑发送';
     d.innerHTML =
       '<div class="fc-head"><span class="fc-icon">&#x1F4C1;</span>'
@@ -1266,16 +1263,23 @@
     });
     for (const m of messages || []) {
       if (m.role === 'user') {
+        /* Which side a row sits on is the *shell's* question, not the row's
+           (§59): the desktop page is the computer, the phone page is the phone,
+           so the same row is "mine" on one and "the other device's" on the
+           other. A card says who sent it in its own fields; a plain message only
+           says it if the shell that typed it declared itself. */
+        const dir = m.direction || (m.file && m.file.direction) || '';
+        const side = opts.my && dir ? (dir === opts.my ? ' mine' : ' peer') : '';
         if (m.file) {
           // A transfer (§53/§56): the card IS the row.
-          p.append(markTs(buildFileCard(m.file, { canPull: opts.fileLink, my: opts.my }), m.ts));
+          p.append(markTs(buildFileCard(m.file, { canPull: opts.fileLink, side }), m.ts));
           continue;
         }
         const c = String(m.content || '');
         const echo = opts.friend ? humanEcho(c) : null; // only the friend thread merges mail
         if (echo) {
           if (mailBodies && mailBodies.has(echo.text)) continue; // the mailbox copy is already on screen
-          const bubble = markTs(p.add('user' + userSide, marked.parse(echo.text)), m.ts);
+          const bubble = markTs(p.add('user' + userSide + side, marked.parse(echo.text)), m.ts);
           const lab = document.createElement('div');
           lab.className = 'human-label';
           lab.textContent = '来自 ' + echo.who + ' 的用户';
@@ -1283,13 +1287,13 @@
         }
         else if (c.startsWith('[background report]')) markTs(p.add('sys-note', escapeHtml(c)), m.ts);
         else if (m.sender === 'human' && !m.mine) {
-          const bubble = markTs(p.add('user' + userSide, marked.parse(c)), m.ts);
+          const bubble = markTs(p.add('user' + userSide + side, marked.parse(c)), m.ts);
           const lab = document.createElement('div');
           lab.className = 'human-label';
           lab.textContent = '来自 ' + (m.sender_name || '?') + ' 的用户';
           bubble.prepend(lab);
         }
-        else markTs(p.add('user' + userSide, marked.parse(c)), m.ts);
+        else markTs(p.add('user' + userSide + side, marked.parse(c)), m.ts);
       }
       else if (m.role === 'assistant') {
         if (m.reasoning) {

@@ -258,8 +258,11 @@ const renderOpts = extra => Object.assign({
   reasoningHtml: t => '<div>' + escapeHtml(t) + '</div>',
   liveText: r => { const text = FC.stripSilent(r.text); return text ? escapeHtml(text) : ''; },
   fileLink: path => pullFromPc(path),   // 手机：点路径就把文件取过来（§52）
-  my: 'phone',                          // 卡片站在「发它的那台设备」那一边（§59）
+  my: MY_SIDE,                          // 行站在「发它的那台设备」那边（§59）
 }, extra || {});
+/* 这个 shell 就是手机：自己发的一律靠右、电脑发来的靠左；发消息时把同一件事告诉服务端，
+   这样普通文字行也能分侧（§59）。 */
+const MY_SIDE = 'phone';
 /* 好友视图的两侧：对面在左（素底），我方在右——与桌面同一套 side 类
    （顶栏的会话视图不受影响，它本来就不分侧）。 */
 const FRIEND_SIDE = { user: ' friend-peer', agent: ' friend-mine' };
@@ -314,7 +317,7 @@ async function send() {
   input.value = ''; autoGrow(); status.textContent = 'Thinking...';
   _liveCount = 0;
   renderTurnLive();
-  await pumpStream(api('/chat'), { message: text, sessionId: sid });
+  await pumpStream(api('/chat'), { message: text, sessionId: sid, side: MY_SIDE });
 }
 /* Empty send button: rerun the failed/stopped turn with no new prompt —
    the desktop Alt+R contract (POST /retry, server strips the error tail). */
