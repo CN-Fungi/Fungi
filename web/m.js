@@ -193,24 +193,33 @@ function renderSessionList() {
   filtered.forEach(s => {
     const row = document.createElement('div');
     row.dataset.sid = s.id;
-    row.className = 'session-row' + (s.id === currentSessionId ? ' active' : '');
-    row.innerHTML = '<span class="session-row-title">' + escapeHtml(s.title || 'Untitled') + '</span>'
-      + '<span class="session-row-meta">' + fmtDate(s.created) + (s.running ? ' \u25cf' : '') + '</span>'
-      + '<button class="session-row-act ren" title="重命名">&#9998;</button>'
-      + '<button class="session-row-act del" title="删除">&#10005;</button>';
-    row.querySelector('.session-row-act.ren').addEventListener('click', e => {
-      e.stopPropagation(); startRename(row, s);
-    });
-    row.querySelector('.session-row-act.del').addEventListener('click', e => {
-      e.stopPropagation();
-      showConfirm({
-        title: '删除会话',
-        message: '「' + (s.title || 'Untitled') + '」将被永久删除，不可恢复。',
-        confirmText: '删除',
-        danger: true,
-        onConfirm: () => deleteSession(s.id)
+    // 文件传输助手（§53/§54）：不是聊天会话，而是两台设备之间的搬运通道 ——
+    // 常驻置顶、带图标、样式不同，而且**没有改名/删除两个按钮**（服务端也拒绝）。
+    row.className = 'session-row' + (s.shuttle ? ' shuttle' : '')
+      + (s.id === currentSessionId ? ' active' : '');
+    if (s.shuttle) row.title = '文件传输助手：两台设备之间只搬文件，不会改名也不会被删除';
+    row.innerHTML = (s.shuttle ? '<span class="session-row-icon">&#x1F4C1;</span>' : '')
+      + '<span class="session-row-title">' + escapeHtml(s.title || 'Untitled') + '</span>'
+      + '<span class="session-row-meta">' + (s.shuttle ? '只搬文件' : fmtDate(s.created))
+      + (s.running ? ' \u25cf' : '') + '</span>'
+      + (s.shuttle ? ''
+        : '<button class="session-row-act ren" title="重命名">&#9998;</button>'
+          + '<button class="session-row-act del" title="删除">&#10005;</button>');
+    if (!s.shuttle) {
+      row.querySelector('.session-row-act.ren').addEventListener('click', e => {
+        e.stopPropagation(); startRename(row, s);
       });
-    });
+      row.querySelector('.session-row-act.del').addEventListener('click', e => {
+        e.stopPropagation();
+        showConfirm({
+          title: '删除会话',
+          message: '「' + (s.title || 'Untitled') + '」将被永久删除，不可恢复。',
+          confirmText: '删除',
+          danger: true,
+          onConfirm: () => deleteSession(s.id)
+        });
+      });
+    }
     row.addEventListener('click', () => switchSession(s.id));
     list.appendChild(row);
     fresh.push(row);

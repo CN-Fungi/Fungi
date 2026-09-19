@@ -78,6 +78,32 @@ def _titles(page) -> list:
     return page.evaluate("() => allSessions.map(s => s.title)")
 
 
+def test_the_transfer_session_stands_apart_and_cannot_be_touched(page):
+    """§54: it is a channel, not a chat. The sidebar says so (icon, its own look,
+    "只搬文件") and offers no ✎/✕ — and the server refuses both anyway, which is
+    what actually makes the guarantee (a UI-only guard is a suggestion)."""
+    page.evaluate("async () => { await loadSessions(); }")
+    row = page.locator(".session-row.shuttle")
+    assert row.count() == 1, "the transfer session is not in the sidebar"
+    assert page.evaluate(
+        "() => document.querySelector('.session-row') === document.querySelector('.session-row.shuttle')"
+    ), "it is not pinned first"
+    assert row.locator(".session-row-icon").count() == 1
+    assert row.locator(".session-row-act").count() == 0, "rename/delete must not be offered"
+    assert row.locator(".session-row-meta").text_content().startswith("只搬文件")
+
+    refused = page.evaluate(
+        """async () => {
+          const del = await fetch('/session?id=file-transfer', { method: 'DELETE' });
+          const body = await del.json();
+          const after = await (await fetch('/sessions')).json();
+          return { code: del.status, error: body.error, still: after.sessions.some(s => s.id === 'file-transfer') };
+        }"""
+    )
+    assert refused["code"] == 400 and refused["still"] is True, refused
+    assert "不能删除" in refused["error"], refused
+
+
 def test_renaming_a_session_updates_the_list_not_only_the_file(page):
     """The name must change on screen, in the live list, and on the server — all
     three, and without an uncaught error from the rename's own teardown."""
@@ -94,9 +120,11 @@ def test_renaming_a_session_updates_the_list_not_only_the_file(page):
            }"""
     )
     page.click("#btn-new-session")
-    page.wait_for_function("() => document.querySelectorAll('.session-row').length > 0")
-    # Rows are painted in list order, and the list has a pinned transfer session
-    # at the top (§53) — address this test's own row, not "the first one".
+    # Wait for THIS session, not for "a row": the pinned transfer session (§53)
+    # is always there, so a row count says nothing about the new one.
+    page.wait_for_function("() => allSessions.some(s => s.title === '(new session)')")
+    # Rows are painted in list order and the transfer session is first, so
+    # address this test's own row by index rather than "the first one".
     index = page.evaluate("() => allSessions.findIndex(s => s.title === '(new session)')")
     assert index >= 0, page.evaluate("() => allSessions.map(s => s.title)")
     row = page.locator(".session-row").nth(index)

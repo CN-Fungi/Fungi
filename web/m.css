@@ -37,6 +37,14 @@ html,body{font-family:var(--font);font-size:16px;line-height:1.6;color:var(--tex
 .msg table{border-collapse:collapse;margin:0.55rem 0;font-size:0.84rem;width:100%}
 .msg th,.msg td{border:1px solid var(--border);padding:0.45rem 0.7rem;text-align:left}
 .msg a{color:var(--accent2)}
+/* 文件传输助手（§53/§54）：两台设备之间的搬运通道 —— 常驻置顶、有图标、
+   底色与左边条常显，且没有改名/删除按钮。 */
+.session-row.shuttle{background:color-mix(in srgb,var(--accent) 8%,transparent);color:var(--text)}
+.session-row.shuttle::before{content:"";position:absolute;left:0;top:18%;bottom:18%;width:3px;border-radius:2px;background:var(--accent);opacity:.5}
+.session-row.shuttle.active::before{opacity:1}
+.session-row.shuttle .session-row-title{font-weight:600}
+.session-row.shuttle .session-row-meta{font-size:10px;letter-spacing:.02em;color:var(--accent)}
+.session-row-icon{font-size:13px;line-height:1;color:var(--accent)}
 /* 可点的绝对路径（§52）：点一下把这个文件从电脑取到手机。虚线表明它是动作，
    不是普通的 markdown 链接；长路径要能在窄屏上折行。 */
 .file-link{color:var(--accent2);text-decoration:underline dotted;text-underline-offset:2px;word-break:break-all;cursor:pointer}

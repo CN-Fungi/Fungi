@@ -479,6 +479,26 @@ def test_the_phone_sees_a_file_the_computer_dropped(mobile_page, rooms, tmp_path
         "the transfer session is not the first thing in the list"
     )
 
+    # 界面上先说清楚它是什么（§54）：带图标的独立样式，且没有改名/删除两个按钮
+    row_state = mobile_page.evaluate(
+        """() => {
+          const row = document.querySelector('.session-row.shuttle');
+          return {
+            isFirst: document.querySelector('.session-row') === row,
+            icon: !!row.querySelector('.session-row-icon'),
+            acts: row.querySelectorAll('.session-row-act').length,
+            meta: row.querySelector('.session-row-meta').textContent,
+            others: Array.from(document.querySelectorAll('.session-row:not(.shuttle)'))
+              .map(r => r.querySelectorAll('.session-row-act').length),
+          };
+        }"""
+    )
+    assert row_state["isFirst"] is True, row_state
+    assert row_state["icon"] is True, row_state
+    assert row_state["acts"] == 0, row_state
+    assert row_state["meta"].startswith("只搬文件"), row_state
+    assert not row_state["others"] or min(row_state["others"]) == 2, row_state
+
     mobile_page.evaluate("() => switchSession(allSessions.find(s => s.shuttle).id)")
     assert _wait(lambda: mobile_page.evaluate("() => currentSessionId && !processing"))
 

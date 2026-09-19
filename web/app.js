@@ -203,29 +203,43 @@ function renderSessionList() {
         const titleEl = row.querySelector('.session-row-title');
         if (titleEl && !row.querySelector('.rename-input') && titleEl.textContent !== (s.title || 'Untitled'))
           titleEl.textContent = s.title || 'Untitled';
-        row.querySelector('.session-row-meta').textContent = fmtDate(s.created) + (s.running ? ' \u25cf' : '');
+        // The reuse path rewrites the row in place: the transfer session's own
+        // meta ("只搬文件") must survive it, or it turns back into a date the
+        // moment the list repaints (§54).
+        if (!s.shuttle) {
+          row.querySelector('.session-row-meta').textContent = fmtDate(s.created) + (s.running ? ' \u25cf' : '');
+        }
         row.classList.toggle('active', s.id === currentSessionId);
         list.appendChild(row); // moves the row into filtered order
       } else {
         row = document.createElement('div');
         row.dataset.sid = s.id;
-        row.className = 'session-row' + (s.id === currentSessionId ? ' active' : '');
-        row.innerHTML = '<span class="session-row-title">' + escapeHtml(s.title || 'Untitled') + '</span>'
-          + '<span class="session-row-meta">' + fmtDate(s.created) + (s.running ? ' \u25cf' : '') + '</span>'
-          + '<span class="session-row-actions"><button class="session-row-act" title="Rename">&#9998;</button>'
-          + '<button class="session-row-act del" title="Delete">&#10005;</button></span>';
-        row.querySelector('.session-row-act.del').addEventListener('click', e => {
-          e.stopPropagation();
-          const cur = sessionById(row.dataset.sid);
-          showConfirm({
-            title: 'Delete session',
-            message: '"' + ((cur && cur.title) || 'Untitled') + '" will be permanently removed. This cannot be undone.',
-            confirmText: 'Delete',
-            danger: true,
-            onConfirm: () => deleteSession(row.dataset.sid)
+        // The transfer session (§53/§54) is a channel between two devices, not a
+        // chat: pinned, iconned, styled apart, and it has no rename/delete pair.
+        row.className = 'session-row' + (s.shuttle ? ' shuttle' : '')
+          + (s.id === currentSessionId ? ' active' : '');
+        if (s.shuttle) row.title = '文件传输助手：两台设备之间只搬文件，不会改名也不会被删除';
+        row.innerHTML = (s.shuttle ? '<span class="session-row-icon">&#x1F4C1;</span>' : '')
+          + '<span class="session-row-title">' + escapeHtml(s.title || 'Untitled') + '</span>'
+          + '<span class="session-row-meta">' + (s.shuttle ? '只搬文件' : fmtDate(s.created))
+          + (s.running ? ' \u25cf' : '') + '</span>'
+          + (s.shuttle ? ''
+            : '<span class="session-row-actions"><button class="session-row-act" title="Rename">&#9998;</button>'
+              + '<button class="session-row-act del" title="Delete">&#10005;</button></span>');
+        if (!s.shuttle) {
+          row.querySelector('.session-row-act.del').addEventListener('click', e => {
+            e.stopPropagation();
+            const cur = sessionById(row.dataset.sid);
+            showConfirm({
+              title: 'Delete session',
+              message: '"' + ((cur && cur.title) || 'Untitled') + '" will be permanently removed. This cannot be undone.',
+              confirmText: 'Delete',
+              danger: true,
+              onConfirm: () => deleteSession(row.dataset.sid)
+            });
           });
-        });
-        row.querySelector('.session-row-act:not(.del)').addEventListener('click', e => { e.stopPropagation(); startRename(row); });
+          row.querySelector('.session-row-act:not(.del)').addEventListener('click', e => { e.stopPropagation(); startRename(row); });
+        }
         row.addEventListener('click', () => switchSession(s.id));
         list.appendChild(row);
       }

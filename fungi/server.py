@@ -763,7 +763,11 @@ class YesSirHandler(BaseHTTPRequestHandler):
                 return
             self.runtime.sessions_save(
                 data["id"],
-                data.get("title") or existing.get("title") or "",
+                # The transfer session's name is its identity (§54): a save
+                # carrying another title keeps the real one.
+                SHUTTLE_TITLE
+                if data.get("id") == SHUTTLE_ID
+                else (data.get("title") or existing.get("title") or ""),
                 existing.get("messages", []),
                 subagents=existing.get("subagents", []),
                 asks=existing.get("asks", []),
@@ -807,6 +811,13 @@ class YesSirHandler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if url.path == "/session":
             session_id = (parse_qs(url.query).get("id") or [None])[0]
+            if session_id == SHUTTLE_ID:
+                # Permanent by design (§54): deleting the channel between the
+                # two devices is not a thing the UI hides, it is not a thing.
+                self._send_json(
+                    {"error": "文件传输助手不能删除（它是两台设备之间的通道）"}, status=400
+                )
+                return
             if session_id:
                 with _TURNS_LOCK:
                     events = _ACTIVE_TURNS.pop(session_id, set())

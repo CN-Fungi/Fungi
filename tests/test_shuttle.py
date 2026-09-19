@@ -144,6 +144,34 @@ def test_a_broken_store_does_not_fail_the_upload(shuttle_env, monkeypatch):
     assert out["done"] is True and (inbox / "note.txt").read_bytes() == b"fine"
 
 
+def test_it_cannot_be_renamed(shuttle_env):
+    """Its name is its identity (§54): a save that carries another title keeps
+    the real one — the UI hides the ✎, and the server does not need the UI."""
+    base, _inbox = shuttle_env
+    _send(base, "开始用它")
+    body = json.dumps({"id": webui.SHUTTLE_ID, "title": "随便改个名"}).encode()
+    req = urllib.request.Request(
+        base + "/save", data=body, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        assert json.loads(resp.read())["ok"] is True
+    _status, data = _get(base, "/sessions")
+    entry = next(item for item in data["sessions"] if item["id"] == webui.SHUTTLE_ID)
+    assert entry["title"] == webui.SHUTTLE_TITLE
+    assert [m["content"] for m in _rows(base)] == ["开始用它"], "the rows survived the save"
+
+
+def test_it_cannot_be_deleted(shuttle_env):
+    """The channel between the two devices is not something to lose by a click."""
+    base, _inbox = shuttle_env
+    _send(base, "别删我")
+    req = urllib.request.Request(base + "/session?id=" + webui.SHUTTLE_ID, method="DELETE")
+    with pytest.raises(urllib.error.HTTPError) as err:
+        urllib.request.urlopen(req, timeout=10)
+    assert err.value.code == 400
+    assert [m["content"] for m in _rows(base)] == ["别删我"]
+
+
 def test_an_unknown_session_still_404s(shuttle_env):
     """The shuttle is a special id, not a wildcard: everything else behaves."""
     base, _inbox = shuttle_env
