@@ -11,7 +11,7 @@
   /* Build marker: bump per web/ change so any WebUI instance can self-identify
      (console + window.__FUNGI_WEB_VER) — stale cache vs new server is otherwise
      indistinguishable from the outside. */
-  window.__FUNGI_WEB_VER = 'web-delivery-verdict';
+  window.__FUNGI_WEB_VER = 'web-session-alerts';
   try { console.info('[fungi-web]', window.__FUNGI_WEB_VER); } catch (e) {}
   /* ---------- http ---------- */
   /* One fetch wrapper. Mobile inits a token prefix + 403 hook; desktop inits
@@ -892,6 +892,71 @@
     return { start, stop, poll, byPeer, markPeerRead };
   }
 
+  /* ---------- session alerts (§61): 红点 + 「我正在看这个会话」 ----------
+     One request does both jobs every 3 s (POST /session/seen {id, visible}):
+     it claims the session the user is looking at — the server drops that
+     session's alert, which is what stops the ring — and the answer carries
+     every outstanding alert, which is where the sidebar's dots come from.
+
+     The claim rides visible AND focused: a minimized webUI is not "opened"
+     (user rule, 2026-09-21) — that is exactly when the ring has to fire. A
+     claim goes stale on the server after ~8 s, so a page that dies cannot
+     silence the ring for good; leaving the page releases it at once.
+
+     opts: { http, showing() -> session id | '', onChange(map) } */
+  function initSessionAlerts(opts) {
+    let claim = '';   // the session this page told the server it is showing
+    let feed = null;  // last alert map handed to onChange (no change: no call)
+    let timer = null;
+
+    function deliver(map) {
+      const key = JSON.stringify(map || {});
+      if (key === feed) return;      // 没变就不碰 DOM（§55 的纪律）
+      feed = key;
+      if (opts.onChange) opts.onChange(map || {});
+    }
+
+    function send(id, visible) {
+      return opts.http.fetchJSON('/session/seen', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: id || '', visible: !!visible }),
+        keepalive: true,  // the pagehide release still gets out
+      }).then(r => r.json()).then(d => deliver(d.alerts)).catch(() => {});
+    }
+
+    function claimed() {
+      if (document.hidden || !document.hasFocus()) return '';
+      return opts.showing() || '';
+    }
+
+    function tick() {
+      const next = claimed();
+      const sent = [];
+      if (next !== claim) {
+        if (claim) sent.push(send(claim, false));  // switched away / hidden: release it
+        claim = next;
+      }
+      sent.push(send(claim, !!claim));  // heartbeat + claim, or just the map
+      return Promise.all(sent);         // awaitable: the release has landed when it resolves
+    }
+
+    function start() {
+      document.addEventListener('visibilitychange', tick);
+      // Focus counts too, so coming back claims at once instead of up to 3 s later.
+      window.addEventListener('focus', tick);
+      window.addEventListener('blur', tick);
+      window.addEventListener('pagehide', () => { if (claim) send(claim, false); });
+      tick();
+      timer = setInterval(tick, 3000);
+    }
+    function stop() { if (timer) { clearInterval(timer); timer = null; } }
+    // null until the first answer lands: a client that has not heard from
+    // /session/seen yet must paint from /sessions, not from an empty map.
+    function map() { return feed === null ? null : JSON.parse(feed); }
+    return { start, stop, tick, map };
+  }
+
   /* ---------- #messages ownership ----------
      One container, one owner at a time. Every render path used to write into
      the same #messages/#tray and trust separate entry guards to keep the other
@@ -1417,7 +1482,7 @@
     initConfirmModal, showConfirm, closeConfirm,
     initTransfer,
     buildToolCard, fillToolResult, attachSpawnClick,
-    initAsks, initPendingAsks, initMailUnread,
+    initAsks, initPendingAsks, initMailUnread, initSessionAlerts,
     initPane, stripSilent, humanEcho,
     markTs, insertByTs, askTextOfCall, linkifyPaths, buildFileCard, humanBytes,
     renderTranscript, renderLiveEvents, whenLabel,

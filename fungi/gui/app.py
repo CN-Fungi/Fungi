@@ -42,7 +42,31 @@ UNREAD_POLL_MS = 1000
 # up to ~8 s to mark a thread read (its /comm-log poll is 5 s, the room's mailbox
 # poll 3 s), so ringing at once would ring for a message the user is already
 # looking at. The tray flash takes no grace: it is the unread indicator itself.
+# A session alert (§61) takes no grace either: the page that is showing that
+# session already said so, which is the same guard, one step earlier.
 RING_GRACE_S = 10.0
+
+
+def _session_alerts() -> dict:
+    """Outstanding WebUI session alerts, keyed by session id (§61).
+
+    Imported here, not at module scope: pulling fungi.server into GUI startup
+    costs ~240 ms, and by the time a room exists (the only moment this is read)
+    the room has imported it already.
+    """
+    from ..server import session_alerts  # noqa: PLC0415
+
+    return session_alerts()
+
+
+def _alert_reason(unread: int, alerts: dict) -> str:
+    """Why the tray icon is flashing — the tooltip's second half."""
+    parts = []
+    if unread > 0:
+        parts.append("有未读留言")
+    if alerts:
+        parts.append("有会话在等你")
+    return "、".join(parts)
 
 
 class FungiGui(FluentWindow):
@@ -114,16 +138,22 @@ class FungiGui(FluentWindow):
         elif self._tray is not None:
             self._tray.hide()
 
-    # ── 来信：托盘闪动 + 铃声 ──
+    # ── 来信 / 会话：托盘闪动 + 铃声 ──
 
     def _poll_unread(self) -> None:
-        """Ring and flash while a friend's message sits unread — the same event
-        the WebUI's unread badge counts (RoomBase.last_unread, filled by the
-        room's own mailbox poll), and opening that thread marks it read, which
-        is what stops the ring."""
+        """Ring and flash while something wants the user — a friend's message
+        sitting unread (RoomBase.last_unread, filled by the room's own mailbox
+        poll), or a WebUI session alert (§61: a turn that finished, failed, or
+        is asking a question, raised only when no page was showing it). Opening
+        the thread or the session is what stops it.
+
+        Mail waits out a read lag (the friend view needs ~8 s to mark a thread
+        read); a session alert rings at once — the page's own "I am showing
+        this" claim was that guard already."""
         rooms = self.rooms()
         unread = int(getattr(rooms[0], "last_unread", 0) or 0) if rooms else 0
-        if unread <= 0:
+        alerts = _session_alerts() if rooms else {}
+        if unread <= 0 and not alerts:
             if self._unread_since is not None or self._ringer.ringing:
                 # only when there was an alert to take down: with no room and
                 # nothing ringing this poll must cost nothing (it runs every
@@ -132,11 +162,16 @@ class FungiGui(FluentWindow):
                 self._stop_alert()
             return
         now = time.monotonic()
-        if self._unread_since is None:
-            self._unread_since = now
+        if unread > 0:
+            if self._unread_since is None:
+                self._unread_since = now
+        else:
+            self._unread_since = None  # mail was read: its clock stops with it
         if self._tray is not None:
-            self._tray.set_alert(True)  # unread flashes at once; only the tone waits
-        if now - self._unread_since >= RING_GRACE_S:
+            # unread flashes at once; only the tone waits
+            self._tray.set_alert(True, _alert_reason(unread, alerts))
+        ringing_grace = self._unread_since is not None and now - self._unread_since >= RING_GRACE_S
+        if alerts or ringing_grace:
             self._start_ring()
 
     def _start_ring(self) -> None:

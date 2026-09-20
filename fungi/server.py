@@ -576,6 +576,78 @@ def _session_lock(session_id: str) -> threading.Lock:
         return _SESSION_LOCKS.setdefault(session_id, threading.Lock())
 
 
+# ── session alerts (§61): what wants the user's eyes ──
+#
+# Three things in a session want the user: the agent asked a question (an
+# in-turn `ask`), a turn finished, a turn failed. An alert is raised only when
+# nobody is *showing* that session: the page that has it open — visible and
+# focused, because a minimized webUI is not "opened" (user rule, 2026-09-21)
+# — says so every few seconds, and the server reads a fresh claim as "the user
+# is watching". A hidden or unfocused page sends nothing, its claim goes stale,
+# and the next event is real: the GUI rings (fungi/gui/app.py) and the red dot
+# rides /sessions. Opening the session is what stops it — the shape of the
+# unread-mail ring (§25.2), with the page's own claim in place of the grace.
+
+ALERT_KINDS = ("ask", "done", "error")
+SEEN_TTL_S = 8.0  # a claim reads as "watching" this long (page heartbeat: 3 s)
+_ALERTS: dict[str, str] = {}  # session id -> kind ("ask" | "done" | "error")
+_SEEN: dict[str, float] = {}  # session id -> monotonic of the last claim
+_ALERT_LOCK = threading.Lock()
+
+
+def note_alert(session_id: str | None, kind: str) -> None:
+    """Raise a session's alert, unless a page is showing it right now."""
+    if not session_id or kind not in ALERT_KINDS:
+        return
+    with _ALERT_LOCK:
+        seen = _SEEN.get(session_id)
+        if seen is not None and time.monotonic() - seen <= SEEN_TTL_S:
+            return
+        _ALERTS[session_id] = kind
+
+
+def session_alerts() -> dict[str, str]:
+    """A copy of the outstanding alerts, session id -> kind (the GUI rings on it)."""
+    with _ALERT_LOCK:
+        return dict(_ALERTS)
+
+
+def forget_session(session_id: str) -> None:
+    """Drop a session's alert and claim (it was deleted)."""
+    with _ALERT_LOCK:
+        _ALERTS.pop(session_id, None)
+        _SEEN.pop(session_id, None)
+
+
+def clear_alerts() -> None:
+    """Forget every alert and claim: a stopped room leaves no ring behind."""
+    with _ALERT_LOCK:
+        _ALERTS.clear()
+        _SEEN.clear()
+
+
+def mark_seen(session_id: str, visible: bool) -> dict[str, str]:
+    """A page's report about the session it is showing.
+
+    `visible` claims it (and drops its alert); otherwise the claim is released
+    — the page switched away, or went hidden. Either way the answer is the
+    alert map, so one request carries both the heartbeat and the red dots.
+    """
+    with _ALERT_LOCK:
+        if session_id:
+            if visible:
+                _SEEN[session_id] = time.monotonic()
+                _ALERTS.pop(session_id, None)
+            else:
+                _SEEN.pop(session_id, None)
+        return dict(_ALERTS)
+
+
+def unanswered_asks(asks: list[dict] | None) -> bool:
+    """A turn that ends holding an unanswered ask still wants the user (§61)."""
+    return any(str(ask.get("status") or "") != "answered" for ask in asks or [])
+
+
 class WebSink:
     """Thread-safe NDJSON writer over the /chat response stream."""
 
@@ -592,6 +664,10 @@ class WebSink:
                 tape = _TURN_TAPES.get(self.session_id)
                 if tape is not None:
                     tape.append({"type": kind, "content": content})
+        if kind == "ask":
+            # The agent is blocked on an answer: an ask that nobody watches is
+            # raised right here, mid-turn (it can sit for ASK_TIMEOUT_S).
+            note_alert(self.session_id, "ask")
         if self.closed:
             return
         try:
@@ -716,11 +792,14 @@ class YesSirHandler(BaseHTTPRequestHandler):
         elif route == "/sessions":
             shuttle_ensure(self.runtime)
             sessions = self.runtime.sessions_list()
+            alerts = session_alerts()
             # Pinned first, and flagged: it is a device-to-device channel, not a
             # chat, and the shells poll it so the other device's files show up
             # without anyone reloading (§53).
             for entry in sessions:
                 entry["shuttle"] = str(entry.get("id")) == SHUTTLE_ID
+                # §61: the red dot — what the session wants, or None for quiet.
+                entry["alert"] = alerts.get(str(entry.get("id")))
             sessions.sort(key=lambda entry: not entry["shuttle"])
             with _TURNS_LOCK:
                 for s in sessions:
@@ -838,6 +917,13 @@ class YesSirHandler(BaseHTTPRequestHandler):
                 value = str(value or "")
             ok = self.runtime.route_answer(str(data.get("id") or ""), value)
             self._send_json({"ok": ok}, status=200 if ok else 404)
+        elif url.path == "/session/seen":
+            # §61: the page's claim about what it is showing (and the answer is
+            # every outstanding alert, which is what paints the sidebar's dots).
+            data = self._read_body()
+            self._send_json(
+                {"alerts": mark_seen(str(data.get("id") or ""), bool(data.get("visible")))}
+            )
         elif url.path == "/mail/read":
             data = self._read_body()
             self._send_json(self.runtime.mail_read(str(data.get("id") or "")))
@@ -926,6 +1012,7 @@ class YesSirHandler(BaseHTTPRequestHandler):
                 for event in events:
                     event.set()
                 self.runtime.sessions_delete(session_id)
+                forget_session(session_id)  # a deleted session has nothing to ring for
             self._send_json({"ok": True})
         else:
             self._send_json({"error": "not found"}, status=404)
@@ -1110,9 +1197,16 @@ class YesSirHandler(BaseHTTPRequestHandler):
                             subagents=prior + new_subs,
                             asks=prior_asks + new_asks,
                         )
+            # §61: a finished turn is news — unless the user stopped it (they
+            # were right there) or deleted the session under it. note_alert
+            # drops it anyway while a page is showing that session.
+            if not resurrects and not abort_event.is_set():
+                note_alert(session_id, "ask" if unanswered_asks(new_asks) else "done")
             sink.emit("sessionId", session_id)
             sink.emit("done", None)
         except Exception as exc:
+            if not abort_event.is_set():  # a stopped turn must not ring, however it ended
+                note_alert(session_id, "error")
             sink.emit("error", str(exc))
             sink.emit("done", None)
         finally:

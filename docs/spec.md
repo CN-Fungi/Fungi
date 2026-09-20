@@ -2665,3 +2665,104 @@ CSS 里全是**三个类**（`.msg.file-card.mine` / `.msg.user.peer`），照�
 
 - 好友视图那套 `friend-mine` / `friend-peer` **没有**并进 `mine` / `peer`：它两侧的语义（对面在左、信使在右）
   是另一回事，合并只为了少两个名字，得不偿失。
+
+## 61. 会话提醒（2026-09-21 用户点名）：Agent 在等你 / 答完了 / 出错了 —— 复用铃声，每个会话一个红点
+
+**用户原话**：「当Agent需要用户回复，比如inquire，或者回答完毕，或者出现错误等情况，复用铃声机制响铃提醒用户。
+用户点进该会话后响铃停止。请注意，webUI最小化不算点开。每个会话也可以出现红点（就像好友列表那样）」。
+
+### 61.1 三件事算「在等用户」，判据在服务端
+
+- **ask（要你回答）**：在**提问的当下**就挂上提醒 —— `WebSink.emit` 里 `kind == "ask"` 处 `note_alert`。
+  提问那条路是 `tools/ask.py::blocking_ask`（回合就等在那儿，可能一等就是 `ASK_TIMEOUT_S` = 15 分钟）：
+  等回合结束再提醒，等于没提。
+- **done（答完了）/ error（出错了）**：`_run_turn` 的出口。**被按停的回合（Esc → `/stop`）不提醒** ——
+  「停」的意思是「我在」，不是「提醒我去看看」；回合结束时卡上还挂着没人答的问题，报的是 `ask` 而不是 `done`。
+- 提醒住 `fungi/server.py` 的进程内登记表（`_ALERTS` / `_SEEN`）：`/sessions` 每一行多一个 `alert` 字段
+  （`"ask"` / `"done"` / `"error"`，安静时 `null`）；删会话顺手忘掉它；**房间停了整体清掉**
+  （`room.py::stop`）—— 提醒不该比升起它的那个房间活得久。
+
+### 61.2 「点开」= 页面**可见且聚焦**地在看那个会话（最小化不算）
+
+页面每 3 秒发一次 `POST /session/seen {id, visible}`：`visible:true` 是**声明**（服务端记下时间戳，
+并撤掉该会话的提醒），`visible:false` 是**释放声明**（切走 / 隐藏 / 离开页面）。三条判据：
+
+- 声明只在 `!document.hidden && document.hasFocus()` 时发。用户点名的「最小化不算点开」是第一条；
+  第二条是同一件事的延伸：窗口在另一块屏上开着、人却在别的窗口里打字，也等于没看。**代价**是抢焦点
+  （通知弹窗、切窗口的那一瞬）会多响一声 —— 一声就完的铃（§26.1），而且用户要的正是「别漏了」。
+- **声明会过期**（`SEEN_TTL_S = 8s`，约两跳半心跳）：页面崩了 / 关了 / 被冻住时，谁也没法用一份陈旧的
+  「我在看」把铃永远按住。切走与隐藏还会立刻 `release` 一次，所以「刚发完就切走、三秒后答完」这种
+  最该响的情况，不会因为一份还新鲜的声明被吞掉。
+- 挂提醒的一方查的就是这份声明：新鲜 → 不挂（用户正看着，别打扰）；**释放不撤回提醒**，
+  只有 `visible:true` 那一下才撤。
+
+### 61.3 铃声复用来信那一套，红点复用好友列表那一套
+
+- `fungi/gui/app.py::_poll_unread`（每秒）现在数两件事：`RoomBase.last_unread`（来信）与
+  `session_alerts()`（会话）。**来信守它那 10 秒宽限期**（好友视图要 ~8 秒才把那条标成已读）；
+  **会话提醒立刻响** —— 它已经被页面自己的声明挡过一道了，再等 10 秒就太晚。
+- 铃声本身一个字节没改：`ring.Ringer`、`config.ring` / `ring_tone`、七个音色、**一声**（§26.1）都还是它；
+  一次提醒只响一声（`Ringer.ringing` 从 start 到 stop 都是 True），用户点进那个会话（= 服务端撤提醒）
+  才 `stop()`。
+- 托盘那半也一起复用了（§25.2 的标题就是「闪动 + 铃声」）：有东西在等就闪，提示语说清是什么
+  （`有未读留言` / `有会话在等你` / 两样都有）—— 铃只响一声，闪动才是那个一直在的提示。
+- 红点坐在会话行的标题与日期之间（`.session-dot`，accent + 光晕，与好友列表的未读标记同一套语言），
+  tooltip 说清哪一种（`Agent 在等你回答` / `回答完毕` / `出错了`）。
+- `_session_alerts()` 是**函数内 import**：把 `fungi.server` 拉进 GUI 启动要多花 ~240ms，
+  而真正读它的时刻（有房间时）那个模块早被房间 import 过了。
+
+### 61.4 一次请求干两件事，而且不许重画转录
+
+`POST /session/seen` 的**回答就是那张提醒表**（`{会话 id: kind}`）：心跳与红点共用一个请求，
+不给页面再添一个轮询。两个 shell 都用 `common.js::initSessionAlerts`（声称 / 心跳 / 释放 / 把表交给
+`onChange`），只在**表变了**的时候重画会话列表（§55 的纪律：没变就一个 DOM 都不碰），并且**永不重画转录**
+（`test_the_alert_feed_never_repaints_the_transcript` 拿 MutationObserver 钉着）。
+
+- 桌面端 `renderSessionList` 是「复用行 + 就地改」：红点在**新建**与**复用**两条路上都得刷
+  （§54 那个坑的同款）。
+- `/sessions` payload 里那份 `alert` 会被心跳那张（更新的）表盖掉：刚点开的会话，不该因为一次
+  `/sessions` 拉取又把红点长回来。
+- 页面打开某个会话时会立刻 `Alerts.tick()`（不等下一跳心跳）：用户点进来就该马上撤提醒、停铃。
+
+### 61.5 验收
+
+- 修前先红，分三层（`git stash push -- <paths>` 逐层还原）：
+  - 只还原 `fungi/server.py`：`tests/test_session_alerts.py` → **9 errors**
+    （`ImportError: cannot import name 'clear_alerts'`）。
+  - 只还原 `web/`：`tests/test_webui_alerts.py` → **3 errors**，页面里 `typeof Alerts` 永远不是 object
+    （`Page.wait_for_function: Timeout 30000ms exceeded`）。
+  - 还原 `fungi/gui/app.py` + `fungi/gui/trayicon.py`：`test_gui.py -k "session_alert or tray_says_which or
+    mail_is_unread"` → **3 failed**（不会响 · 提示语还是「有未读留言」· `set_alert()` 参数数对不上）。
+- `tests/test_session_alerts.py`（9 例，**不用浏览器** —— CI 与 Release 都会跑到）：答完 → `done` ·
+  卡上挂着没人答的问题 → `ask` · 答过的卡不把 `done` 变成 `ask` · 回合炸了 → `error` · 按停 → 不挂 ·
+  `ask` 事件当下就挂 · 声明新鲜时压住、过期后生效、释放不撤回 · 删会话忘掉提醒 ·
+  不带 id 的心跳只回答那张表。
+- `tests/test_webui_alerts.py`（3 例，真 Chromium）：桌面——红点出现、tooltip 说得对、**点进去红点掉、
+  服务端提醒也没了、再拉一次 `/sessions` 也不长回来**；心跳不重画转录；手机——抽屉里也有红点，
+  而且把 `document.hidden` / `hasFocus` 改成隐藏之后**同一个提醒真的挂上了**（最小化不算点开），
+  回到前台又收回去。
+- `tests/test_gui.py` 新增两例：会话提醒不吃宽限期（第一次轮询就响）、用户点进来就停；托盘提示语的三种情形。
+- 顺手修掉一个**早就存在**的竞态：`test_webui_transfer.py::test_the_phone_sees_a_file_the_computer_dropped`
+  在「自己那句话画出来」的瞬间就问电脑那行在不在，而那一行来自 3 秒一次的传输轮询（或回合结束的整份重载）。
+  HEAD 树上单跑它就是红的（`flex-start` ← `None`，与本轮改动无关，已用 `git stash` 证明）；
+  补上那一次等待后单跑 3/3 绿。
+- 门禁：`python -m ruff check .` 干净 · `python -m ruff format --check fungi tests` 干净 ·
+  `PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **713 passed / 248s**
+  （§60 那次 699：本轮新增 9 例服务端 + 3 例浏览器 + 2 例 GUI）。
+
+### 61.6 没做 / 待定
+
+- **手机端不响铃**：铃声在跑 GUI 的那台机器上响（`ring.Ringer` 是 PyQt5 + QtMultimedia 的东西），
+  手机拿到的是红点。要手机也响，得走浏览器音频（`assets/ringtones/*.wav` 走 HTTP + 首次手势解锁
+  autoplay）—— 那是另一条腿，等他说了再做。
+- **红点不分颜色**：三种 kind 一个样子，区别只写在 tooltip 里。他要的就是「红点（就像好友列表那样）」。
+- **提醒不落盘**：它是进程内状态（和 `_TURN_TAPES` 一样），GUI 重启即消失；要活过重启得写进
+  `data/sessions/<id>.json`。
+- **好友视图那些卡问（out-of-band ask）不算会话提醒**：它们挂在好友线程上，来信那一套（未读徽标 + 铃声）管着。
+- **一次提醒期只响一声**（§26.1 的规矩照旧）：两件事先后到来时——比如 A 会话答完、你还没点进去，
+  B 会话又出错——只有第一件会响，第二件靠红点与托盘闪动。要让每件都响，得给 `_poll_unread` 记住
+  「已经响过的会话集合」并把铃声改成按新 id 触发，那是另一条决定。
+- **传输助手不响铃**：他点名的是 Agent 那三种情况（提问 / 答完 / 出错）；对面设备往通道里放了个文件
+  不会响（`_shuttle_turn` 根本不走回合）。
+- **多标签页会互相盖声明**：`_SEEN` 是「会话 → 时间戳」，不是「标签页 → 会话」，另一个标签页的一次
+  `release` 最多让这边 3 秒内重新声明一次（自愈）。要精确到标签页，得给每个页面一个 id。

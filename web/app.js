@@ -47,6 +47,11 @@ async function loadSessions() {
     const sessions = (await r.json()).sessions || [];
     if (seq !== _sessionsSeq) return; // a newer fetch superseded this response
     allSessions = sessions;
+    // §61: the alert map from /session/seen outranks the payload's copy of it —
+    // the claim that produced it also cleared what it covered (a session the
+    // user just opened must not wear its dot again for this fetch).
+    const known = Alerts.map();
+    if (known) applyAlerts(known);
     renderSessionList();
   } catch (e) { console.error('loadSessions:', e); }
 }
@@ -105,6 +110,7 @@ async function switchSession(id) {
     S.stick(); updateScrollBtn(); // a freshly opened session starts at the latest message
     renderSessionList(); loadSessions();
     reattachIfRunning(s.id);
+    Alerts.tick(); // 用户正在看这个会话：立刻告诉服务端（红点该掉、铃该停）
   } catch (e) { console.error('switchSession:', e); }
 }
 
@@ -214,6 +220,7 @@ function renderSessionList() {
         if (!s.shuttle) {
           row.querySelector('.session-row-meta').textContent = fmtDate(s.created) + (s.running ? ' \u25cf' : '');
         }
+        paintAlert(row, s.alert);  // §61: reuse must refresh the dot too
         row.classList.toggle('active', s.id === currentSessionId);
         list.appendChild(row); // moves the row into filtered order
       } else {
@@ -245,6 +252,7 @@ function renderSessionList() {
           });
           row.querySelector('.session-row-act:not(.del)').addEventListener('click', e => { e.stopPropagation(); startRename(row); });
         }
+        paintAlert(row, s.alert);
         row.addEventListener('click', () => switchSession(s.id));
         list.appendChild(row);
       }
@@ -1100,6 +1108,43 @@ document.getElementById('theme-switch').addEventListener('click', function () {
   applyTheme(next);
   setTimeout(() => themeRoot.classList.remove('theme-anim'), 500);
 });
+
+/* ---------- session alerts (§61): 会话列表上的红点 ----------
+   What a session wants (a turn finished / failed / is asking a question) rides
+   two places: /sessions carries it, and the /session/seen answer carries the
+   live map — see FC.initSessionAlerts, which also tells the server which
+   session this page is showing (that is what stops the ring). Painted on
+   creation AND on every reuse: rows are reconciled in place keyed by id, so a
+   dot added once would otherwise never come off again. */
+const ALERT_LABEL = { ask: 'Agent 在等你回答', done: '回答完毕', error: '出错了' };
+
+function paintAlert(row, kind) {
+  let dot = row.querySelector('.session-dot');
+  if (!kind) { if (dot) dot.remove(); return; }
+  if (!dot) {
+    dot = document.createElement('span');
+    dot.className = 'session-dot';
+    row.querySelector('.session-row-meta').before(dot);
+  }
+  dot.title = ALERT_LABEL[kind] || '有新消息';
+}
+
+function applyAlerts(map) {
+  let changed = false;
+  allSessions.forEach(s => {
+    const kind = map[s.id] || null;
+    if ((s.alert || null) !== kind) { s.alert = kind; changed = true; }
+  });
+  return changed;  // the caller owns the repaint: one render per change, never two
+}
+
+const Alerts = FC.initSessionAlerts({
+  http: FC,
+  // 好友视图握着 #messages：那时这个页面没在看任何会话，也就不该替它挡铃。
+  showing: () => (!friendView && currentSessionId) ? currentSessionId : '',
+  onChange: map => { if (applyAlerts(map)) renderSessionList(); },
+});
+Alerts.start();
 
 /* ---------- mail unread: per-peer badges on the friend list ---------- */
 const MailUnread = FC.initMailUnread({ http: FC, onChange: renderFriendList });

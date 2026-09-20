@@ -19,6 +19,7 @@ from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication, QDialog
 
 from fungi import gui
+from fungi import server as webui_server
 from fungi.gui import FungiGui, valid_host_name
 
 
@@ -1390,6 +1391,9 @@ def ringing(window, monkeypatch):
         yield room, ringer
     finally:
         room.last_unread = 0
+        # Session alerts (§61) live in a process-wide registry: a leaked one
+        # would ring the next test's poll out of nowhere.
+        webui_server.clear_alerts()
         window._poll_unread()
         window.host_page.room = None
         window.update_tray()
@@ -1487,6 +1491,40 @@ def test_the_unread_poll_rings_once_not_once_per_second(window, monkeypatch):
         window.update_tray()
 
 
+def test_a_session_alert_rings_at_once_and_stops_when_cleared(window, ringing):
+    """§61：会话在等用户（答完了 / 出错了 / 正在提问）时响铃 —— 不吃邮件的宽限期。
+    那个宽限期是替「你正看着的那条留言」挡的，而会话提醒在服务端就已经被页面自己的
+    「我正在看它」声明挡过一次了；再等 10 秒，铃声就晚得没意义。"""
+    _room, ringer = ringing
+    window._poll_unread()
+    assert window._tray._alerting is False and ringer.played == []
+
+    webui_server.note_alert("sess-done", "done")
+    window._poll_unread()  # no grace was spent: it rings on the first poll
+    assert window._tray._alerting is True
+    assert ringer.played == ["alert"]
+    assert "会话" in window._tray.toolTip()
+
+    # 用户点进去 = 页面向服务端声明「我正在看它」：铃声与闪动一起停。
+    webui_server.mark_seen("sess-done", True)
+    window._poll_unread()
+    assert window._tray._alerting is False and ringer.ringing is False
+
+
+def test_the_tray_says_which_kind_of_alert_it_is_flashing_for(window, ringing):
+    """闪动的提示语要说清是什么在等：留言、会话，或两样都有（§25.2 的闪动 + §61）。"""
+    room, _ringer = ringing
+    room.last_unread = 1
+    webui_server.note_alert("sess-ask", "ask")
+    window._poll_unread()
+    tip = window._tray.toolTip()
+    assert "未读留言" in tip and "会话" in tip, tip
+
+    room.last_unread = 0
+    window._poll_unread()
+    assert window._tray.toolTip() == "Fungi — 有会话在等你"
+
+
 def test_ring_switch_hides_the_tone_picker_and_the_choice_is_saved(window, monkeypatch):
     """设置页：关掉就不显示铃声选择；换一个音色即时保存并试听一次。"""
     page = window.cfg_page
@@ -1526,7 +1564,7 @@ def test_tray_icon_flashes_while_mail_is_unread(window, ringing):
     tray = window._tray
     labels = [a.text() for a in tray._menu.actions()]
     assert "停止铃声" not in labels, labels
-    tray.set_alert(True)
+    tray.set_alert(True, "有未读留言")
     first = tray.icon().pixmap(64, 64).toImage()
     tray._flash_tick()
     second = tray.icon().pixmap(64, 64).toImage()

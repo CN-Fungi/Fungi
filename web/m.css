@@ -48,6 +48,9 @@ html,body{font-family:var(--font);font-size:16px;line-height:1.6;color:var(--tex
 .session-row.shuttle .session-row-title{font-weight:600}
 .session-row.shuttle .session-row-meta{font-size:10px;letter-spacing:.02em}
 .session-row-icon{font-size:13px;line-height:1;color:var(--accent)}
+/* 会话红点（§61）：这个会话在等用户 —— 答完了 / 出错了 / 正在提问。与好友列表的
+   未读标记同一套语言（accent + 光晕）；抽屉每 3 秒重建行，它跟着最新状态走。 */
+.session-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex-shrink:0;box-shadow:0 0 6px var(--accent-glow)}
 /* 传输卡片（§56）：名字、大小、方向、路径 + 一个「下载到手机」按钮 */
 .msg.file-card{align-self:flex-start;border:1px solid var(--tool-border);background:var(--tool-bg);border-radius:var(--radius-sm);padding:10px 12px;max-width:100%}
 .msg.file-card.peer{align-self:flex-start}

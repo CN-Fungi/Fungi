@@ -63,6 +63,10 @@ async function loadSessions() {
     const sessions = (await r.json()).sessions || [];
     if (seq !== _sessionsSeq) return;
     allSessions = sessions;
+    // §61：/session/seen 那张图比 payload 里的副本更新 —— 生成它的那次 claim 顺手把
+    // 它覆盖的会话清掉了（刚点开的会话不该因为这个 fetch 又长出红点）。
+    const known = Alerts.map();
+    if (known) applyAlerts(known);
     renderSessionList();
   } catch (e) { if (e.message !== 'unauthorized') console.error('loadSessions:', e); }
 }
@@ -117,6 +121,7 @@ async function switchSession(id) {
     S.stick(); updateScrollBtn();
     renderSessionList(); loadSessions();
     reattachIfRunning(s.id);
+    Alerts.tick(); // 用户正在看这个会话：立刻告诉服务端（红点该掉、铃该停）
   } catch (e) { window.__swErr = String((e && e.stack) || e); if (e.message !== 'unauthorized') console.error('switchSession:', e); }
   closeDrawer();
 }
@@ -205,6 +210,7 @@ function renderSessionList() {
       + (s.shuttle ? ''
         : '<button class="session-row-act ren" title="重命名">&#9998;</button>'
           + '<button class="session-row-act del" title="删除">&#10005;</button>');
+    paintAlert(row, s.alert);  // §61：抽屉每 3 秒重建行，红点跟着最新状态走
     if (!s.shuttle) {
       row.querySelector('.session-row-act.ren').addEventListener('click', e => {
         e.stopPropagation(); startRename(row, s);
@@ -1168,6 +1174,40 @@ async function pollShuttle() {
   } catch (e) { if (e.message !== 'unauthorized') console.error('pollShuttle:', e); }
 }
 setInterval(pollShuttle, 3000);
+
+/* ---------- session alerts (§61): 会话列表上的红点 ----------
+   一个会话在等用户（回合结束 / 出错 / 正在提问）会同时出现在两处：/sessions
+   的 payload，以及 /session/seen 的回答（见 common.js 的 initSessionAlerts，
+   它顺带告诉服务端「这一页正在看哪个会话」—— 红点掉下去、铃停下来的就是它）。 */
+const ALERT_LABEL = { ask: 'Agent 在等你回答', done: '回答完毕', error: '出错了' };
+
+function paintAlert(row, kind) {
+  let dot = row.querySelector('.session-dot');
+  if (!kind) { if (dot) dot.remove(); return; }
+  if (!dot) {
+    dot = document.createElement('span');
+    dot.className = 'session-dot';
+    row.querySelector('.session-row-meta').before(dot);
+  }
+  dot.title = ALERT_LABEL[kind] || '有新消息';
+}
+
+function applyAlerts(map) {
+  let changed = false;
+  allSessions.forEach(s => {
+    const kind = map[s.id] || null;
+    if ((s.alert || null) !== kind) { s.alert = kind; changed = true; }
+  });
+  return changed;  // 重画交给调用方：一次变化只重画一次
+}
+
+const Alerts = FC.initSessionAlerts({
+  http: FC,
+  // 好友视图握着 #messages（抽屉开着不算「在看这个会话」）：那时不替任何会话挡铃。
+  showing: () => (pane.is('session') && currentSessionId) ? currentSessionId : '',
+  onChange: map => { if (applyAlerts(map)) renderSessionList(); },
+});
+Alerts.start();
 
 /* ---------- mail unread: per-peer badges on the friend list ---------- */
 const MailUnread = FC.initMailUnread({ http: FC, onChange: renderFriendList });

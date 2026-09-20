@@ -40,7 +40,7 @@ from .hub.client import HubClient, HubError
 from .hub.relay import Inbox
 from .landing import inbox_root
 from .protocol import Envelope, clean_display, parse_addr, valid_host_name
-from .server import _BG_ABORTS, _PENDING_SPAWNS, WebUIRuntime, make_webui_server
+from .server import _BG_ABORTS, _PENDING_SPAWNS, WebUIRuntime, clear_alerts, make_webui_server
 from .session import SESSIONS_DIR, SessionStore
 from .tools.ask import make_ask_tool, resolve_ask
 from .trilayer import TriLayer
@@ -861,6 +861,9 @@ class RoomBase:
             self._webui.shutdown()
             self._webui.server_close()
             self._webui = None
+        # A room's session alerts die with it (§61): neither the GUI's ring nor
+        # a red dot may outlive the room that raised them.
+        clear_alerts()
         # Leaving the room (or quitting) ends any screen-control arming: the
         # capability belongs to a room with the user present (spec §35.2/§35.3).
         screen_module = sys.modules.get("fungi.tools.screen")

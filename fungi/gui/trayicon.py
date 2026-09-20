@@ -25,8 +25,8 @@ FLASH_MS = 500  # unread-mail flash: half a second per phase, like a ringing ico
 class _Tray(QSystemTrayIcon):
     """托盘：房间后台驻留期间提供 显示主界面 / 打开 WebUI / 退出（fluent 菜单）。
 
-    来信未读时图标在两版之间闪动（见 set_alert）。铃声不在这里管：它一声就完
-    （2026-09-11 用户：菜单里的「停止铃声」多余，撤掉）。
+    来信未读或某个会话在等用户时图标在两版之间闪动（见 set_alert）。铃声不在这里管：
+    它一声就完（2026-09-11 用户：菜单里的「停止铃声」多余，撤掉）。
     """
 
     def __init__(self, window: "FungiGui"):
@@ -34,6 +34,7 @@ class _Tray(QSystemTrayIcon):
         self._window = window
         self.setToolTip("Fungi")
         self._alerting = False
+        self._alert_reason = ""
         self._flashed = False
         self._flash = QTimer(self)
         self._flash.setInterval(FLASH_MS)
@@ -48,12 +49,13 @@ class _Tray(QSystemTrayIcon):
 
     # ── 未读闪动 ──
 
-    def set_alert(self, on: bool) -> None:
-        """Unread mail: flash the icon (and the tooltip says why)."""
-        if on == self._alerting:
+    def set_alert(self, on: bool, reason: str = "") -> None:
+        """Something wants the user: flash the icon, and say what in the tooltip."""
+        if on == self._alerting and reason == self._alert_reason:
             return
         self._alerting = on
-        self.setToolTip("Fungi — 有未读留言" if on else "Fungi")
+        self._alert_reason = reason
+        self.setToolTip(f"Fungi — {reason}" if on and reason else "Fungi")
         if on:
             self._flashed = False
             self._flash.start()

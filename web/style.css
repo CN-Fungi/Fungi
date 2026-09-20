@@ -42,6 +42,9 @@ html,body{font-family:var(--font);font-size:var(--fs-md);line-height:1.6;color:v
 .session-row.shuttle .session-row-title{font-weight:600}
 .session-row.shuttle .session-row-meta{font-size:11px;letter-spacing:.02em}
 .session-row-icon{font-size:13px;line-height:1;color:var(--accent)}
+/* 会话红点（§61）：这个会话在等用户 —— 答完了 / 出错了 / 正在提问。坐在标题与
+   日期之间，和好友列表的未读标记同一套语言（accent + 光晕）。 */
+.session-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex-shrink:0;box-shadow:0 0 6px var(--accent-glow)}
 /* 传输卡片（§56）：一次传输一张卡 —— 名字、大小、方向、路径（+ 手机端的下载按钮）。
    行站哪一边看「谁发的」（§59）：自己发的靠右、对方发来的靠左。卡片自带 direction；
    普通消息行由 shell 在发的时候声明（服务端把 direction 存进行里）。 */

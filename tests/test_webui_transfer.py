@@ -616,6 +616,12 @@ def test_the_phone_sees_a_file_the_computer_dropped(mobile_page, rooms, tmp_path
         "the phone's own line never showed up"
     )
     assert _bubble("在吗") == "flex-end", "the phone's own line belongs on the right"
+    # …and wait for the computer's row too: it arrives from the 3 s shuttle poll (or
+    # the turn's reload), so asking for it the instant our own line paints is a race
+    # the suite used to lose whenever the poll happened to be mid-interval.
+    assert _wait(lambda: _bubble("电脑那头的一句话") is not None, timeout_s=12), (
+        "the computer's line never showed up"
+    )
     assert _bubble("电脑那头的一句话") == "flex-start", "the computer's line belongs on the left"
 
 
