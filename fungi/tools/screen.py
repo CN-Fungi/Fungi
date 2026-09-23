@@ -90,7 +90,6 @@ TYPE_CHAR_DELAY_S = 0.15  # 逐字输入: the gap between characters — a *watc
 LAUNCH_WAIT_S = 3.0  # a gesture that starts a process: its window is not up immediately
 SHOT_MAX_DIM = 1568  # same vision sweet spot as files.IMAGE_MAX_DIM
 # The decider seam (see "the decider seam" below): the numbers, and why each one is that number.
-DECIDER_FILE = "decider.json"  # beside config.json; not in the repo, it names local paths
 # Measured: a listing carries the window's own shell (2x2 px) and its render host (an a11y box
 # over the whole client area) as candidates. Drawn over for a decider, those two take 0.58/0.42
 # of the answer and leave the row the task is about at 1e-6 — so neither is ever asked about.
@@ -1870,24 +1869,23 @@ class DeciderDown(RuntimeError):  # noqa: N818 — same: the name says what happ
 def _decider_config() -> dict:
     """The decision service this machine is pointed at — `{}` when there is none.
 
-    Two sources, in this order, both the same JSON:
+    Two sources, in this order, both the same JSON object:
       * `FUNGI_DECIDER` — for a caller that wants to point this box somewhere else for one run
-      * `decider.json` beside `config.json` (exe-adjacent when frozen) — the box's own file (it
-        names local paths, so it is gitignored; the repo never carries one)
+      * `decider` inside `config.json` — where every other local setting already lives, and
+        what the settings page's 「BiXian 挑号」 row edits (spec §63.1)
 
     Keys: `url` (a resident service), `serve` (how to start it), `ask` (a one-shot process),
     `weights` (a path that must exist for the seam to be on at all), `k`, `timeout`, `wait`,
     `autostart`. `policy` is deliberately not one of them: it belongs to the decider, comes back
     over `/health` and is forwarded with every request (see `_decider_ask`).
-    `_source` and `_problem` are filled in for the report.
+    `_source` names whichever source answered; `_problem` is an env variable that is not a JSON
+    object (a config.json that cannot be read is `load_config`'s own warning, not this seam's).
     """
     raw = os.environ.get("FUNGI_DECIDER", "")
-    source = "FUNGI_DECIDER"
     if not raw.strip():
-        path = config_mod.CONFIG_PATH.with_name(DECIDER_FILE)
-        if not path.is_file():
-            return {}
-        raw, source = path.read_text(encoding="utf-8"), str(path)
+        block = config_mod.load_config().decider  # config.json 的 decider 段 (没配 = {})
+        return {**block, "_source": str(config_mod.CONFIG_PATH)} if block else {}
+    source = "FUNGI_DECIDER"
     try:
         config = json.loads(raw)
     except ValueError as exc:
@@ -1895,9 +1893,51 @@ def _decider_config() -> dict:
     if not isinstance(config, dict):
         return {"_source": source, "_problem": f"{source} is not a JSON object"}
     if not config:
-        return {}  # an empty object is "off", exactly like no file at all
+        return {}  # an empty object is "off", exactly like no config at all
     config["_source"] = source
     return config
+
+
+def decider_status() -> dict:
+    """What the settings page shows about this machine's decision service.
+
+    Facts only — `state` is one of `none` / `oneshot` / `broken` / `down` / `loading` /
+    `ready`, and the page words them: this tool's own messages are written for a model,
+    and this one is for the person configuring it. Nothing is started here — a probe is
+    "are you there" with `DECIDER_HANDSHAKE_S` behind it, because starting a cold model
+    is the tool's own business at first use (§63.1), not something a settings button
+    should make someone wait for.
+    """
+    cfg = _decider_config()
+    if cfg.get("_problem"):
+        return {"state": "broken", "reason": str(cfg["_problem"])}
+    url = str(cfg.get("url") or "").strip()
+    if not url:
+        return {"state": "oneshot" if cfg.get("ask") else "none"}
+    serve = bool(cfg.get("serve"))
+    health = _decider_health(url)
+    if health is None:
+        return {"state": "down", "url": url, "serve": serve, "reason": "nothing answers there"}
+    if health.get("load_error"):
+        return {
+            "state": "down",
+            "url": url,
+            "serve": serve,
+            "reason": f"it could not load: {health['load_error']}",
+        }
+    if health.get("model_present") is False:
+        return {"state": "down", "url": url, "serve": serve, "reason": "it has no weights"}
+    if not health.get("loaded"):
+        return {"state": "loading", "url": url, "serve": serve}
+    info: dict = {
+        "state": "ready",
+        "url": url,
+        "serve": serve,
+        "model": str(health.get("model") or ""),
+    }
+    if isinstance(health.get("policy"), str):
+        info["policy"] = health["policy"]
+    return info
 
 
 def _decider_data_dir() -> Path:
@@ -2128,8 +2168,8 @@ def _decider_pick(
     if not cfg:
         return None, (
             "ERROR: no decider is configured on this machine, so intent= cannot name a number. "
-            "Write decider.json beside config.json (or set FUNGI_DECIDER); with nothing "
-            "configured, target= and name= still work."
+            "Point one at a service — config.json's `decider` block (the settings page's BiXian "
+            "row) or FUNGI_DECIDER — with nothing configured, target= and name= still work."
         )
     weights = str(cfg.get("weights") or "")
     if weights and not Path(weights).exists():
@@ -3969,8 +4009,9 @@ SCHEMA = {
             "estimated. When you cannot pick a number — the picture is unreadable to you, or "
             "several controls share a name — `click`, `double_click`, `type` and `scroll` "
             "accept `intent=<what the gesture is for>` instead, and the number then comes from "
-            "the decision service *this machine* has configured (decider.json beside "
-            "config.json, or FUNGI_DECIDER); with nothing configured, or the service not "
+            "the decision service *this machine* has configured (config.json `decider`, "
+            "which the settings page's BiXian row edits, or FUNGI_DECIDER); with nothing "
+            "configured, or the service not "
             "answering, the call comes back refused with the reason, and `target=`/`name=` keep "
             "working. Workflow: windows → targets(hwnd) → click/type on a number; "
             "each action returns the window's new picture so you can check the "
@@ -4111,8 +4152,9 @@ SCHEMA = {
                         "picture or several controls share a name (e.g. '发送这条消息', 'the "
                         "confirm button'). click/double_click/type/scroll accept it instead of "
                         "target=/name=, and the number comes from the decision service this "
-                        "machine has configured — decider.json beside config.json, or the "
-                        "FUNGI_DECIDER environment variable — never from a model inside this "
+                        "machine has configured — the `decider` block in config.json (the "
+                        "settings page's BiXian row) or the FUNGI_DECIDER environment variable "
+                        "— never from a model inside this "
                         "tool. With nothing configured, or the service not answering, the call "
                         "comes back refused with the reason and target=/name= still work."
                     ),

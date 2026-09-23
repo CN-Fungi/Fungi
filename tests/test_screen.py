@@ -2273,12 +2273,19 @@ def test_a_stub_user32_is_cannot_tell_not_locked(monkeypatch):
 
 # ── intent=: a local decider picks the number ─────────────────────────────
 def _decider_env(monkeypatch, tmp_path, config: dict | None = None):
-    """Point the seam at a decider without touching this machine's own `decider.json`."""
+    """Point the seam at a decider: config.json's `decider` block (spec §63.1).
+
+    The path lands in tmp_path, so neither the tool nor a settings page in the same
+    test can reach this machine's real config. FUNGI_DECIDER is cleared here — the
+    two env cases set it themselves, after this helper has written the file.
+    """
     monkeypatch.setattr(config_mod, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.delenv("FUNGI_DECIDER", raising=False)
+    target = config_mod.CONFIG_PATH
     if config is None:
-        monkeypatch.delenv("FUNGI_DECIDER", raising=False)
+        target.write_text("{}", encoding="utf-8")
     else:
-        monkeypatch.setenv("FUNGI_DECIDER", json.dumps(config))
+        target.write_text(json.dumps({"decider": config}), encoding="utf-8")
     monkeypatch.setattr(screen, "_decider_data_dir", lambda: tmp_path)
     monkeypatch.setattr(screen, "window_rect", lambda hwnd: (1000, 480, 1200, 600))
     monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame())
@@ -2430,7 +2437,11 @@ def test_intent_is_offered_by_the_schema_and_gated_by_the_switch():
     """`intent` is still desktop control: it lives behind the same pc_control switch, and
     the model is told it exists (both in the property and in the tool description)."""
     params = screen.SCHEMA["function"]["parameters"]["properties"]
-    assert "intent" in params and "decider.json" in params["intent"]["description"]
+    assert "intent" in params
+    # The model is told where *a person* points one: the settings row, the file, the env.
+    described = params["intent"]["description"]
+    assert "BiXian" in described and "config.json" in described
+    assert "FUNGI_DECIDER" in described
     description = screen.SCHEMA["function"]["description"]
     assert "intent=" in description and "input desktop" in description
 
@@ -2495,3 +2506,85 @@ def test_typing_by_intent_still_looks_for_a_control(monkeypatch, tmp_path):
     )
     assert resolved and resolved[0]["intent"] == "the message box"
     assert "TYPE 2 chars" in str(out)
+
+
+# ── the settings entry: config.json's `decider` block, and the status it shows ──
+def test_the_seam_reads_the_decider_block_from_config_json(monkeypatch, tmp_path):
+    """配置入口在 config.json 的 decider 段（spec §63.1）：设置页写的和工具读的是同一个对象。"""
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111", "k": 5})
+
+    cfg = screen._decider_config()
+
+    assert cfg["url"] == "http://127.0.0.1:8111" and cfg["k"] == 5
+    assert cfg["_source"] == str(config_mod.CONFIG_PATH), "报告里要说出这份配置在哪"
+
+
+def test_the_env_override_points_the_seam_elsewhere_for_one_run(monkeypatch, tmp_path):
+    """FUNGI_DECIDER 压过配置文件：这次先拿另一个服务试，盘里那份一个字节不动。"""
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111"})
+    monkeypatch.setenv("FUNGI_DECIDER", json.dumps({"url": "http://127.0.0.1:9999"}))
+
+    cfg = screen._decider_config()
+
+    assert cfg["url"] == "http://127.0.0.1:9999"
+    assert cfg["_source"] == "FUNGI_DECIDER"
+
+
+def test_an_env_variable_that_is_not_json_is_a_reason_not_an_exception(monkeypatch, tmp_path):
+    """把 FUNGI_DECIDER 写成裸地址是常事：接缝带着这句话回来，而不是炸掉一次工具调用。"""
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111"})
+    monkeypatch.setenv("FUNGI_DECIDER", "http://127.0.0.1:8111")
+
+    cfg = screen._decider_config()
+
+    assert cfg["_problem"].startswith("FUNGI_DECIDER is not valid JSON")
+
+
+def test_nothing_configured_is_a_state_that_never_touches_the_network(monkeypatch, tmp_path):
+    """状态行的第一句（没配）来自配置本身：进设置页不许联网——/health 最坏卡界面 3 秒。"""
+    _decider_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(screen, "_decider_health", lambda *_a, **_k: pytest.fail("没配也联网了"))
+
+    assert screen.decider_status() == {"state": "none"}
+
+
+def test_a_service_that_answers_reports_its_model_back_to_the_page(monkeypatch, tmp_path):
+    """连上了要把模型名带回来：状态行那句 ✓ 的有用部分就是它（阈值归服务自己答）。"""
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111", "serve": ["x.py"]})
+    seen: list[str] = []
+
+    def health(url, timeout=0.0):
+        seen.append(url)
+        return {"loaded": True, "model": "kev-4B", "policy": "bixian@0.9"}
+
+    monkeypatch.setattr(screen, "_decider_health", health)
+
+    status = screen.decider_status()
+
+    assert status == {
+        "state": "ready",
+        "url": "http://127.0.0.1:8111",
+        "serve": True,
+        "model": "kev-4B",
+        "policy": "bixian@0.9",
+    }
+    assert seen == ["http://127.0.0.1:8111"], "问的就是配置里的那个地址"
+
+
+def test_every_way_a_service_can_be_wrong_gets_its_own_state(monkeypatch, tmp_path):
+    """「没在跑」「在加载」「加载炸了」是三句不同的人话、三种处置——不能都叫连不上。"""
+    cases = [
+        (None, "down", "nothing answers there"),
+        ({"loaded": False}, "loading", None),
+        ({"loaded": False, "load_error": "CUDA out of memory"}, "down", "CUDA out of memory"),
+        ({"loaded": True, "model_present": False}, "down", "no weights"),
+    ]
+    for health, state, reason in cases:
+        _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111"})
+        monkeypatch.setattr(screen, "_decider_health", lambda *_a, _h=health, **_k: _h)
+
+        status = screen.decider_status()
+
+        assert status["state"] == state, health
+        if reason:
+            assert reason in status["reason"], health

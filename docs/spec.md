@@ -2879,7 +2879,7 @@ private 模式没有 IndexedDB → 退回今天的行为（这份内存，没了
   第二轮的 Range 请求里**没有一扇从头开始的窗**、覆盖的字节数正好是缺的那些、
   浏览器存下来的文件与源逐字节相同、IndexedDB 里的碎片也清空了。
 - 门禁：`python -m ruff check fungi tests` 干净 · `PYTHONIOENCODING=utf-8 python -m pytest tests -q`
-  → **746 passed, 0 skipped**（本机装了 playwright：那 38 例浏览器用例真跑；没装的 runner 上会 skip，数字对不上不是 bug）。
+  → **758 passed, 0 skipped**（本机装了 playwright：那 38 例浏览器用例真跑；没装的 runner 上会 skip，数字对不上不是 bug）。
 ## 63. 桌控三件（2026-09-23 用户点名）：`intent=` 问本机的 decider、托盘浮窗停稳再点、锁屏如实报
 
 **用户原话**：「帮我将 flower 和 athand 中的新增功能整合进 fungi」→ 收窄成「**athand 照你说的**」。
@@ -2894,10 +2894,14 @@ Fungi 的 screen 工具在一个 agent 回合里跑，进程内的 `Session` 就
 **谁来看那张编号图**。当模型读不出号码、或者好几个控件叫同一个名字时，`click` / `double_click` /
 `type` / `scroll` 可以改报 `intent=<这个手势是为了干什么>`，号码交给**这台机器配好的**决策服务。
 
-- **接缝只认配置文件与 HTTP**：`decider.json`（在 `config.json` 旁边，冻结后在 exe 旁边）或
-  `FUNGI_DECIDER` 环境变量，键是 `url` / `serve` / `ask` / `weights` / `k` / `timeout` / `wait` /
-  `autostart`。**代码里没有任何模型的名字，也不 import 任何模型**：模型的运行时与显存完全留在对面
-  （作者自己的 BiXian 是参考实现）。请求是一个 JSON 对象进、一个出：
+- **接缝只认配置文件与 HTTP**：`config.json` 的 `decider` 段 —— 设置页「实验性」里的「BiXian 挑号」
+  就是它的编辑器（地址 + 启动命令两格，回车写盘，「保存并测试」问一次 `/health`），或
+  `FUNGI_DECIDER` 环境变量（一次性指到别处，压过配置文件）。键是 `url` / `serve` / `ask` /
+  `weights` / `k` / `timeout` / `wait` / `autostart`：**整块原样读写**，设置页没露出来的键（手写的
+  `k` / 超时 / `ask`…）存一次也不会丢；启动命令存的是 argv，写盘时从一行切出来 —— 路径先换正斜杠，
+  引号不成对就拒写，不让一个切错的 argv 埋一个起不来的服务。进设置页只读盘不联网（`/health` 最坏
+  卡界面 3 秒，那是「保存并测试」的事）。**代码里没有任何模型的名字，也不 import 任何模型**：模型
+  的运行时与显存完全留在对面（作者自己的 BiXian 是参考实现）。请求是一个 JSON 对象进、一个出：
   `{intent, options:[{id,label,box}], image}` → `{decision, id, p, confidence, threshold, options, marked}`。
 - `weights` 是**开关**：它指的路径不在盘上，整个接缝就关掉，并说清它找的是哪个路径。
 - **什么时候问**：没有 `target=`/`name=` 而给了 `intent=`；或者 `name=` 命中好几个
@@ -2948,7 +2952,7 @@ Fungi 的 screen 工具在一个 agent 回合里跑，进程内的 `Session` 就
 
 ### 63.5 验收
 
-`tests/test_screen.py`（+14 例，全部打桩：不碰真桌面、不摸真 UIA、不注入）：
+`tests/test_screen.py`（+20 例，全部打桩：不碰真桌面、不摸真 UIA、不注入）：
 
 - 浮窗**停稳再点**（两次采样一致才回，且点的是停稳后的那个矩形）· 从不停稳的浮窗仍然交出最后一次
   候选（不挂死、也不把它关掉）；
@@ -2958,5 +2962,17 @@ Fungi 的 screen 工具在一个 agent 回合里跑，进程内的 `Session` 就
   decider 的置信度 · `UNDECIDED` 时把问题交回调用方、不挑 · `name=` 多命中且没有 intent 时仍然是
   原来那句 `controls match` · 多命中**带** intent 时交给 decider · 没有 listing 时先建一份再问 ·
   schema 里有 `intent` 且仍受 `pc_control` 开关管 · 一个工具调用带着 intent 走完**不注入任何东西**。
+
+- **配置来源与状态行**（63.1 那个入口）：`config.json` 的 `decider` 段被读到、报告里说出它在哪 ·
+  `FUNGI_DECIDER` 压过文件 · 写成裸地址的环境变量回一句理由而不是异常 · 没配时状态行
+  **一次网络都不碰** · 连上了把模型名带回来（问的就是配置里那个地址） · 没在跑 / 在加载 /
+  加载炸了 / 没有权重各是一格 state —— 三句不同的人话，不能都叫「连不上」。
+
+`tests/test_gui.py`（+6 例，offscreen）：
+
+- BiXian 行夹在「实验性」与「拓展」之间 · 两格进页预填、回车写盘且 **decider 之外一个键不动**
+  （手写的 `k` / 超时原样留着、粘进来的路径换正斜杠）· 带空格的命令存两次不碎（引号拼回去）·
+  引号不成对**拒写**（一个字节不落盘）· 「保存并测试」先存后问、把 `/health` 的事实翻成人话 ·
+  **进设置页不联网**（状态行只读盘，`/health` 最坏卡界面 3 秒）。
 
 门禁：见 §62.6（同一棵树、同一次跑）。

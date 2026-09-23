@@ -118,6 +118,12 @@ class Config:
     # release (spec §44); empty means use what PATH gives (console scripts).
     ghostworld: bool = False
     ghostworld_dir: str = ""
+    # The decision service this machine points the screen tool at (spec §63.1):
+    # `url` (a resident service), `serve` (how to start it), plus `ask`/`weights`/
+    # `k`/`timeout`/`wait`/`autostart`. The whole block round-trips as one dict, so
+    # the keys the settings page does not show — anything written by hand —
+    # survive a save untouched. The page edits only `url` and `serve`.
+    decider: dict = field(default_factory=dict)
 
     @property
     def configured(self) -> bool:
@@ -285,6 +291,8 @@ def load_config(path: Path | None = None) -> Config:
         cfg.pc_control = bool(data.get("pc_control"))
         cfg.ghostworld = bool(data.get("ghostworld"))
         cfg.ghostworld_dir = str(data.get("ghostworld_dir") or "")
+        if isinstance(data.get("decider"), dict):
+            cfg.decider = {str(k): v for k, v in data["decider"].items()}
     cfg.api_key = os.environ.get("OPENAI_API_KEY") or cfg.api_key
     cfg.endpoint = os.environ.get("OPENAI_ENDPOINT") or cfg.endpoint
     cfg.model = os.environ.get("OPENAI_MODEL") or cfg.model
@@ -327,4 +335,6 @@ def save_config(cfg: Config, path: Path | None = None) -> None:
         data["ghostworld_dir"] = cfg.ghostworld_dir
     if cfg.display:
         data["display"] = cfg.display
+    if cfg.decider:
+        data["decider"] = cfg.decider
     target.write_text(json.dumps(data, indent=4), encoding="utf-8")

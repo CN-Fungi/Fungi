@@ -377,6 +377,144 @@ def test_opening_the_settings_page_repairs_an_unreadable_config(window):
     assert (real.read_bytes() if real.is_file() else None) == real_before, "真 config 不许被碰"
 
 
+def test_the_bixian_row_sits_under_experimental_before_extensions(window):
+    """BiXian 挑号是桌面控制的另一半（intent= 的挑号者），所以归「实验性」、在「拓展」之前
+    （用户 2026-09-23 点名：设置页该有 bixian 的配置入口）。"""
+    page = window.cfg_page
+    root = page.layout()
+
+    def slot(target):
+        """Row index holding `target`: a widget, a sub-layout, or inside a `_row` holder."""
+        for i in range(root.count()):
+            item = root.itemAt(i)
+            widget, sub = item.widget(), item.layout()
+            if widget is target or (sub is not None and sub.indexOf(target) >= 0):
+                return i
+            holder = widget.layout() if widget is not None else None
+            if holder is not None and holder.indexOf(target) >= 0:
+                return i
+        return -1
+
+    def heading(text):
+        for i in range(root.count()):
+            widget = root.itemAt(i).widget()
+            if widget is not None and getattr(widget, "text", lambda: None)() == text:
+                return i
+        return -1
+
+    experimental, extensions = heading("实验性"), heading("拓展")
+    assert experimental > -1 and extensions > experimental
+    for field in (page.bixian_url, page.bixian_serve):
+        assert experimental < slot(field) < extensions, "BiXian 挑号必须夹在实验性与拓展之间"
+
+
+def test_the_bixian_row_prefills_and_writes_only_the_decider_block(window):
+    """两格从盘里填、回车写盘；整块原样读写——手写的键（timeout）与 decider 之外的设置一个不动。"""
+    from PyQt5.QtGui import QShowEvent
+
+    from fungi.gui import config as config_page
+
+    cfg = config_page.config_mod.load_config()
+    cfg.decider = {"url": "http://127.0.0.1:9999", "timeout": 5}
+    config_page.config_mod.save_config(cfg)
+    page = window.cfg_page
+    page.showEvent(QShowEvent())  # 真实进页路径：预填 + 状态行
+    assert page.bixian_url.text() == "http://127.0.0.1:9999"
+    assert "已保存" in page.bixian_status.text()
+
+    target = config_page.config_mod.CONFIG_PATH
+    before = json.loads(target.read_text(encoding="utf-8"))
+    page.bixian_url.setText("http://127.0.0.1:8111")
+    page.bixian_serve.setText(r"C:\Tools\Bixian\decider.py --start")
+    page.bixian_url.returnPressed.emit()  # 回车即写盘，本页每个框同一条规矩
+
+    data = json.loads(target.read_text(encoding="utf-8"))
+    assert data["decider"] == {
+        "url": "http://127.0.0.1:8111",
+        "timeout": 5,
+        "serve": ["C:/Tools/Bixian/decider.py", "--start"],
+    }, "只碰地址与启动命令：手写的键原样留着，粘进来的路径换正斜杠"
+    assert {k: v for k, v in data.items() if k != "decider"} == {
+        k: v for k, v in before.items() if k != "decider"
+    }, "decider 之外一个键都不许动"
+    assert page.bixian_serve.text() == "C:/Tools/Bixian/decider.py --start", "框里 = 盘里"
+
+
+def test_a_command_with_a_space_in_it_survives_a_second_save(window):
+    """启动命令里带空格的路径必须加引号再拼回去：存两次切坏一次，服务就起不来了。"""
+    from fungi.gui import config as config_page
+
+    page = window.cfg_page
+    page.bixian_url.setText("http://127.0.0.1:8111")
+    page.bixian_serve.setText('python "C:/Program Files/Bixian/decider.py" --start')
+    page._save_bixian()
+    page._load_fields()  # 模拟关掉再打开设置页：两格重新从盘里填
+    page._save_bixian()  # 第二次存盘：没改内容回车，也不许把它切碎
+
+    data = json.loads(config_page.config_mod.CONFIG_PATH.read_text(encoding="utf-8"))
+    assert data["decider"]["serve"] == [
+        "python",
+        "C:/Program Files/Bixian/decider.py",
+        "--start",
+    ]
+
+
+def test_a_command_line_whose_quotes_never_close_is_refused(window):
+    """引号不成对 → 拒写并说清楚，而不是存一个切错的 argv、埋在下次真正启动时爆。"""
+    from fungi.gui import config as config_page
+
+    target = config_page.config_mod.CONFIG_PATH
+    before = target.read_bytes()
+    page = window.cfg_page
+    page.bixian_url.setText("http://127.0.0.1:8111")
+    page.bixian_serve.setText('python "C:/broken')
+
+    page._save_bixian()
+
+    assert target.read_bytes() == before, "读不出来的命令一个字节都不许落盘"
+
+
+def test_the_test_button_reports_whether_the_service_answers(window, monkeypatch):
+    """「保存并测试」：先写盘，再问一次 /health，把事实翻成人话——连不上要说地址和原因。"""
+    from fungi.gui import config as config_page
+    from fungi.tools import screen
+
+    page = window.cfg_page
+    page.bixian_url.setText("http://127.0.0.1:8111")
+    page.bixian_serve.setText("")
+
+    monkeypatch.setattr(screen, "_decider_health", lambda *_a, **_k: None)
+    page._test_bixian()
+    assert "连不上" in page.bixian_status.text()
+    assert "http://127.0.0.1:8111" in page.bixian_status.text()
+
+    monkeypatch.setattr(
+        screen, "_decider_health", lambda *_a, **_k: {"loaded": True, "model": "kev-4B"}
+    )
+    page._test_bixian()
+    assert "连上" in page.bixian_status.text() and "kev-4B" in page.bixian_status.text()
+    data = json.loads(config_page.config_mod.CONFIG_PATH.read_text(encoding="utf-8"))
+    assert data["decider"]["url"] == "http://127.0.0.1:8111", "按钮测的就是框里那份（先存）"
+
+
+def test_opening_the_page_never_asks_the_network(window, monkeypatch):
+    """进页面的状态行只读盘：/health 最坏卡界面 3 秒，不许挂在打开设置页的路上。"""
+    from PyQt5.QtGui import QShowEvent
+
+    from fungi.gui import config as config_page
+    from fungi.tools import screen
+
+    cfg = config_page.config_mod.load_config()
+    cfg.decider = {"url": "http://127.0.0.1:8111"}
+    config_page.config_mod.save_config(cfg)
+    monkeypatch.setattr(screen, "_decider_health", lambda *_a, **_k: pytest.fail("进页面就联网了"))
+
+    window.cfg_page.showEvent(QShowEvent())
+
+    assert window.cfg_page.bixian_url.text() == "http://127.0.0.1:8111"
+    assert "已保存" in window.cfg_page.bixian_status.text()
+
+
 def test_firewall_probe_parses_the_rule_count():
     from fungi.gui import firewall
 

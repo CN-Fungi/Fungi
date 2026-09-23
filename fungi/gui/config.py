@@ -1,6 +1,7 @@
 """Settings page: model config, courier switch, VidSense."""
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,19 @@ from .widgets import _row
 def _hf_hub_missing() -> bool:
     """True when Fungi's Python lacks huggingface_hub (download deps)."""
     return not _module_available("huggingface_hub")
+
+
+def _join_command(argv) -> str:
+    """One line for the box: the exact inverse of the split `_write_bixian` does.
+
+    A token containing a space goes back in quotes — without that, saving twice
+    would turn `python "C:/x y/z.py"` into three words, and the next split would
+    hand the service a different command than the one that was written (a
+    settings box has to survive the round trip).
+    """
+    if not isinstance(argv, list):
+        return ""
+    return " ".join(f'"{word}"' if " " in str(word) else str(word) for word in argv)
 
 
 class ConfigPage(QWidget):
@@ -182,6 +196,42 @@ class ConfigPage(QWidget):
         )
         pc_hint.setWordWrap(True)
         root.addWidget(pc_hint)
+
+        # BiXian 挑号（小标题）：intent= 的那一半——分不清该点哪个时，由这台机器配的本机
+        # 决策服务读图挑编号（spec §63.1）。写的是 config.json 的 decider 段：整块原样
+        # 读写，页面只碰地址与启动命令两格，手写的其它键（k/timeout/ask…）原样留着。
+        root.addSpacing(10)
+        bixian_lbl = BodyLabel("BiXian 挑号")
+        bixian_lbl.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        root.addWidget(bixian_lbl)
+        self.bixian_status = BodyLabel()
+        self.bixian_status.setWordWrap(True)
+        root.addWidget(self.bixian_status)
+        self.bixian_url = LineEdit()
+        self.bixian_url.setPlaceholderText("服务地址，例如 http://127.0.0.1:8111（留空 = 不用挑号）")
+        self.bixian_url.setMinimumWidth(420)
+        self.bixian_url.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.bixian_url.setClearButtonEnabled(True)
+        self.bixian_url.returnPressed.connect(self._save_bixian)
+        self.bixian_probe_btn = PushButton("保存并测试")
+        self.bixian_probe_btn.clicked.connect(self._test_bixian)
+        root.addWidget(_row("服务地址", self.bixian_url, self.bixian_probe_btn))
+        self.bixian_serve = LineEdit()
+        self.bixian_serve.setPlaceholderText(
+            "启动命令（可选），例如 python C:/Users/me/bixian/decider.py --start"
+        )
+        self.bixian_serve.setMinimumWidth(420)
+        self.bixian_serve.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.bixian_serve.setClearButtonEnabled(True)
+        self.bixian_serve.returnPressed.connect(self._save_bixian)
+        root.addWidget(_row("启动命令", self.bixian_serve))
+        bixian_hint = BodyLabel(
+            "开着桌面控制时，Agent 分不清该点哪个（编号读不出来、或几个控件同名），就把带编号的"
+            "图交给这台机器配的决策服务，由它挑一个；不填就照旧——它把候选列给你选。\n"
+            "没在跑的服务由启动命令自动起；更多键（k / 超时 / ask）写在 config.json 的 decider 段。"
+        )
+        bixian_hint.setWordWrap(True)
+        root.addWidget(bixian_hint)
 
         # 拓展（大标题）：已经有独立项目的现成能力搬进来——VidSense 与 GhostWorld
         # 都是能单独跑的东西，不是还在长的实验品（用户 2026-09-15 定调）。
@@ -400,6 +450,10 @@ class ConfigPage(QWidget):
         self.endpoint_edit.setText(cfg.endpoint)
         self.model_edit.setText(cfg.model)
         self.key_edit.clear()  # 只有掩码在占位符里：真 key 从不上屏
+        # BiXian 两格同理：框里显示的就是盘里存的那份（argv 拼回一行）
+        self.bixian_url.setText(str(cfg.decider.get("url") or ""))
+        self.bixian_serve.setText(_join_command(cfg.decider.get("serve")))
+        self._refresh_bixian()
 
     def _refresh_status(self) -> None:
         cfg = config_mod.load_config()
@@ -457,6 +511,87 @@ class ConfigPage(QWidget):
             duration=2500,
             parent=self.window_ref,
         )
+
+    def _write_bixian(self) -> bool:
+        """BiXian 两格写盘（回车与「保存并测试」共用）。False = 没写：命令读不出来。
+
+        整块原样读写：这里只动 url 与 serve，手写进 decider 段的其它键（k / 超时 / ask /
+        autostart…）一个不动——`Config.decider` 整个 dict 过，漏掉的键会随下一次保存消失。
+        """
+        cfg = config_mod.load_config()
+        block = dict(cfg.decider)
+        url = self.bixian_url.text().strip()
+        if url:
+            block["url"] = url
+        else:
+            block.pop("url", None)  # 留空 = 不用挑号
+        line = self.bixian_serve.text().strip()
+        if line:
+            # 粘进来的 Windows 路径先换正斜杠（单反斜杠进 JSON 是非法转义——ghostworld_dir
+            # 那格的老规矩），再按引号切词；引号不成对就拒写：写进去一个切错的 argv，等于
+            # 埋一个起不来的服务，而它坏在第一次真正要用的时候。
+            try:
+                argv = shlex.split(line.replace("\\", "/"), posix=True)
+            except ValueError as exc:
+                InfoBar.error("启动命令读不出来", str(exc), duration=4000, parent=self.window_ref)
+                return False
+            if argv:
+                block["serve"] = argv
+            else:
+                block.pop("serve", None)
+        else:
+            block.pop("serve", None)
+        cfg.decider = block
+        config_mod.save_config(cfg)
+        self.bixian_serve.setText(_join_command(block.get("serve")))  # 框里 = 盘里
+        return True
+
+    def _save_bixian(self) -> None:
+        """回车即写盘——本页每个输入框同一条规矩；状态行回到「存的是什么」。"""
+        if not self._write_bixian():
+            return
+        self._refresh_bixian()
+        InfoBar.success(
+            "已保存", "BiXian 挑号已写入 config.json", duration=2500, parent=self.window_ref
+        )
+
+    def _test_bixian(self) -> None:
+        """保存并测试：先写盘，再按工具真正会用的那份配置问一次 /health（3 秒内回话）。"""
+        if not self._write_bixian():
+            return
+        from ..tools import screen  # noqa: PLC0415 (desktop control only)
+
+        self.bixian_status.setText(self._bixian_sentence(screen.decider_status()))
+
+    def _refresh_bixian(self) -> None:
+        """状态行只说「盘里存了什么」：进页面不联网（/health 最坏卡界面 3 秒）。"""
+        decider = config_mod.load_config().decider
+        url = str(decider.get("url") or "").strip()
+        if url:
+            self.bixian_status.setText(f"已保存 {url} · 改完回车，点「保存并测试」看它在不在")
+        elif decider.get("ask"):
+            self.bixian_status.setText("已保存：一次性进程 ask（没有地址可测）")
+        else:
+            self.bixian_status.setText("未配置 · intent= 不挑号（把带编号的候选列给你选）")
+
+    @staticmethod
+    def _bixian_sentence(info: dict) -> str:
+        """探测结果 → 一句人话：措辞归这一页；screen 那边只回事实（它的措辞是给模型看的）。"""
+        state = info.get("state")
+        if state == "ready":
+            extra = f" · 模型 {info['model']}" if info.get("model") else ""
+            extra += f" · {info['policy']}" if info.get("policy") else ""
+            return f"✓ 连上 {info.get('url')}{extra}"
+        if state == "down":
+            tip = " · 配了启动命令：桌控第一次用到会自动起" if info.get("serve") else ""
+            return f"✗ 连不上 {info.get('url')}（{info.get('reason')}）{tip}"
+        if state == "loading":
+            return f"… {info.get('url')} 正在加载模型，等权重读完就能用"
+        if state == "broken":
+            return f"配置读不出来：{info.get('reason')}"
+        if state == "oneshot":
+            return "配的是一次性进程（ask）：每次现起现问，没有地址可测"
+        return "未配置 · intent= 不挑号（把带编号的候选列给你选）"
 
     def _toggle_ghostworld(self, checked: bool) -> None:
         """GhostWorld 角色控制开关（spec §43）：即时写盘；关掉时结束监视进程。
