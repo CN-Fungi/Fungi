@@ -378,7 +378,7 @@ def test_opening_the_settings_page_repairs_an_unreadable_config(window):
 
 
 def test_the_bixian_row_sits_under_experimental_before_extensions(window):
-    """BiXian 挑号是桌面控制的另一半（intent= 的挑号者），所以归「实验性」、在「拓展」之前
+    """Bixian是桌面控制的另一半（intent= 的挑号者），所以归「实验性」、在「拓展」之前
     （用户 2026-09-23 点名：设置页该有 bixian 的配置入口）。"""
     page = window.cfg_page
     root = page.layout()
@@ -405,7 +405,7 @@ def test_the_bixian_row_sits_under_experimental_before_extensions(window):
     experimental, extensions = heading("实验性"), heading("拓展")
     assert experimental > -1 and extensions > experimental
     for field in (page.bixian_url, page.bixian_serve):
-        assert experimental < slot(field) < extensions, "BiXian 挑号必须夹在实验性与拓展之间"
+        assert experimental < slot(field) < extensions, "Bixian必须夹在实验性与拓展之间"
 
 
 def test_the_bixian_row_prefills_and_writes_only_the_decider_block(window):

@@ -2440,7 +2440,7 @@ def test_intent_is_offered_by_the_schema_and_gated_by_the_switch():
     assert "intent" in params
     # The model is told where *a person* points one: the settings row, the file, the env.
     described = params["intent"]["description"]
-    assert "BiXian" in described and "config.json" in described
+    assert "Bixian" in described and "config.json" in described
     assert "FUNGI_DECIDER" in described
     description = screen.SCHEMA["function"]["description"]
     assert "intent=" in description and "input desktop" in description
