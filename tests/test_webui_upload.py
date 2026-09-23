@@ -144,6 +144,12 @@ def _status(base, sid) -> dict:
         return json.loads(resp.read())
 
 
+def _unfinished(inbox, part: str) -> bool:
+    """What an upload that has not landed leaves: the part, and the note beside it
+    that says how far it got (§62) — the thing a returning page continues from."""
+    return sorted(p.name for p in inbox.iterdir()) == sorted([part, part + ".json"])
+
+
 def test_the_host_says_whether_it_takes_windows(upload_env):
     """The one question a page asks before cutting a file up. An older host has
     no GET on this route, and the page then sends one body as it always did."""
@@ -167,7 +173,7 @@ def test_windows_land_the_file_byte_for_byte(upload_env):
         out = _send(_window(base, sid, "talk.bin", lo, len(payload), payload[lo:hi]))
         assert out["ok"] is True and out["done"] is False, out
         assert out["missing"], out
-    assert [p.name for p in inbox.iterdir()] == [f"talk.bin.{sid}.part"]
+    assert _unfinished(inbox, f"talk.bin.{sid}.part")
 
     lo, hi = windows[2]
     out = _send(_window(base, sid, "talk.bin", lo, len(payload), payload[lo:hi]))
@@ -187,7 +193,7 @@ def test_a_window_sent_twice_is_not_counted_twice(upload_env):
     again = _send(_window(base, sid, "retry.bin", 0, len(payload), payload[:half]))
     assert (first["received"], again["received"]) == (half, half)
     assert again["missing"] == [[half, len(payload)]]
-    assert [p.name for p in inbox.iterdir()] == [f"retry.bin.{sid}.part"]
+    assert _unfinished(inbox, f"retry.bin.{sid}.part")
 
     out = _send(_window(base, sid, "retry.bin", half, len(payload), payload[half:]))
     assert out["done"] is True
@@ -206,7 +212,7 @@ def test_a_missing_window_never_reaches_the_real_name(upload_env):
 
     state = _status(base, sid)
     assert (state["done"], state["received"], state["missing"]) == (False, 600, [[300, 600]])
-    assert [p.name for p in inbox.iterdir()] == [f"half.bin.{sid}.part"]
+    assert _unfinished(inbox, f"half.bin.{sid}.part")
 
     out = _send(_window(base, sid, "half.bin", 300, len(payload), payload[300:600]))
     assert out["done"] is True
@@ -240,7 +246,7 @@ def test_a_truncated_window_keeps_what_arrived_and_says_what_is_missing(upload_e
     assert "400" in text.splitlines()[0], text
     body = json.loads(text.split("\r\n\r\n", 1)[1])
     assert body["missing"] == [[64, 4096]], body
-    assert [p.name for p in inbox.iterdir()] == ["cut.bin.sess-cut.part"]
+    assert _unfinished(inbox, "cut.bin.sess-cut.part")
 
     out = _send(_window(base, "sess-cut", "cut.bin", 64, 4096, b"z" * (4096 - 64)))
     assert out["done"] is True
@@ -282,19 +288,67 @@ def test_a_window_that_would_walk_past_the_end_is_refused(upload_env):
     assert not inbox.exists() or not any(inbox.iterdir())
 
 
-def test_a_session_the_host_forgot_is_gone_not_guessed(upload_env, monkeypatch):
-    """Swept as stale (a page that walked away): the part goes with it, and the
-    status route says so instead of pretending the upload is still running."""
+def test_a_session_the_host_forgot_still_lets_the_page_finish_later(upload_env, monkeypatch):
+    """A page that walked away: the status route stops pretending the upload is
+    still running, and the session is out of memory — but the bytes stay on disk
+    with their note, so the same page coming back continues from where it
+    stopped (§62) instead of sending the whole file again."""
     base, inbox = upload_env
     payload = b"p" * 2048
     _send(_window(base, "sess-stale", "old.bin", 0, len(payload), payload[:1024]))
-    assert [p.name for p in inbox.iterdir()] == ["old.bin.sess-stale.part"]
+    assert _unfinished(inbox, "old.bin.sess-stale.part")
 
     monkeypatch.setattr(webui, "UPLOAD_TTL_S", 0.0)
     with pytest.raises(urllib.error.HTTPError) as err:
         _status(base, "sess-stale")
     assert err.value.code == 404
-    assert list(inbox.iterdir()) == [], "the swept session left its part behind"
+    assert sorted(p.name for p in inbox.iterdir()) == [
+        "old.bin.sess-stale.part",
+        "old.bin.sess-stale.part.json",
+    ], "the swept session took the page's bytes with it"
+
+    out = _send(_window(base, "sess-stale", "old.bin", 1024, len(payload), payload[1024:]))
+    assert out["done"] is True, out
+    assert Path(out["path"]).read_bytes() == payload
+    assert [p.name for p in inbox.iterdir()] == ["old.bin"], "a part file was left"
+
+
+def test_a_host_that_restarted_resumes_from_the_part_on_disk(upload_env):
+    """A host restart loses the sessions (they are memory), and the bytes are
+    what is left. The note beside the part is what a window arriving afterwards
+    is rebuilt from — otherwise a re-opened page would start the file again."""
+    base, _inbox = upload_env
+    payload = bytes(range(256)) * 8
+    cut = 1024
+    _send(_window(base, "sess-restart", "big.bin", 0, len(payload), payload[:cut]))
+
+    webui.UPLOADS._sessions.clear()  # what a restart leaves behind: nothing in memory
+
+    out = _send(_window(base, "sess-restart", "big.bin", cut, len(payload), payload[cut:]))
+    assert out["done"] is True, out
+    assert Path(out["path"]).read_bytes() == payload
+
+
+def test_a_part_from_another_upload_is_not_adopted(upload_env):
+    """The same id, another file: a session id belongs to one upload, so the host
+    refuses the second one instead of silently counting the first one's bytes —
+    and bytes on disk that are not this upload's are not adopted into it (§62)."""
+    base, inbox = upload_env
+    one, two = b"1" * 2048, b"2" * 2048
+    _send(_window(base, "sess-other", "one.bin", 0, len(one), one[:1024]))
+    assert _unfinished(inbox, "one.bin.sess-other.part")
+
+    with pytest.raises(urllib.error.HTTPError) as err:
+        _send(_window(base, "sess-other", "two.bin", 0, len(two), two))
+    assert err.value.code == 400, "an id that belongs to one file took another"
+
+    # A host that has forgotten the session rebuilds it from the note — and the
+    # note describes one.bin, not this file, so two.bin starts from nothing.
+    webui.UPLOADS._sessions.clear()
+    out = _send(_window(base, "sess-other", "two.bin", 0, len(two), two))
+    assert out["done"] is True
+    assert Path(out["path"]).read_bytes() == two, "another upload's bytes were adopted"
+    assert (inbox / "one.bin.sess-other.part").read_bytes() == one[:1024]
 
 
 # ── the other direction: PC -> phone (§52) ──

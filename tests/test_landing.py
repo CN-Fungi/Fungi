@@ -7,6 +7,7 @@ an incoming file.
 """
 
 import http.client
+import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -136,25 +137,43 @@ def test_spans_are_a_union_not_a_running_total():
 
 class _HalfwayHub(BaseHTTPRequestHandler):
     """Promises 1 MiB, sends 4 KiB, then drops the connection: the exact shape
-    of a sender whose app is closed mid-download."""
+    of a sender whose app is closed mid-download.
+
+    It answers `/api/transfer/progress` honestly first, so the delivery really
+    starts (a receiver that cannot learn the size falls back to one stream
+    without asking), and dies in the body.
+    """
 
     protocol_version = "HTTP/1.1"
+    SIZE = 1024 * 1024
+    SENT = 4096
 
     def log_message(self, fmt, *args) -> None:
         pass
 
     def do_GET(self) -> None:
+        if self.path.startswith("/api/transfer/progress"):
+            body = json.dumps({"ok": True, "sent": 0, "total": self.SIZE}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(1024 * 1024))
+        self.send_header("Content-Length", str(self.SIZE))
         self.end_headers()
-        self.wfile.write(b"x" * 4096)
+        self.wfile.write(b"x" * self.SENT)
         self.wfile.flush()
         self.close_connection = True
         self.connection.close()
 
 
-def test_an_aborted_http_delivery_leaves_nothing_behind(land):
+def test_an_aborted_http_delivery_leaves_no_real_name_and_a_resumable_part(land):
+    """A delivery that dies keeps what it got, under a `.part` name — never the
+    real one (§49), and not nothing either (§62): the next attempt at this same
+    staged transfer picks up from here instead of from byte zero."""
     server = ThreadingHTTPServer(("127.0.0.1", 0), _HalfwayHub)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -164,10 +183,115 @@ def test_an_aborted_http_delivery_leaves_nothing_behind(land):
         with pytest.raises((OSError, http.client.HTTPException)):
             client.download_transfer("whatever", dest)
         assert not dest.exists(), "an aborted delivery landed under the real name"
-        assert list(land.iterdir()) == []
+        names = sorted(p.name for p in land.iterdir())
+        assert names == ["half.rar.whatever.part", "half.rar.whatever.part.json"]
+        note = landing.PartRecord.read(land / "half.rar.whatever.part")
+        assert note is not None and note.transfer == "whatever"
+        assert note.size == 1024 * 1024
+        assert note.spans and note.spans[0][0] == 0, "what arrived is not recorded"
     finally:
         server.shutdown()
         server.server_close()
+
+
+# ── an unfinished delivery is continued, not restarted (§62) ──
+
+
+def _die_with(land_obj, start: int, end: int, byte: bytes) -> None:
+    """Write `[start, end)`, record it, then lose the connection."""
+    with land_obj.writer(start) as fh:
+        fh.write(byte * (end - start))
+        land_obj.written(start, end)
+    raise ConnectionResetError("the room went away")
+
+
+def test_a_delivery_that_died_hands_its_spans_to_the_next_attempt(land):
+    dest = land / "report.rar"
+    with (
+        pytest.raises(ConnectionResetError),
+        landing.Landing(dest, expect=100, tag="abcd1234", transfer="tid-1") as first,
+    ):
+        _die_with(first, 0, 40, b"x")
+
+    part = land / "report.rar.abcd1234.part"
+    assert part.exists() and not dest.exists(), "a dead delivery kept the wrong thing"
+
+    with landing.Landing(dest, expect=100, tag="abcd1234", transfer="tid-1") as again:
+        assert again.spans.bytes == 40, "the next attempt did not read what is on disk"
+        assert again.spans.end_of_run(0) == 40
+        with again.writer(40) as fh:
+            fh.write(b"y" * 60)
+            again.written(40, 100)
+        again.commit()
+
+    assert dest.read_bytes() == b"x" * 40 + b"y" * 60
+    assert sorted(p.name for p in land.iterdir()) == ["report.rar"]
+
+
+def test_a_note_about_another_transfer_is_not_used(land):
+    """The identity is the staged transfer: another id is another delivery, and
+    bytes that belong to the first one must never be adopted into it."""
+    dest = land / "report.rar"
+    with (
+        pytest.raises(ConnectionResetError),
+        landing.Landing(dest, expect=100, tag="abcd1234", transfer="tid-1") as first,
+    ):
+        _die_with(first, 0, 40, b"x")
+
+    with landing.Landing(dest, expect=100, tag="abcd1234", transfer="tid-2") as other:
+        assert other.spans.bytes == 0, "another delivery's bytes were adopted"
+    assert not (land / "report.rar.abcd1234.part").exists(), "the stale part was left behind"
+
+
+def test_a_note_about_another_length_is_not_used(land):
+    """Same id, different size: whatever is on disk is not this file."""
+    dest = land / "report.rar"
+    with (
+        pytest.raises(ConnectionResetError),
+        landing.Landing(dest, expect=100, tag="abcd1234", transfer="tid-1") as first,
+    ):
+        _die_with(first, 0, 40, b"x")
+
+    with landing.Landing(dest, expect=200, tag="abcd1234", transfer="tid-1") as other:
+        assert other.spans.bytes == 0
+
+
+def test_a_note_can_never_claim_bytes_the_part_does_not_have(land):
+    """The part's real length is the last word: a note written a moment before a
+    kill can name a stretch whose bytes were still in the writer's buffer, and
+    believing that is how a hole gets to look like data."""
+    part = land / "x.bin.abcd1234.part"
+    part.write_bytes(b"a" * 10)
+    landing.PartRecord("tid-1", 100, part.name, [(0, 90)]).write(part)
+
+    with landing.Landing(land / "x.bin", expect=100, tag="abcd1234", transfer="tid-1") as resumed:
+        assert resumed.spans.end_of_run(0) == 10
+
+
+def test_a_delivery_with_no_staged_transfer_behind_it_still_leaves_nothing(land):
+    """Without an id nothing could ever look for the part again, so the §49 rule
+    stands for it: a failure leaves nothing at all."""
+    dest = land / "plain.bin"
+    with (
+        pytest.raises(ConnectionResetError),
+        landing.atomic_landing(dest, expect=100) as fh,
+    ):
+        fh.write(b"x" * 10)
+        raise ConnectionResetError("dead")
+
+    assert list(land.iterdir()) == []
+
+
+def test_a_part_nobody_came_back_for_is_swept_away(land):
+    """Keeping an unfinished delivery is worth disk only while somebody could
+    still continue it."""
+    part = land / "old.bin.deadbeef.part"
+    part.write_bytes(b"x" * 10)
+    landing.PartRecord("tid-1", 100, part.name, [(0, 10)]).write(part)
+
+    landing.sweep_parts(land, ttl=0)
+
+    assert list(land.iterdir()) == []
 
 
 # ── the landing directory ──

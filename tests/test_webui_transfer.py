@@ -839,3 +839,92 @@ def test_a_big_file_goes_through_from_either_role(browser, rooms, tmp_path):
     # deliveries dropped their staged copy again (§48): nothing of a delivered
     # transfer is left behind on the sender's disk
     assert list(Path(server.hub.transfers.root).glob("*__big.bin")) == []
+
+
+def test_a_reloaded_phone_page_finishes_the_pull_it_started(mobile_page, rooms, tmp_path):
+    """§62, at the last hop: a phone that loses the page mid-pull keeps what it had.
+
+    Each window is written down as a whole (IndexedDB) when it finishes, so after the
+    reload the page asks the host for the windows it never got — and the requests prove
+    it, because a window it already holds is not asked for at all.
+    """
+    _server, _client = rooms
+    payload = bytes(range(256)) * (12 * 1024 * 1024 // 256)  # 12 MiB: three windows
+    src = tmp_path / "gift.bin"
+    src.write_bytes(payload)
+
+    # The first window gets through; every range request after it dies (the phone
+    # went away, which a reload is a faithful model of — the memory goes with it).
+    mobile_page.evaluate(
+        """() => {
+          const of = window.fetch;
+          window.__through = false;
+          window.fetch = function (u, o) {
+            const range = (o && o.headers && o.headers.Range) || '';
+            if (String(u).indexOf('/download') !== 0 || !range) return of.apply(this, arguments);
+            if (window.__through) return Promise.reject(new Error('the phone went away'));
+            window.__through = true;
+            return of.apply(this, arguments);
+          };
+        }"""
+    )
+    out = mobile_page.evaluate(
+        "(p) => Xfer.download(p).then(() => 'ok', e => 'err: ' + e.message)", str(src)
+    )
+    assert out.startswith("err:"), out
+
+    # What survived: the window that finished, in the page's own store.
+    stored = mobile_page.evaluate(
+        """() => new Promise(resolve => {
+          const open = indexedDB.open('fungi-pull', 1);
+          open.onsuccess = () => {
+            const keys = open.result.transaction('windows').objectStore('windows').getAllKeys();
+            keys.onsuccess = () => resolve(keys.result.map(String));
+            keys.onerror = () => resolve([]);
+          };
+          open.onerror = () => resolve([]);
+        })"""
+    )
+    assert any(key.endswith("#0") for key in stored), stored
+    assert not any(key.endswith("#1") for key in stored), stored
+
+    mobile_page.reload()
+    mobile_page.wait_for_function("() => typeof Xfer === 'object'")
+    mobile_page.evaluate(
+        """() => {
+          window.__gets = [];
+          const of = window.fetch;
+          window.fetch = function (u, o) {
+            const range = (o && o.headers && o.headers.Range) || '';
+            if (String(u).indexOf('/download') === 0 && range) window.__gets.push(range);
+            return of.apply(this, arguments);
+          };
+        }"""
+    )
+    with mobile_page.expect_download(timeout=60000) as caught:
+        mobile_page.evaluate("(p) => { Xfer.download(p); }", str(src))
+    saved = tmp_path / "resumed.bin"
+    caught.value.save_as(str(saved))
+
+    assert saved.read_bytes() == payload, "the resumed pull did not reassemble byte for byte"
+    asked = mobile_page.evaluate("() => window.__gets")
+    covered = []
+    for spec in asked:
+        lo, _, hi = spec.replace("bytes=", "").partition("-")
+        covered.append((int(lo), int(hi)))
+    window_bytes = 4 * 1024 * 1024
+    assert all(lo > 0 for lo, _hi in covered), f"the window it already had was asked for: {asked}"
+    assert sum(hi - lo + 1 for lo, hi in covered) == len(payload) - window_bytes, asked
+    # and the pieces it no longer needs are gone, not left holding the phone's disk
+    left = mobile_page.evaluate(
+        """() => new Promise(resolve => {
+          const open = indexedDB.open('fungi-pull', 1);
+          open.onsuccess = () => {
+            const keys = open.result.transaction('windows').objectStore('windows').getAllKeys();
+            keys.onsuccess = () => resolve(keys.result.map(String));
+            keys.onerror = () => resolve([]);
+          };
+          open.onerror = () => resolve([]);
+        })"""
+    )
+    assert left == [], left

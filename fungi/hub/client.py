@@ -11,7 +11,7 @@ import urllib.request
 from pathlib import Path
 
 from .. import runlog
-from ..landing import Landing
+from ..landing import Landing, head_digest
 from ..protocol import Envelope, ProtocolError, deserialize
 
 POLL_CAP = 25.0
@@ -74,6 +74,20 @@ def _answered(conn: http.client.HTTPConnection, wait: float = 0.0) -> bool:
     return bool(readable)
 
 
+def _read_body(resp, want: int) -> tuple[bytes, bool]:
+    """One read off a response body: `(bytes, ended_early)`.
+
+    A connection that dies before its `Content-Length` shows up as an
+    `IncompleteRead` carrying the bytes that did arrive. They are real bytes off
+    the wire, so they are handed back rather than thrown away — the delivery
+    that dropped only has to fetch what never came (§62).
+    """
+    try:
+        return resp.read(want), False
+    except http.client.IncompleteRead as exc:
+        return bytes(exc.partial or b""), True
+
+
 class HubError(Exception):
     pass
 
@@ -100,7 +114,7 @@ class HubClient:
         req = urllib.request.Request(url, data=data, method=method)
         try:
             with urllib.request.urlopen(req, timeout=40) as resp:
-                out = json.loads(resp.read())
+                raw = resp.read()
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             try:
@@ -112,6 +126,15 @@ class HubClient:
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             self._note_trouble(f"{path}: {exc}")
             raise HubError(f"{path}: {exc}") from exc
+        try:
+            out = json.loads(raw)
+        except (json.JSONDecodeError, ValueError) as exc:
+            # A reply that is not JSON is a broken hub, whichever route it came
+            # back on — including the one that says how big a staged file is, so
+            # it is reported as such instead of escaping as a bare ValueError
+            # (a delivery would have died on it, never reaching the fallback).
+            self._note_trouble(f"{path}: not JSON ({exc})")
+            raise HubError(f"{path}: not JSON ({exc})") from exc
         if self._trouble:
             self._trouble = False
             runlog.forget(f"hub:{self.base}")
@@ -247,14 +270,54 @@ class HubClient:
         return int(total) if isinstance(total, int) and total > 0 else None
 
     def _download_stream(self, transfer_id: str, dest) -> None:
-        """One GET from byte zero: the shape every hub version understands."""
-        req = urllib.request.Request(self._transfer_url(transfer_id))
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            announced = (resp.headers.get("Content-Length") or "").strip()
-            expect = int(announced) if announced.isdigit() else None
-            with Landing(Path(dest), expect, tag=_tag(transfer_id)) as land:
-                self._pump(resp, land, 0, expect)
+        """One GET: the shape every hub version understands, continued if we can (§62).
+
+        An earlier attempt at this same transfer left a part behind, so the request
+        starts at the byte that part really reached — `Range: bytes=<at>-` — and a
+        hub that does not do ranges (a 200 where a 206 was asked for) means starting
+        the part over instead of writing its body at the wrong offset.
+        """
+        with Landing(Path(dest), None, tag=_tag(transfer_id), transfer=transfer_id) as land:
+            start = land.spans.end_of_run(0)
+            with urllib.request.urlopen(self._stream_request(transfer_id, start), timeout=120) as resp:
+                ranged = self._ranged_from(resp, start)
+                if start and not ranged:
+                    land.restart()
+                    start = 0
+                expect = self._announced_size(resp, start if ranged else 0)
+                land.expect = expect
+                self._pump(resp, land, start, expect)
                 land.commit()
+
+    def _stream_request(self, transfer_id: str, start: int):
+        headers = {"Range": f"bytes={start}-"} if start else {}
+        return urllib.request.Request(self._transfer_url(transfer_id), headers=headers)
+
+    @staticmethod
+    def _ranged_from(resp, start: int) -> bool:
+        """Did this response begin exactly at `start` as a 206 (a 200 is the whole file)?"""
+        if not start:
+            return getattr(resp, "status", 200) == 206
+        content_range = (resp.headers.get("Content-Range") or "").strip()
+        return getattr(resp, "status", 200) == 206 and content_range.startswith(f"bytes {start}-")
+
+    @staticmethod
+    def _announced_size(resp, fallback_start: int) -> int | None:
+        """How big the whole staged file is: `Content-Range`'s total, else the length.
+
+        For a 206 the `Content-Length` is only what this request still owes, so the
+        total has to come out of `Content-Range` — a part committed against the
+        remaining length would be rejected as truncated on a resumed delivery.
+        """
+        content_range = (resp.headers.get("Content-Range") or "").strip()
+        if content_range.startswith("bytes ") and "/" in content_range:
+            total = content_range.rsplit("/", 1)[-1].strip()
+            if total.isdigit():
+                return int(total)
+        announced = (resp.headers.get("Content-Length") or "").strip()
+        if announced.isdigit():
+            return int(announced) + fallback_start
+        return None
 
     def _download_windows(self, transfer_id: str, dest, size: int, windows) -> None:
         """Fetch a delivery as ranged GETs at once, one thread per window (§50).
@@ -264,14 +327,24 @@ class HubClient:
         Everything else about the delivery is the same as a single stream — one
         part file, one commit — because the windows write disjoint stretches of
         it and the commit checks that all of them are there.
+
+        A delivery that an earlier attempt left half done hands its windows back
+        here with the stretches they already have (§62): a window that is whole
+        is not requested at all, and one that is partly there starts where it
+        stopped. The hub can only do that if it still offers ranges — a hub that
+        answers 200 to the probe is asked for the file from the top instead.
         """
         stop = threading.Event()
         errors: list[BaseException] = []
-        with Landing(Path(dest), size, tag=_tag(transfer_id)) as land:
+        with Landing(Path(dest), size, tag=_tag(transfer_id), transfer=transfer_id) as land:
             first, last = windows[0]
             probe, ranged = self._open_window(transfer_id, first, last - 1)
             with probe:
                 if not ranged:
+                    if land.spans.bytes:
+                        # Mid-file the whole-file answer starts at byte zero, so
+                        # what is on disk cannot be added to: start the part over.
+                        land.restart()
                     # No ranges on this hub: the answer is the whole file from
                     # byte zero, so it plays the part of the single stream.
                     self._pump(probe, land, 0, size)
@@ -296,15 +369,20 @@ class HubClient:
             land.commit()
 
     def _window(self, transfer_id: str, land, window: tuple[int, int], stop, errors) -> None:
-        """One window, retried in place: the first half of resuming (§50).
+        """One window, retried in place: the two halves of resuming (§50, §62).
 
         A range that dies is re-requested from the byte it stopped at, so a drop
-        costs a window's worth of re-download instead of the whole file. Out of
-        attempts it stops the other windows and the delivery fails — a part file
-        with no future does not deserve more of the link.
+        costs a window's worth of re-download instead of the whole file. And a
+        window the part already holds in full is not requested at all: that is
+        what makes a delivery which was interrupted yesterday cost only what it
+        had not fetched. Out of attempts it stops the other windows and the
+        delivery fails — a part file with no future does not deserve more of the
+        link.
         """
         start, end = window
-        at = start
+        at = land.spans.end_of_run(start)  # what an earlier attempt already has (§62)
+        if at >= end:
+            return
         failure: BaseException | None = None
         for attempt in range(WINDOW_ATTEMPTS):
             if stop.is_set():
@@ -362,6 +440,11 @@ class HubClient:
         raised; for a window that is the signal to resume, and the caller reads
         the resume point off the landing (what is really on disk) rather than
         off this call.
+
+        A body that stops short of its `Content-Length` is written down too: the
+        drop arrives as an `IncompleteRead` that carries the bytes already off
+        the socket, and throwing those away would mean fetching a stretch the
+        link has already paid for (§50, §62).
         """
         at = start
         with land.writer(start) as fh:
@@ -369,13 +452,14 @@ class HubClient:
                 if stop is not None and stop.is_set():
                     break
                 want = STREAM_CHUNK if end is None else min(STREAM_CHUNK, end - at)
-                chunk = resp.read(want)
-                if not chunk:
+                chunk, ended = _read_body(resp, want)
+                if chunk:
+                    began = at
+                    fh.write(chunk)
+                    at += len(chunk)
+                    land.written(began, at)
+                if ended or not chunk:
                     break
-                began = at
-                fh.write(chunk)
-                at += len(chunk)
-                land.written(began, at)
 
     def _transfer_url(self, transfer_id: str) -> str:
         return f"{self.base}/api/transfer?id={transfer_id}&host={self.host}&token={self.token}"
@@ -398,21 +482,84 @@ class HubClient:
         `progress(sent, total)` rides along per chunk: the send-file modal in
         the WebUI renders it (room.py transfer jobs), and nothing else needs to
         know how the bytes travelled.
+
+        A file this hub is *already* holding is not sent over the wire again
+        (§62). The sender asks first (`/api/transfer/pending`), and the answer
+        covers both cases at once: a partial staging from an attempt that died is
+        continued from where it stopped, and a whole one the receiver has simply
+        not taken yet is reported as staged — sending it again would only rewrite
+        the bytes it already has. Identity is (name, destination, length) plus the
+        digest of the first 64 KiB, because there is no checksum on the wire to
+        appeal to.
         """
         src = Path(path)
-        u = urllib.parse.urlparse(self.base)
-        q = urllib.parse.urlencode(
-            {"token": self.token, "host": self.host, "to": to_host, "name": name}
-        )
         total = src.stat().st_size
-        sent = 0
+        head = head_digest(src) if total else ""
+        known = self._staged_already(name, to_host, total, head)
+        if known and not known.get("partial"):
+            runlog.note("hub already holds %s whole — not sending it again", name)
+            return {
+                "ok": True,
+                "id": known.get("id"),
+                "name": known.get("name") or name,
+                "size": total,
+                "staged": True,
+            }
+        offset = int(known.get("received") or 0) if known else 0
+        out = self._post_upload(src, name, to_host, total, offset, str(known.get("id") or ""), progress)
+        if out.get("restart"):
+            # The staging moved on between the question and the body (swept, or
+            # finished by another attempt): this body is a tail, so it cannot be
+            # attached anywhere. Once, from the top.
+            runlog.note("the hub's staging of %s moved on; sending it from the start", name)
+            out = self._post_upload(src, name, to_host, total, 0, "", progress)
+        return out
+
+    def _staged_already(self, name: str, to_host: str, size: int, head: str) -> dict:
+        """The hub's answer about this file, or `{}` when it holds nothing of it.
+
+        A hub older than §62 has no such route: 404 means one thing only here —
+        send the whole file, which is what every version before this did.
+        """
+        if not size or not head:
+            return {}
+        query = urllib.parse.urlencode(
+            {"token": self.token, "host": self.host, "to": to_host, "name": name,
+             "size": size, "head": head}
+        )
+        try:
+            out = self._request("GET", f"/api/transfer/pending?{query}")
+        except HubError:
+            return {}
+        return out if out.get("ok") else {}
+
+    def _post_upload(
+        self, src: Path, name: str, to_host: str, total: int, offset: int, resume: str, progress
+    ) -> dict:
+        """One upload body: from `offset` to the end, appended to `resume` or started fresh."""
+        u = urllib.parse.urlparse(self.base)
+        params = {
+            "token": self.token,
+            "host": self.host,
+            "to": to_host,
+            "name": name,
+            "total": total,
+        }
+        if resume:
+            params["id"] = resume
+            params["offset"] = offset
+        q = urllib.parse.urlencode(params)
+        sent = offset
         conn = http.client.HTTPConnection(u.hostname, u.port, timeout=600)
         try:
             with src.open("rb") as fh:
+                fh.seek(offset)
                 conn.putrequest("POST", f"/api/transfer/upload?{q}")
                 conn.putheader("Content-Type", "application/octet-stream")
-                conn.putheader("Content-Length", str(total))
+                conn.putheader("Content-Length", str(total - offset))
                 conn.endheaders()
+                if progress is not None and offset:
+                    progress(offset, total)
                 refused = _answered(conn, REFUSAL_WAIT_S)
                 while not refused:
                     chunk = fh.read(256 * 1024)
@@ -425,6 +572,7 @@ class HubClient:
                     refused = _answered(conn)  # the hub answered mid-body: stop
             resp = conn.getresponse()
             body = resp.read()
+            status = resp.status
         except (OSError, http.client.HTTPException) as exc:
             # A hub that closed on us must not take this thread down: an
             # exception here leaves /comm-send unanswered and the page says
@@ -436,7 +584,9 @@ class HubClient:
         try:
             out = json.loads(body or b"{}")
         except json.JSONDecodeError:
-            return {"error": f"upload failed: HTTP {resp.status}"}
-        if resp.status != 200 and "error" not in out:
-            out = {"error": f"upload failed: HTTP {resp.status}"}
+            return {"error": f"upload failed: HTTP {status}"}
+        if status == 409 and out.get("restart"):
+            return {"restart": True, "error": str(out.get("error") or "stale resume")}
+        if status != 200 and "error" not in out:
+            out = {"error": f"upload failed: HTTP {status}"}
         return out

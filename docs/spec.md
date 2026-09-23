@@ -2766,3 +2766,117 @@ CSS 里全是**三个类**（`.msg.file-card.mine` / `.msg.user.peer`），照�
   不会响（`_shuttle_turn` 根本不走回合）。
 - **多标签页会互相盖声明**：`_SEEN` 是「会话 → 时间戳」，不是「标签页 → 会话」，另一个标签页的一次
   `release` 最多让这边 3 秒内重新声明一次（自愈）。要精确到标签页，得给每个页面一个 id。
+## 62. 跨次续传（2026-09-23 用户点名）：断掉的传输下次接着传
+
+**用户原话**：「帮我将 flower 和 athand 中的新增功能整合进 fungi」，随后自己收窄成「athand 照你说的，
+flower 我只想加一个**断点续传** —— 对于 fungi 的文件传输，包括移动和 PC 之间或 PCs 之间」。
+
+出处是他自己的 Flower（同一作者的分流下载器）：2026-09-23 那一版给 part 旁边写了一张**条子**
+（链接、长度、已落盘的区间），进程被 kill、断网、Ctrl-C 之后条子和 part 都留着，下次下**同一个链接**
+就从条子说的位置接着下；条子对不上（链接 / 长度 / 摘要变了）就把条子和它指名的 part 一起丢掉。
+§50.6 当初把「跨次续传」明确留给二期，理由写在那一节：需要新的 staged id 与「hub 留着暂存」的
+双向约定。这一节就是那一期 —— 而且不只第二段腿：四条腿（PC→hub、hub→PC、手机→PC、PC→手机）都有。
+
+### 62.1 动的是失败路径，不是 §49 那条铁律
+
+**终名下永远只出现整份文件**，这条一个字没改。改的是失败路径原先那句「任何失败路径都删掉 part」：
+现在失败**留下** part 和它旁边的条子，下一次同一个 staged transfer 从条子上说的位置接着下。
+条子的形状与 Flower 同源（`<part>.json`：`transfer` / `size` / `part` / `spans` / `saved`），
+名字由 part 派生 —— 找 part 与找条子永远是同一件事。三条保证：
+
+- **只在句柄关闭之后才记**：`Landing.written()` 按 `PERSIST_INTERVAL_S`（2 秒）节流写盘，
+  最坏情况是重下一小段，不会出现「条子说到了、盘上没有」；
+- **回到盘上再夹一次**：`adopt()` 把每个区间按 part 的**真实长度**夹一遍（`min(last, size)`），
+  所以一张在 kill 前一刻写下的条子也只能声称盘上真有的字节；
+- **原子写**：先写 `.tmp` 再 `replace`。半张条子 = JSON 解析失败 = 把一份好好的 part 丢掉，
+  而那正是这个特性要保住的东西。
+
+### 62.2 身份是「哪一次 staged transfer」，不是文件名
+
+协议里没有校验和（§49.4 的边界：只有长度），而「同名同长」证明不了两次发送是同一份内容 ——
+一个改过、长度没变的文件正好会那样。所以续传的判据只有一个：**同一个 staged transfer（同一个 id）
++ 同一个长度**。换了 id 就是另一次传输，磁盘上那份属于别人，丢掉重下（`test_a_note_about_another_transfer_is_not_used`
+与客户端那一例 `test_a_different_staged_transfer_does_not_continue_the_old_part` 盯的就是它）。
+推论：**要让人真的续上，发送端得复用同一个 id** —— 见 62.3 第一段。
+
+### 62.3 四段腿各自「上次」是什么、怎么接上
+
+| 腿 | 状态住在哪 | 续的判据 | 怎么触发 |
+|---|---|---|---|
+| 发送端 → hub（PC） | hub 的暂存 + `Transfers` 登记 | 名字 + 长度 + **头 64 KiB 摘要** | 每次发送前先问 `GET /api/transfer/pending` |
+| hub → 收件端（PC） | 收件端盘上的 part + 条子 | staged transfer id + 长度 | 同一个 id 再来一次（发送端复用 id，或收件端重试同一张卡） |
+| 手机 → PC（上传） | 宿主盘上的 part + 条子；页面的 sid | sid + 名字 + 长度 | 页面按文件指纹取回 sid，先问 `GET /upload?sid=` |
+| PC → 手机（下载） | 页面 IndexedDB 里**整窗**的字节 + 切法账本 | 路径 + 长度 + 名字 + 同一种切法 | 再次点那条路径 |
+
+**（1）发送端 → hub：暂存不再一断就丢。** body 比它声明的 `Content-Length` 短 = 连接死了。
+以前这条 upload 的直接后果是「删掉暂存 + 400」；现在留下已到的字节，记为 `partial`，并回答
+`{id, received, total, partial}`。**partial 永远不 fetchable**（收件端根本不该知道它存在 ——
+一个提前的通知就是半份文件被送达的路）。发送端下次带着 `?id=&offset=&total=` 把剩下的交上来。
+
+- 身份用**摘要**而不是名字：hub 手里有暂存的头 `min(64 KiB, 长度)` 个字节，发送端手里有自己的，
+  两边算 sha256 比一下（`landing.head_digest`，一个实现两个进程用）。同一份文件重发时这是免费的，
+  而它是「同名同长不同内容」唯一拦得住的闸。
+- **未完成度**：`min(64 KiB, size)` —— 比这还短的暂存证明不了任何事，一律不认（小文件重传一遍就好）。
+- **一份完整的暂存也会被认出来**：重发同一份文件时发送端**一个字节都不再走**，只把信封再发一次
+  （对端可能只是还没点接收）。这条在客户端用「把 `_post_upload` 换成断言」钉着。
+- 空转的 partial 24 小时清掉（`Transfers.sweep_partials`，跟着 hub 的 reaper 走）；那一份没有清掉的
+  结局是磁盘涨 —— 这是它唯一会付出的代价。
+
+**（2）hub → 收件端：窗口级续传。** `_window` 先用条子上的 `end_of_run(start)`：整扇窗都已经在盘上
+就**一个请求都不发**；部分在就从它停下的字节续。hub 不认 Range（老版本回 200 全量）时，
+把 part **清掉从头**来 —— 不能把整份文件写到某个偏移上。
+
+**（3）手机 → PC：会话是内存，字节是盘。** 宿主的 `UPLOADS` 是内存登记（30 分钟没人碰就忘），
+而 part + 条子按 `landing.sweep_parts` 的 7 天走：`session()` 在磁盘上把它找回来（`_resume`），
+所以**宿主重启也算**。页面那一半：sid 按「名字 + 长度 + 修改时间」的指纹记在 localStorage，
+回来先问 `GET /upload?sid=` 拿 `missing`，只补缺的那几段。指纹不同（换了个文件）就不认那个 part。
+
+**（4）PC → 手机：把一扇窗写完就是一次存档。** 页面拼装只能在内存里（http:// 上没有 File System
+Access，§52.3），内存跟着刷新一起没。所以每扇窗**收齐时**整窗写进 IndexedDB（整窗粒度，不是每个
+chunk：写一条 48 MiB 的 Blob 比几千条小记录便宜得多），切法（每扇窗的起止）记在 localStorage 的
+账本里。下次点同一条路径：账本上的切法一样 → 把已有的窗装回去，只问缺的；切法不一样 → 碎片丢掉
+（不同切法拼起来不是文件）。>192 MiB 那一档仍然交给浏览器自己的下载器，它的断点续传是浏览器的事。
+private 模式没有 IndexedDB → 退回今天的行为（这份内存，没了就没了）。
+
+### 62.4 协议（envelope）一个字节没动
+
+改动全在 hub 的 HTTP 路由与本地文件：新增 `GET /api/transfer/pending` 与
+`GET /api/transfer/state`（都只回答这一单的 src/dst），`/api/transfer/upload` 多了 `id` / `offset` /
+`total` 三个可选 query。§48 的裁决（不改协议）仍然成立：信封字段一个没动，房间 token 仍是那扇门；
+`pending` 只回答**发送端**（要 src 对上，不然就是替别人查盘），`state` 只回答两端。
+
+### 62.5 边界（如实记）
+
+- **收件端换了机器就没有续传**：状态在盘上（part + 条子），不跟着文件走。换一台机器接收就是从零。
+- **hub 进程重启**：暂存是「内存登记 + 盘上的文件」，登记没了 → 新的发送查不到旧暂存、从头来；
+  盘上那份旧暂存成为孤儿（历史遗留，本来就没清理）。
+- **手机 → PC 要重新选同一个文件**：浏览器不给页面跨刷新的 File 句柄，所以「续」的前提是用户
+  重新选中同一个文件（指纹一样才认）。宿主那边的 part 一直在。
+- **小文件（< 64 KiB）的暂存不认**：头摘要证明不了，重传一遍 —— 它本来就小。
+- **PC → 手机 ≤192 MiB 那一档，一扇没收完的窗会重下一整扇**：整窗记账换来的简单。
+- **`--fresh` 的对应物**：`landing.sweep_parts`（7 天）与 `Transfers.sweep_partials`（24 小时）
+  是两个 TTL；要立刻清，就删掉 `inbox/*.part*` / hub 暂存目录里的东西。
+
+### 62.6 验收
+
+- `tests/test_landing.py`（17 例，+7）：条子写下来之后第二次尝试拿到同样的区间 ·
+  另一个 transfer id 的条子不被采用 · 同一个 id 但长度不同也不采用 · **条子永远不会声称
+  part 没有的字节**（夹回真实长度）· 没有 staged transfer 的落地失败仍然什么都不留（§49 照旧）·
+  空转的 part 会被 `sweep_parts` 带走 · 半路断掉的 HTTP 交付留下 `.part` 与条子、真名仍然不出现。
+- `tests/test_hub_client.py`（8 例，+3 改写）：窗口耗尽次数后留下 part + 条子（真名仍然不出现）·
+  **下一次只问缺的**（逐窗比对条子上的 `end_of_run`）· 换了 id 不接别人的 part ·
+  断掉的一读现在**保住 `IncompleteRead` 已经交上来的字节**（`_read_body`），续传点因此往前走。
+- `tests/test_hub_app.py`（31 例，+8）：早停的上传留下 partial（且不可 fetch、第三方查不到）·
+  `pending` 按摘要认出同一份文件、认不出改过内容的同名同长 · `?id=&offset=` 续上并让整份可 fetch ·
+  **偏移不对 409 且一个字节都没写进暂存** · 客户端不重发 hub 已经整份持有的文件（把 `_post_upload`
+  换成断言）· 客户端从 `offset` 接着交（spy 到 `(offset, id)`）· 暂存没了就自动从头一次 ·
+  partial 不给 `/api/transfer`，进度条的总长仍是声明的长度。
+- `tests/test_webui_upload.py`（21 例，+2 改写/新增）：会话被扫掉之后 part **与条子**留在盘上、
+  同一个 sid 再来一次能接完 · 宿主重启（清掉内存登记）后从盘上的条子续 · 同一个 sid 换个文件仍然
+  400，且盘上那份别人的 part 不被采用。
+- `tests/test_webui_transfer.py`（真 Chromium）：`test_a_reloaded_phone_page_finishes_the_pull_it_started` ——
+  12 MiB 拉一半（第一扇窗写完，其余请求全部失败）→ **刷新页面** → 再点同一条路径 →
+  第二轮的 Range 请求里**没有一扇从头开始的窗**、覆盖的字节数正好是缺的那些、
+  浏览器存下来的文件与源逐字节相同、IndexedDB 里的碎片也清空了。
+- 门禁：`python -m ruff check fungi tests` 干净 · `PYTHONIOENCODING=utf-8 python -m pytest tests -q`
+  → **746 passed, 0 skipped**（本机装了 playwright：那 38 例浏览器用例真跑；没装的 runner 上会 skip，数字对不上不是 bug）。

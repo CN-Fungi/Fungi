@@ -267,8 +267,50 @@
         });
     }
 
+    /* An upload that was interrupted is continued, not restarted (§62) — and the
+       hard part is the *identity*: a page that re-opened has no memory of the
+       windows it already sent, and the host keys them by the session id it was
+       given. So the id is remembered per file (name + size + the file's own
+       modification stamp, which a re-picked file keeps) and asked for again
+       before a byte goes out. A host that no longer knows it answers nothing
+       useful and the file is sent from the top, which is what this always did. */
+    const SID_KEY = 'fungi.upload.sid';
+
+    function fileKey(file) {
+      return [file.name, file.size, file.lastModified || 0].join('|');
+    }
+
+    function recallSid(key) {
+      try {
+        const book = JSON.parse(localStorage.getItem(SID_KEY) || '{}');
+        return typeof book[key] === 'string' ? book[key] : '';
+      } catch (e) {
+        return '';
+      }
+    }
+
+    function rememberSid(key, sid) {
+      try {
+        const book = JSON.parse(localStorage.getItem(SID_KEY) || '{}');
+        book[key] = sid;
+        localStorage.setItem(SID_KEY, JSON.stringify(book));
+      } catch (e) { /* private mode, quota: resume just does not happen */ }
+    }
+
+    function forgetSid(key) {
+      try {
+        const book = JSON.parse(localStorage.getItem(SID_KEY) || '{}');
+        delete book[key];
+        localStorage.setItem(SID_KEY, JSON.stringify(book));
+      } catch (e) { /* as above */ }
+    }
+
     function uploadWindows(file, windows, onProgress) {
-      const sid = 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      const key = fileKey(file);
+      const remembered = recallSid(key);
+      const sid =
+        remembered || 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      rememberSid(key, sid);
       const total = file.size;
       const peak = [];  // what each window has most recently reported: the sum only grows
       const drawn = () => {
@@ -299,27 +341,46 @@
       const round = (ranges, base) =>
         Promise.all(ranges.map(([lo, hi], i) => sendWindow(base + i, lo, hi, PART_TRIES)));
 
+      /* What the host is still missing, or nothing at all when it cannot say:
+         this is the one question a returning page has to ask, because the
+         windows it sent before it was reloaded are not in its memory. */
+      const askMissing = () =>
+        http.fetchJSON('/upload?sid=' + sid)
+          .then(r => (r.ok ? r.json() : { missing: [[0, total]] }))
+          .catch(() => ({ missing: [[0, total]] }));
+
       const repair = n => {
         if (n >= PART_ROUNDS) return Promise.reject(new Error('上传未完成：还有分片没到'));
-        return http.fetchJSON('/upload?sid=' + sid)
-          .then(r => {
-            if (r.ok || r.status === 404) return r.json();
-            throw new Error('upload failed: HTTP ' + r.status);
-          })
-          .then(d => {
-            if (d.done && d.path) return d.path;
-            // A session the host no longer knows (it restarted, or swept it as
-            // stale) is not something to report: sending everything again
-            // reopens it under the same id.
-            const ranges = (d.missing || [[0, total]]).filter(g => g[1] > g[0]);
-            if (!ranges.length) throw new Error(d.error || '上传未完成');
-            return round(ranges, n * 1000).then(() => repair(n + 1));
-          });
+        return askMissing().then(d => {
+          if (d.done && d.path) return d.path;
+          // A session the host no longer knows (it restarted, or swept it as
+          // stale) is not something to report: sending everything again
+          // reopens it under the same id.
+          const ranges = (d.missing || [[0, total]]).filter(g => g[1] > g[0]);
+          if (!ranges.length) throw new Error(d.error || '上传未完成');
+          return round(ranges, n * 1000).then(() => repair(n + 1));
+        });
       };
 
-      return round(windows, 0).then(replies => {
-        const landed = replies.filter(r => r && r.done && r.path).pop();
-        return landed ? landed.path : repair(1);
+      const first = remembered
+        ? askMissing().then(d => {
+            if (d.done && d.path) return d.path;
+            const ranges = (d.missing || []).filter(g => g[1] > g[0]);
+            if (!ranges.length) return null;  // nothing was sent: repair() decides
+            return round(ranges, 0).then(replies =>
+              (replies.filter(r => r && r.done && r.path).pop() || null)
+            );
+          })
+        : round(windows, 0).then(replies =>
+            (replies.filter(r => r && r.done && r.path).pop() || null)
+          );
+
+      return first.then(landed => {
+        if (landed) {
+          forgetSid(key);  // it landed: the next upload of this file is a new one
+          return landed.path;  // what every caller has always been given
+        }
+        return repair(1);
       });
     }
 
@@ -374,8 +435,95 @@
       a.remove();
     }
 
+    /* A reload throws the page's memory away, and the pieces of a pull live in it —
+       so each window's bytes are written down as a whole when that window has them
+       all (§62). A phone that comes back to the same file then re-asks only for the
+       windows it never finished; the one that was in flight when the page went away
+       is fetched again, which is a window and not a file. Two things make it safe:
+       the *cut* is written down with the pieces (a pull cut differently is not this
+       file, and mixing the two would assemble nonsense), and IndexedDB is optional —
+       a private window has none, and then this is exactly what it always was. */
+    const PULL_DB = 'fungi-pull';
+    const PULL_STORE = 'windows';
+    const PULL_LEDGER = 'fungi.pull';
+    const PULL_TTL_MS = 24 * 3600 * 1000;
+
+    function pullKey(path, meta) {
+      return [path, meta.size, meta.name].join('|');
+    }
+
+    function pullBook() {
+      try {
+        return JSON.parse(localStorage.getItem(PULL_LEDGER) || '{}');
+      } catch (e) {
+        return {};
+      }
+    }
+
+    function pullWrite(key, windows) {
+      try {
+        const book = pullBook();
+        book[key] = { windows, ts: Date.now() };
+        localStorage.setItem(PULL_LEDGER, JSON.stringify(book));
+      } catch (e) { /* private mode: the resume just does not happen */ }
+    }
+
+    function pullDrop(key) {
+      try {
+        const book = pullBook();
+        delete book[key];
+        localStorage.setItem(PULL_LEDGER, JSON.stringify(book));
+      } catch (e) { /* as above */ }
+    }
+
+    function openPullDb() {
+      return new Promise((resolve, reject) => {
+        if (!window.indexedDB) {
+          reject(new Error('no indexeddb'));
+          return;
+        }
+        const open = indexedDB.open(PULL_DB, 1);
+        open.onupgradeneeded = () => open.result.createObjectStore(PULL_STORE);
+        open.onsuccess = () => resolve(open.result);
+        open.onerror = () => reject(open.error);
+      });
+    }
+
+    function idbResult(request) {
+      return new Promise((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    function pullRange(key) {
+      return IDBKeyRange.bound(key + '#', key + '#\uffff');
+    }
+
+    /* Pieces nobody came back for in a day: deleting the ledger entry is what makes
+       them unreachable, so the records go with it (best effort — a browser that
+       refuses leaves them, and the next sweep tries again). */
+    function pullSweep() {
+      const book = pullBook();
+      const dead = Object.keys(book).filter(key => Date.now() - (book[key].ts || 0) > PULL_TTL_MS);
+      if (!dead.length) return;
+      dead.forEach(key => delete book[key]);
+      try {
+        localStorage.setItem(PULL_LEDGER, JSON.stringify(book));
+      } catch (e) {
+        return;
+      }
+      openPullDb()
+        .then(db => {
+          const store = db.transaction(PULL_STORE, 'readwrite').objectStore(PULL_STORE);
+          dead.forEach(key => store.delete(pullRange(key)));
+        })
+        .catch(() => {});
+    }
+
     function pullWindows(path, meta, windows, onProgress) {
       const total = meta.size;
+      const key = pullKey(path, meta);
       const got = new Array(windows.length).fill(0);
       const pieces = windows.map(() => []);
       const drawn = () => {
@@ -384,8 +532,41 @@
         for (const n of got) done += n;
         onProgress(Math.min(done, total), total);
       };
-      const pull = (index, lo, hi, tries) =>
-        new Promise((resolve, reject) => {
+      let db = null;
+
+      /* Write one finished window down — the unit a returning page can skip. */
+      const keepWindow = index => {
+        if (!db) return;
+        const body = new Blob(pieces[index], { type: 'application/octet-stream' });
+        idbResult(db.transaction(PULL_STORE, 'readwrite').objectStore(PULL_STORE).put(body, key + '#' + index))
+          .catch(() => {});
+      };
+
+      /* What this file already has here, if anything: only the same cut counts. */
+      const restore = () => {
+        if (!db) return Promise.resolve();
+        const known = pullBook()[key];
+        const store = db.transaction(PULL_STORE, 'readwrite').objectStore(PULL_STORE);
+        if (!known || JSON.stringify(known.windows) !== JSON.stringify(windows)) {
+          store.delete(pullRange(key));
+          return Promise.resolve();
+        }
+        const read = db.transaction(PULL_STORE).objectStore(PULL_STORE);
+        return Promise.all([idbResult(read.getAllKeys(pullRange(key))), idbResult(read.getAll(pullRange(key)))])
+          .then(([keys, blobs]) => {
+            keys.forEach((stored, at) => {
+              const index = Number(String(stored).split('#')[1]);
+              if (!blobs[at] || !Number.isInteger(index) || index < 0 || index >= windows.length) return;
+              pieces[index] = [blobs[at]];
+              got[index] = blobs[at].size;
+            });
+            drawn();
+          });
+      };
+
+      const pull = (index, lo, hi, tries) => {
+        if (lo + got[index] >= hi) return Promise.resolve();  // a window the reload already finished
+        return new Promise((resolve, reject) => {
           const from = lo + got[index];
           fetch(url('/download?path=' + encodeURIComponent(path)), {
             headers: { Range: 'bytes=' + from + '-' + (hi - 1) },
@@ -407,7 +588,10 @@
               return pump();
             })
             .then(() => {
-              if (lo + got[index] >= hi) return;
+              if (lo + got[index] >= hi) {
+                keepWindow(index);  // a whole window, written down for a page that comes back
+                return;
+              }
               throw new Error('中断在 ' + (lo + got[index]) + ' 字节');
             })
             .catch(err => {
@@ -420,20 +604,34 @@
             })
             .then(resolve, reject);
         });
+      };
 
-      return Promise.all(windows.map(([lo, hi], i) => pull(i, lo, hi, PULL_TRIES))).then(() => {
-        const reached = got.reduce((a, b) => a + b, 0);
-        if (reached !== total) {
-          // Never hand over a file that is not whole: this is the §49 rule at
-          // the last hop, and the only check the phone itself can make.
-          throw new Error('只收到 ' + reached + ' / ' + total + ' 字节');
-        }
-        saveBlob(new Blob(pieces.flat(), { type: 'application/octet-stream' }), meta.name);
-        return meta.name;
-      });
+      return openPullDb()
+        .catch(() => null)
+        .then(handle => {
+          db = handle;
+          if (db) pullWrite(key, windows);  // the cut is what a returning page has to match
+          return restore();
+        })
+        .then(() => Promise.all(windows.map(([lo, hi], i) => pull(i, lo, hi, PULL_TRIES))))
+        .then(() => {
+          const reached = got.reduce((a, b) => a + b, 0);
+          if (reached !== total) {
+            // Never hand over a file that is not whole: this is the §49 rule at
+            // the last hop, and the only check the phone itself can make.
+            throw new Error('只收到 ' + reached + ' / ' + total + ' 字节');
+          }
+          saveBlob(new Blob(pieces.flat(), { type: 'application/octet-stream' }), meta.name);
+          // Delivered: the pieces are not worth disk any more, and the ledger
+          // entry would make the next pull of this file skip windows it has.
+          pullDrop(key);
+          if (db) idbResult(db.transaction(PULL_STORE, 'readwrite').objectStore(PULL_STORE).delete(pullRange(key))).catch(() => {});
+          return meta.name;
+        });
     }
 
     function download(path, onProgress) {
+      pullSweep();
       return http.fetchJSON('/download?meta=1&path=' + encodeURIComponent(path))
         .then(r => r.json())
         .then(meta => {

@@ -4,6 +4,7 @@ import json
 import socket
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from conftest import Client
@@ -473,3 +474,269 @@ def test_a_real_delivery_over_several_windows_lands_whole(room, tmp_path):
     assert [p.name for p in land.iterdir()] == ["big.bin"], "a part file was left"
     out = receiver.transfer_progress(tid)
     assert out["sent"] == out["total"] == len(payload)
+
+
+# ── an upload that stops early is continued, not restarted (§62) ──
+
+
+def _upload_raw(base: str, params: dict, body: bytes, token: str = "room-token") -> tuple[int, dict]:
+    """One upload body, with whatever resume parameters the caller wants.
+
+    `total` (the whole file's length) is a query parameter rather than the
+    Content-Length, which is what lets a test hand over a *tail* — the shape a
+    sender has when its connection died mid-file.
+    """
+    q = urllib.parse.urlencode({"token": token, **params})
+    req = urllib.request.Request(
+        f"{base}/api/transfer/upload?{q}",
+        data=body,
+        headers={"Content-Type": "application/octet-stream"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read())
+
+
+def _pending(base: str, name: str, size: int, head: str, to: str = "beta") -> dict:
+    q = urllib.parse.urlencode(
+        {"token": "room-token", "host": "alpha", "to": to, "name": name, "size": size, "head": head}
+    )
+    with urllib.request.urlopen(f"{base}/api/transfer/pending?{q}", timeout=10) as resp:
+        return json.loads(resp.read())
+
+
+def _head_of(payload: bytes) -> str:
+    """What the sender sends: the digest of the first 64 KiB (the whole file when
+    it is shorter) — the only thing that can say two same-named, same-sized files
+    are the same file, since nothing on the wire carries a checksum."""
+    import hashlib
+
+    return hashlib.sha256(payload[: 64 * 1024]).hexdigest()
+
+
+def test_an_upload_that_stops_early_keeps_a_partial_staging(room, tmp_path):
+    """The sender's connection died 60% in. What arrived stays where it is and
+    nothing partial is offered to the receiver — an announcement here is how a
+    half file gets delivered."""
+    hub, clients = room
+    base = f"http://127.0.0.1:{hub.port}"
+    for name in ("alpha", "beta"):
+        clients[name].post("/api/join", {"name": name, "token": "room-token"})
+    payload = bytes(range(256)) * (400 * 1024 // 256)  # 400 KiB
+    cut = 240 * 1024
+
+    code, out = _upload_raw(
+        base, {"host": "alpha", "to": "beta", "name": "big.bin", "total": len(payload)},
+        payload[:cut],
+    )
+
+    assert code == 400 and out["partial"] is True, out
+    assert out["received"] == cut and out["total"] == len(payload)
+    rec = hub.transfers.state(out["id"], "alpha")
+    assert rec is not None and rec["partial"] is True and rec["size"] == cut
+    staged = hub.transfers.root / f"{out['id']}__big.bin"
+    assert staged.stat().st_size == cut and staged.read_bytes() == payload[:cut]
+    # the receiver cannot fetch it, and a third host cannot even ask about it
+    assert hub.transfers.fetchable(out["id"], "beta") is None
+    assert hub.transfers.state(out["id"], "srv") is None
+
+
+def test_the_sender_is_told_what_is_already_staged(room, tmp_path):
+    """The question a sender asks before sending a byte: is this file already
+    here? Name, length and the head digest are what make the answer trustworthy —
+    a different file of the same size must not match."""
+    hub, clients = room
+    base = f"http://127.0.0.1:{hub.port}"
+    for name in ("alpha", "beta"):
+        clients[name].post("/api/join", {"name": name, "token": "room-token"})
+    payload = bytes(range(256)) * (400 * 1024 // 256)
+    cut = 240 * 1024
+    _code, part = _upload_raw(
+        base, {"host": "alpha", "to": "beta", "name": "big.bin", "total": len(payload)},
+        payload[:cut],
+    )
+
+    found = _pending(base, "big.bin", len(payload), _head_of(payload))
+    assert found == {"ok": True, "id": part["id"], "received": cut, "partial": True,
+                     "name": "big.bin"}
+
+    # same name and length, different file
+    other = bytes(reversed(payload))
+    assert _pending(base, "big.bin", len(payload), _head_of(other))["ok"] is False
+    # not what this hub holds at all
+    assert _pending(base, "elsewhere.bin", len(payload), _head_of(payload))["ok"] is False
+    # and a receiver that is not a known host gets a refusal, not a lookup
+    assert _pending(base, "big.bin", len(payload), _head_of(payload), to="ghost")["ok"] is False
+
+
+def test_a_resume_hands_over_the_rest_and_the_file_is_fetchable(room, tmp_path):
+    """The whole leg: half the bytes arrived, the sender comes back with the
+    other half, and the receiver gets one whole file."""
+    hub, clients = room
+    base = f"http://127.0.0.1:{hub.port}"
+    for name in ("alpha", "beta"):
+        clients[name].post("/api/join", {"name": name, "token": "room-token"})
+    payload = bytes(range(256)) * (400 * 1024 // 256)
+    cut = 240 * 1024
+    _code, part = _upload_raw(
+        base, {"host": "alpha", "to": "beta", "name": "big.bin", "total": len(payload)},
+        payload[:cut],
+    )
+
+    code, out = _upload_raw(
+        base,
+        {"host": "alpha", "to": "beta", "name": "big.bin", "total": len(payload),
+         "id": part["id"], "offset": cut},
+        payload[cut:],
+    )
+
+    assert code == 200 and out["ok"] is True, out
+    assert out["id"] == part["id"], "the resume minted a second staging"
+    assert out["size"] == len(payload) and out["partial"] is False
+    assert _pending(base, "big.bin", len(payload), _head_of(payload))["partial"] is False
+
+    dest = tmp_path / "landed.bin"
+    clients["beta"].download_transfer(out["id"], dest)
+    assert dest.read_bytes() == payload
+
+
+def test_a_resume_at_the_wrong_offset_is_refused_and_touches_nothing(room, tmp_path):
+    """A body that starts somewhere other than where the staging ends cannot be
+    appended to it — the tail would land in the middle of the file. Refuse, and
+    leave what is there alone so the next attempt can still continue it."""
+    hub, clients = room
+    base = f"http://127.0.0.1:{hub.port}"
+    for name in ("alpha", "beta"):
+        clients[name].post("/api/join", {"name": name, "token": "room-token"})
+    payload = bytes(range(256)) * (400 * 1024 // 256)
+    cut = 240 * 1024
+    _code, part = _upload_raw(
+        base, {"host": "alpha", "to": "beta", "name": "big.bin", "total": len(payload)},
+        payload[:cut],
+    )
+    staged = hub.transfers.root / f"{part['id']}__big.bin"
+
+    code, out = _upload_raw(
+        base,
+        {"host": "alpha", "to": "beta", "name": "big.bin", "total": len(payload),
+         "id": part["id"], "offset": 100 * 1024},
+        payload[100 * 1024 :],
+    )
+
+    assert code == 409 and out.get("restart") is True, out
+    assert staged.read_bytes() == payload[:cut], "a refused resume wrote into the staging"
+
+
+def test_the_sender_does_not_send_a_file_the_hub_already_holds(room, tmp_path, monkeypatch):
+    """A re-send of the same file is a *delivery* again, not a second upload: the
+    hub still has the staging, and the receiver may simply not have taken it yet."""
+    from fungi.hub.client import HubClient
+
+    hub, clients = room
+    for name in ("alpha", "beta"):
+        clients[name].post("/api/join", {"name": name, "token": "room-token"})
+    src = tmp_path / "report.bin"
+    src.write_bytes(bytes(range(256)) * (400 * 1024 // 256))
+    sender = HubClient(f"http://127.0.0.1:{hub.port}", "room-token", "alpha")
+
+    first = sender.upload_transfer(str(src), "report.bin", "beta")
+    assert first["ok"] is True and first["size"] == src.stat().st_size
+
+    def _never(*_args, **_kw):
+        raise AssertionError("the file was uploaded a second time")
+
+    monkeypatch.setattr(sender, "_post_upload", _never)
+    again = sender.upload_transfer(str(src), "report.bin", "beta")
+
+    assert again == {"ok": True, "id": first["id"], "name": "report.bin",
+                     "size": src.stat().st_size, "staged": True}
+
+
+def test_the_sender_finishes_a_staging_an_earlier_attempt_left(room, tmp_path, monkeypatch):
+    """The other half of the same question: the hub holds *part* of the file, so
+    the sender hands over the rest and nothing more."""
+    from fungi.hub.client import HubClient
+
+    hub, clients = room
+    base = f"http://127.0.0.1:{hub.port}"
+    for name in ("alpha", "beta"):
+        clients[name].post("/api/join", {"name": name, "token": "room-token"})
+    payload = bytes(range(256)) * (400 * 1024 // 256)
+    cut = 240 * 1024
+    src = tmp_path / "report.bin"
+    src.write_bytes(payload)
+    _code, part = _upload_raw(
+        base, {"host": "alpha", "to": "beta", "name": "report.bin", "total": len(payload)},
+        payload[:cut],
+    )
+    sender = HubClient(base, "room-token", "alpha")
+    asked: list[tuple] = []
+    real = sender._post_upload
+
+    def _spy(*args, **kw):
+        asked.append((args[4], args[5]))  # (offset, resume id)
+        return real(*args, **kw)
+
+    monkeypatch.setattr(sender, "_post_upload", _spy)
+    out = sender.upload_transfer(str(src), "report.bin", "beta")
+
+    assert out["ok"] is True and out["id"] == part["id"]
+    assert asked == [(cut, part["id"])], asked
+    assert (hub.transfers.root / f"{part['id']}__report.bin").read_bytes() == payload
+
+
+def test_the_sender_starts_over_when_the_staging_moved_on(room, tmp_path, monkeypatch):
+    """Between asking and sending, the staging can be gone (swept, or another
+    attempt finished it). The tail it was about to send cannot be attached to
+    anything — so it is sent from the top instead, once."""
+    from fungi.hub.client import HubClient
+
+    _hub, clients = room
+    for name in ("alpha", "beta"):
+        clients[name].post("/api/join", {"name": name, "token": "room-token"})
+    src = tmp_path / "report.bin"
+    src.write_bytes(b"x" * (400 * 1024))
+    sender = HubClient(f"http://127.0.0.1:{_hub.port}", "room-token", "alpha")
+
+    monkeypatch.setattr(
+        sender,
+        "_staged_already",
+        lambda *_a, **_k: {"id": "gone-already", "received": 100, "partial": True},
+    )
+    asked: list[tuple] = []
+    real = sender._post_upload
+    monkeypatch.setattr(
+        sender,
+        "_post_upload",
+        lambda *args, **kw: (asked.append((args[4], args[5])), real(*args, **kw))[1],
+    )
+
+    out = sender.upload_transfer(str(src), "report.bin", "beta")
+
+    assert out["ok"] is True and out["size"] == src.stat().st_size
+    assert asked == [(100, "gone-already"), (0, "")], asked
+
+
+def test_no_completed_transfer_is_reported_for_a_partial_staging(room):
+    """`/api/transfer` is the only route that hands bytes over, and it must not
+    serve a staging the sender is still filling up — not even to its receiver."""
+    hub, clients = room
+    base = f"http://127.0.0.1:{hub.port}"
+    for name in ("alpha", "beta"):
+        clients[name].post("/api/join", {"name": name, "token": "room-token"})
+    payload = b"y" * (400 * 1024)
+    _code, part = _upload_raw(
+        base, {"host": "alpha", "to": "beta", "name": "big.bin", "total": len(payload)},
+        payload[:200 * 1024],
+    )
+
+    status, _headers, body = _fetch(
+        f"{base}/api/transfer?id={part['id']}&host=beta&token=room-token"
+    )
+    assert status == 404, body
+    # the progress route still answers its two ends, and reports the whole length
+    code, progress = clients["alpha"].transfer_progress(part["id"])
+    assert (code, progress["sent"], progress["total"]) == (200, 0, len(payload))

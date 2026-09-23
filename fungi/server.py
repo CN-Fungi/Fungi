@@ -274,48 +274,76 @@ class UploadParts:
     disk, not the receiver's).
 
     Sessions are cheap and rare (one per upload in flight); a page that goes away
-    mid-upload leaves one behind, and `sweep()` takes it — and its part file —
-    after UPLOAD_TTL_S.
+    mid-upload leaves one behind, and `sweep()` takes it. What it *does not* take
+    is the part: a session is memory and forgets after `UPLOAD_TTL_S`, while the
+    bytes are on disk and a page that comes back (a reload, a dead battery, the
+    same file picked tomorrow) continues exactly where it stopped (§62) — the
+    note beside the part is what it is rebuilt from, so a host that was restarted
+    in between still answers.
     """
 
     def __init__(self) -> None:
         self._sessions: dict[str, dict] = {}
         self._guard = threading.Lock()
 
-    def sweep(self) -> None:
-        """Forget the sessions nobody came back for, and their parts with them."""
+    def sweep(self, inbox: Path) -> None:
+        """Forget the sessions nobody came back for, and drop the parts nobody will.
+
+        The two clocks are different on purpose: a session is a dict entry and
+        forgets in half an hour, while its part file is somebody's upload and is
+        kept on the same week-long clock as a delivery's (§62). Dropping both
+        together would have made "resume" last exactly as long as a phone's page
+        stayed open.
+        """
         cutoff = time.time() - UPLOAD_TTL_S
         with self._guard:
-            stale = [(sid, s) for sid, s in self._sessions.items() if s["ts"] < cutoff]
-            for sid, _session in stale:
-                self._sessions.pop(sid, None)
-        for _sid, up in stale:
-            with contextlib.suppress(OSError):
-                up["part"].unlink()
+            stale = [sid for sid, s in self._sessions.items() if s["ts"] < cutoff]
+            forgotten = [self._sessions.pop(sid) for sid in stale]
+        for up in forgotten:
+            self.note(up, force=True)  # what arrived outlives the session that carried it
+        landing.sweep_parts(inbox)
 
     def session(self, sid: str, name: str, total: int, inbox: Path) -> dict:
         """The upload `sid` names, created by whichever window arrives first.
 
         Every window carries the same name and size, so any of them can be the
         one that starts the session; the lock is what keeps two concurrent
-        firsts from making two part files.
+        firsts from making two part files. A `sid` this host has forgotten is
+        looked for on disk first (§62): the part and its note are what a page
+        that re-opened continues from, and they are honoured only when the note
+        describes this same upload — the same sid, the same name, the same size.
         """
+        clean = safe_name(name)
         with self._guard:
             found = self._sessions.get(sid)
             if found is None:
-                part = inbox / f"{safe_name(name)}.{sid}{landing.PART_SUFFIX}"
-                part.parent.mkdir(parents=True, exist_ok=True)
-                part.touch()
-                found = {
-                    "name": safe_name(name),
-                    "total": int(total),
-                    "part": part,
-                    "spans": landing.Spans(),
-                    "ts": time.time(),
-                }
+                found = self._resume(sid, clean, total, inbox)
                 self._sessions[sid] = found
             found["ts"] = time.time()
             return found
+
+    def _resume(self, sid: str, name: str, total: int, inbox: Path) -> dict:
+        """Rebuild the session a page is coming back to, or start a fresh one."""
+        part = inbox / f"{name}.{sid}{landing.PART_SUFFIX}"
+        record = landing.PartRecord.read(part)
+        spans = landing.Spans()
+        if record is not None and record.matches(sid, total) and record.part == part.name:
+            size = part.stat().st_size if part.exists() else 0
+            spans.adopt([(first, min(last, size)) for first, last in record.spans if first < size])
+            if spans.bytes:
+                runlog.note("continuing the phone upload of %s from %d bytes", name, spans.bytes)
+                return {"sid": sid, "name": name, "total": int(total), "part": part,
+                        "spans": spans, "ts": time.time()}
+        # Not this upload's part: the bytes of whatever used to be here are not
+        # something this session may continue, so they go (§62, the same rule a
+        # delivery's note follows).
+        with contextlib.suppress(OSError):
+            part.unlink()
+        landing.PartRecord.clear(part)
+        part.parent.mkdir(parents=True, exist_ok=True)
+        part.touch()
+        return {"sid": sid, "name": name, "total": int(total), "part": part, "spans": spans,
+                "ts": time.time()}
 
     def get(self, sid: str) -> dict | None:
         with self._guard:
@@ -331,6 +359,29 @@ class UploadParts:
         if up is not None:
             with contextlib.suppress(OSError):
                 up["part"].unlink()
+            landing.PartRecord.clear(up["part"])
+
+    def note(self, up: dict, force: bool = False) -> None:
+        """Write down what has really landed, so a returning page can continue (§62).
+
+        Throttled like a delivery's note: one write per window would cost more
+        than the bytes it describes, and the worst a missed write costs is
+        re-sending a window the host already had.
+        """
+        now = time.monotonic()
+        if not force and now - float(up.get("saved") or 0) < landing.PERSIST_INTERVAL_S:
+            return
+        up["saved"] = now
+        spans = up["spans"]
+        if not spans.bytes:
+            return
+        with contextlib.suppress(OSError):
+            landing.PartRecord(
+                transfer=str(up.get("sid") or ""),
+                size=int(up["total"]),
+                part=up["part"].name,
+                spans=spans.ranges(),
+            ).write(up["part"])
 
     def missing(self, up: dict) -> list[tuple[int, int]]:
         return up["spans"].gaps(0, int(up["total"]))
@@ -1325,7 +1376,7 @@ class YesSirHandler(BaseHTTPRequestHandler):
             # one that covers everything, and the id is ours to mint.
             sid = secrets.token_hex(4)
             offset, total = 0, length
-        UPLOADS.sweep()
+        UPLOADS.sweep(_inbox_dir())
         up = UPLOADS.session(sid, name, total, _inbox_dir())
         if up["total"] != total or up["name"] != safe_name(name):
             self._send_json({"error": "this upload session belongs to another file"}, status=400)
@@ -1390,7 +1441,7 @@ class YesSirHandler(BaseHTTPRequestHandler):
         if not sid:
             self._send_json({"ok": True, "parts": True, "min_part": UPLOAD_PART_MIN})
             return
-        UPLOADS.sweep()
+        UPLOADS.sweep(_inbox_dir())
         up = UPLOADS.get(sid)
         if up is None:
             self._send_json({"error": "unknown upload session"}, status=404)
@@ -1420,6 +1471,7 @@ class YesSirHandler(BaseHTTPRequestHandler):
                 left -= len(chunk)
         if at > offset:
             up["spans"].add(offset, at)
+            UPLOADS.note(up)
         return at - offset
 
     def _handle_download(self, url) -> None:

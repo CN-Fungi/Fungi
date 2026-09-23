@@ -19,7 +19,7 @@ from ..events import Sink
 from ..hub.app import fs_via_hub
 from ..hub.client import HubClient
 from ..hub.relay import Relay
-from ..landing import atomic_landing
+from ..landing import atomic_landing, head_digest
 from ..pending import PendingAsks
 from ..protocol import Envelope, parse_addr
 from ..trilayer import TriLayer
@@ -107,6 +107,11 @@ class LocalTransport:
         `progress(sent, total)` mirrors the remote client's: the send-file modal
         shows the same bar whether the bytes leave this process over HTTP or
         land on the hub in-process.
+
+        Nothing leaves this process without a network — but the *reason* to ask
+        the hub first is the same one (§62): a file it already holds whole is not
+        copied again, and a staging an earlier attempt left half done is finished
+        from where it stopped rather than from the top.
         """
         if self.hub is None:
             return {"error": "no hub attached"}
@@ -114,7 +119,20 @@ class LocalTransport:
         if not src.is_file():
             return {"error": f"no such file: {path}"}
         total = src.stat().st_size
-        sent = 0
+        head = head_digest(src) if total else ""
+        known = self.hub.pending_transfer(self.host, to_host, name, total, head)
+        if known.get("ok") and not known.get("partial"):
+            runlog.note("hub already holds %s whole — not copying it again", name)
+            return {
+                "ok": True,
+                "id": known.get("id"),
+                "name": known.get("name") or name,
+                "size": total,
+                "staged": True,
+            }
+        offset = int(known.get("received") or 0) if known.get("ok") else 0
+        resume = str(known.get("id") or "") if known.get("ok") else ""
+        sent = offset
 
         def read(size: int) -> bytes:
             nonlocal sent
@@ -126,7 +144,12 @@ class LocalTransport:
 
         try:
             with src.open("rb") as src_fh:
-                return self.hub.upload_transfer(self.host, to_host, name, read)
+                src_fh.seek(offset)
+                if progress is not None and offset:
+                    progress(offset, total)
+                return self.hub.upload_transfer(
+                    self.host, to_host, name, read, expect=total, resume=resume
+                )
         except OSError as exc:
             # Unreadable source, or a staging disk that filled up. A refusal,
             # not an exception: this runs inside the WebUI's request thread, and
@@ -146,7 +169,9 @@ class LocalTransport:
         # staged file is a local copy — the same "no half file under the real
         # name" guarantee has to hold (§49).
         with (
-            atomic_landing(dest, int(rec["size"]), tag=str(transfer_id)[:8]) as out,
+            atomic_landing(
+                dest, int(rec["size"]), tag=str(transfer_id)[:8], transfer=str(transfer_id)
+            ) as out,
             path.open("rb") as src,
         ):
             shutil.copyfileobj(src, out)

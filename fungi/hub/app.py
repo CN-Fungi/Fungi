@@ -8,12 +8,13 @@ traffic for the WebUI read-only conversation view.
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 from .. import runlog
-from ..landing import Spans
+from ..landing import HEAD_BYTES, Spans, head_digest
 from ..protocol import (
     BAD_NAME_MSG,
     Envelope,
@@ -43,6 +44,9 @@ REAP_INTERVAL = 5.0
 # a window is cut into (§50).
 DOWNLOAD_CHUNK = 256 * 1024
 PROGRESS_STEP = 1024 * 1024
+# How long a staging nobody finished is worth disk (§62). How much of a file
+# proves it is the same file lives in landing — one definition, imported above.
+PARTIAL_TTL_S = 24 * 3600.0
 
 
 class RangeNotSatisfiableError(Exception):
@@ -131,12 +135,23 @@ def safe_name(name: str) -> str:
     return Path(str(name or "file").replace("\\", "/")).name or "file"
 
 
+def _query_int(params: dict, key: str) -> int | None:
+    """A non-negative integer out of a query string, or None when it is not one."""
+    raw = (params.get(key) or [""])[0].strip()
+    return int(raw) if raw.isdigit() else None
+
+
 class Transfers:
     """In-memory registry of staged file transfers (metadata only on the wire).
 
     No size cap (spec §48): a staged file is streamed to disk in 256 KiB
     chunks, so the only limit is free space — and it fails as an OSError the
     callers report, never as a dropped connection.
+
+    A staging that is not whole yet is kept as a *partial* one (§62): the bytes
+    that did arrive stay on disk with the length they were promised, so a sender
+    that comes back hands over the rest instead of the whole file again. Nothing
+    partial is ever fetchable — the deliverable is only the finished file.
     """
 
     def __init__(self, root: Path):
@@ -148,15 +163,42 @@ class Transfers:
         self._spans: dict[str, Spans] = {}
         self._guard = threading.Lock()
 
-    def stage_from(self, name: str, src_host: str, dst_host: str, read) -> dict:
-        """Stage streamed bytes (read(n) -> b"" ends input) into the transfers dir."""
+    def path_of(self, rec: dict) -> Path:
+        """Where a staged transfer's bytes live."""
+        return self.root / f"{rec['id']}__{rec['name']}"
 
-        tid = new_id()
-        self.root.mkdir(parents=True, exist_ok=True)
-        dest = self.root / f"{tid}__{safe_name(name)}"
-        size = 0
+    def stage_from(
+        self,
+        name: str,
+        src_host: str,
+        dst_host: str,
+        read,
+        expect: int | None = None,
+        resume: str = "",
+    ) -> dict:
+        """Stage streamed bytes (read(n) -> b"" ends input) into the transfers dir.
+
+        `expect` is the length the sender promised (`Content-Length` upstream): a
+        body that ends before it is a partial staging, not a failure to clean up
+        (§62). `resume` names a partial staging to append to — the sender asked
+        for the rest of a file it had already started, and the offset it claims is
+        checked by the caller before this runs.
+        """
+        clean = safe_name(name)
+        with self._guard:
+            found = self._records.get(str(resume)) if resume else None
+        if found is not None and not self._resumable(found, clean, src_host, dst_host):
+            found = None
+        if found is not None:
+            tid, target = found["id"], self.path_of(found)
+            size = int(found["size"])
+        else:
+            self.root.mkdir(parents=True, exist_ok=True)
+            tid = new_id()
+            target = self.root / f"{tid}__{clean}"
+            size = 0
         try:
-            with dest.open("wb") as out:
+            with target.open("ab" if found is not None else "wb") as out:
                 while True:
                     chunk = read(256 * 1024)
                     if not chunk:
@@ -164,19 +206,95 @@ class Transfers:
                     size += len(chunk)
                     out.write(chunk)
         except BaseException:
-            dest.unlink(missing_ok=True)
+            # What did arrive is kept: resuming is the point (§62). Only a fresh
+            # staging that never got a byte is dropped, so a refused upload
+            # leaves nothing behind.
+            if found is None and not target.stat().st_size:
+                target.unlink(missing_ok=True)
             raise
+        total = int(expect) if expect else size
         rec = {
             "id": tid,
-            "name": safe_name(name),
+            "name": clean,
             "size": size,
+            "expect": total,
+            "partial": size != total,
             "src": src_host,
             "dst": dst_host,
+            "ts": time.time(),
         }
         with self._guard:
             self._records[tid] = rec
-            self._spans[tid] = Spans()
+            self._spans.setdefault(tid, Spans())
         return rec
+
+    @staticmethod
+    def _resumable(rec: dict, name: str, src_host: str, dst_host: str) -> bool:
+        """Is this staging the one the sender is asking to continue?"""
+        return (
+            bool(rec.get("partial"))
+            and rec.get("name") == name
+            and rec.get("src") == src_host
+            and rec.get("dst") == dst_host
+        )
+
+    def pending(
+        self, name: str, src_host: str, dst_host: str, size: int, head: str
+    ) -> dict | None:
+        """The staging this same file is already on its way into, if there is one (§62).
+
+        Two things are being asked here, and they are the same question: *has this
+        file already been staged, and is it still there?* — a partial one so the
+        sender can finish it, a whole one so the sender does not send it again at
+        all (the receiver may simply not have taken it yet).
+
+        Identity is (name, source, destination, length) plus the digest of the
+        first 64 KiB: the file's name and length alone would let a file that
+        changed size-neutrally continue somebody else's bytes, and there is no
+        protocol-level checksum to appeal to (§49.4). A staging too short to carry
+        that much is never adopted — its head cannot prove anything.
+        """
+        clean = safe_name(name)
+        wanted = int(size)
+        with self._guard:
+            candidates = [
+                rec
+                for rec in self._records.values()
+                if rec.get("name") == clean
+                and rec.get("src") == src_host
+                and rec.get("dst") == dst_host
+                and int(rec.get("expect") or rec.get("size") or 0) == wanted
+            ]
+        for rec in sorted(candidates, key=lambda item: str(item.get("id"))):
+            target = self.path_of(rec)
+            if not target.is_file() or int(rec.get("size") or 0) < min(wanted, HEAD_BYTES):
+                continue
+            if head and head_digest(target) == head:
+                return dict(rec)
+        return None
+
+    def state(self, transfer_id: str, host: str) -> dict | None:
+        """What the hub still holds of this transfer, for either of its two ends."""
+        with self._guard:
+            rec = self._records.get(str(transfer_id))
+        if rec is None or host not in (rec.get("src"), rec.get("dst")):
+            return None
+        return dict(rec)
+
+    def sweep_partials(self, ttl: float = PARTIAL_TTL_S) -> None:
+        """Drop partial stagings nobody came back for, and their bytes with them."""
+        cutoff = time.time() - ttl
+        with self._guard:
+            stale = [
+                rec
+                for rec in self._records.values()
+                if rec.get("partial") and float(rec.get("ts") or 0) < cutoff
+            ]
+            for rec in stale:
+                self._records.pop(rec["id"], None)
+                self._spans.pop(rec["id"], None)
+        for rec in stale:
+            self.path_of(rec).unlink(missing_ok=True)
 
     def stage(self, source: Path, name: str, src_host: str, dst_host: str) -> dict:
         """Copy a store file into the transfers dir; returns its record."""
@@ -189,7 +307,7 @@ class Transfers:
             rec = self._records.pop(str(transfer_id), None)
             self._spans.pop(str(transfer_id), None)
         if rec is not None:
-            (self.root / f"{rec['id']}__{rec['name']}").unlink(missing_ok=True)
+            self.path_of(rec).unlink(missing_ok=True)
 
     def discard_for(self, transfer_id: str, host: str) -> bool:
         """Receiver-authorized discard: only the designated dst host may drop
@@ -200,16 +318,20 @@ class Transfers:
                 return False
             del self._records[str(transfer_id)]
             self._spans.pop(str(transfer_id), None)
-        (self.root / f"{rec['id']}__{rec['name']}").unlink(missing_ok=True)
+        self.path_of(rec).unlink(missing_ok=True)
         return True
 
     def fetchable(self, transfer_id: str, host: str) -> tuple[dict, Path] | None:
-        """Record + file path, only for the designated receiver host."""
+        """Record + file path, only for the designated receiver host.
+
+        A partial staging is not one of these: the sender has not finished putting
+        the file there, so there is nothing to fetch yet (§62).
+        """
         with self._guard:
             rec = self._records.get(str(transfer_id))
-        if rec is None or rec["dst"] != host:
+        if rec is None or rec["dst"] != host or rec.get("partial"):
             return None
-        path = self.root / f"{rec['id']}__{rec['name']}"
+        path = self.path_of(rec)
         if not path.is_file():
             return None
         return rec, path
@@ -239,7 +361,9 @@ class Transfers:
             if rec is None or host not in (rec.get("src"), rec.get("dst")):
                 return None
             spans = self._spans.get(str(transfer_id))
-            total = int(rec["size"])
+            # The length the sender promised, not what has arrived: a staging that
+            # is still filling up must not make the bar's total move (§62).
+            total = int(rec.get("expect") or rec["size"])
         sent = spans.bytes if spans is not None else 0
         # A window may report its whole range and then fail; never claim more
         # than the file has.
@@ -307,6 +431,7 @@ class Hub:
             for name in self.roster.reap():
                 self.relay.drop_host(name)
             self.asks.sweep(ASK_TIMEOUT)
+            self.transfers.sweep_partials()
 
     # ── operations shared by handler, clones, and tests ──
 
@@ -379,20 +504,71 @@ class Hub:
             return {"error": str(exc)}
         return {"ok": True, **rec}
 
-    def upload_transfer(self, host: str, to_host: str, name: str, read) -> dict:
+    def upload_transfer(
+        self,
+        host: str,
+        to_host: str,
+        name: str,
+        read,
+        expect: int | None = None,
+        resume: str = "",
+    ) -> dict:
         """Stage bytes streamed from a host's local disk (raw upload path).
 
-        Unlike create_transfer (store-side copy), the bytes come straight off
-        the sender's machine — this is how the user-facing clone sends a real
+        Unlike create_transfer (store-side copy), the bytes come straight off the
+        sender's machine — this is how the user-facing clone sends a real
         local file. An unwritable staging disk raises OSError; callers report
-        it (nobody refuses on size any more, spec §48).
+        it (nobody refuses on size any more, spec §48). `expect` is the length the
+        sender promised, which is what tells a body that ended early from a whole
+        file (§62); `resume` continues a staging it already started.
         """
         if not self.roster.known(host) or not self.roster.known(to_host):
             return {"error": "unknown host"}
         if to_host == host:
             return {"error": "cannot transfer to yourself"}
-        rec = self.transfers.stage_from(name or "file", host, to_host, read)
+        rec = self.transfers.stage_from(
+            name or "file", host, to_host, read, expect=expect, resume=resume
+        )
+        if rec["partial"]:
+            # The sender's body ended before the length it promised — its
+            # connection died. What arrived stays staged so it can come back for
+            # the rest, but this is not a file the receiver may be told about
+            # (§62): an announcement here is how a half file gets delivered.
+            return {
+                "error": f"truncated upload: {rec['size']} of {rec['expect']} bytes",
+                "id": rec["id"],
+                "received": rec["size"],
+                "total": rec["expect"],
+                "partial": True,
+            }
         return {"ok": True, **rec}
+
+    def pending_transfer(
+        self, host: str, to_host: str, name: str, size: int, head: str
+    ) -> dict:
+        """What this hub already holds of the file the sender is about to send (§62).
+
+        Answered for the sender only: it is the sender's own file, and the staging
+        is keyed by (source, destination, name, length, head).
+        """
+        if not self.roster.known(host) or not self.roster.known(to_host):
+            return {"ok": False, "reason": "unknown host"}
+        if to_host == host:
+            return {"ok": False, "reason": "cannot transfer to yourself"}
+        rec = self.transfers.pending(name or "file", host, to_host, size, head)
+        if rec is None:
+            return {"ok": False, "reason": "nothing staged for this file"}
+        return {"ok": True, "id": rec["id"], "received": int(rec["size"]),
+                "partial": bool(rec.get("partial")), "name": rec["name"]}
+
+    def transfer_state(self, transfer_id: str, host: str) -> dict:
+        """Still staged, and how far it got — for either end of the transfer (§62)."""
+        rec = self.transfers.state(transfer_id, host)
+        if rec is None:
+            return {"ok": False, "reason": "not found"}
+        return {"ok": True, "id": rec["id"], "name": rec["name"], "size": int(rec["size"]),
+                "total": int(rec.get("expect") or rec["size"]),
+                "partial": bool(rec.get("partial"))}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -505,6 +681,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._transfer_download(params)
         elif url.path == "/api/transfer/progress":
             self._transfer_progress(params)
+        elif url.path == "/api/transfer/pending":
+            self._transfer_pending(params)
+        elif url.path == "/api/transfer/state":
+            self._transfer_state(params)
         else:
             self._reply({"error": "not found"}, 404)
 
@@ -667,7 +847,12 @@ class _Handler(BaseHTTPRequestHandler):
         self._reply(out, 400 if "error" in out else 200)
 
     def _transfer_upload(self, url) -> None:
-        """Raw-bytes upload: /api/transfer/upload?token&host&to&name (streamed)."""
+        """Raw-bytes upload: /api/transfer/upload?token&host&to&name[&id&offset&total].
+
+        `total` is the whole file's length and `offset` where this body begins;
+        with them a sender that lost its connection hands over the last stretch
+        instead of the whole file again (§62). Without them the body is the file.
+        """
         params = parse_qs(url.query)
         token = (params.get("token") or [""])[0]
         if token != self.hub.token:
@@ -676,10 +861,30 @@ class _Handler(BaseHTTPRequestHandler):
         host = (params.get("host") or [""])[0]
         to_host = (params.get("to") or [""])[0]
         name = (params.get("name") or [""])[0] or "file"
+        total = _query_int(params, "total")
+        offset = _query_int(params, "offset") or 0
+        resume = (params.get("id") or [""])[0]
         remaining = int(self.headers.get("Content-Length") or 0)
         if remaining <= 0:
             self._reply({"error": "empty upload"}, 400)
             return
+        promised = total if total is not None else offset + remaining
+        if resume:
+            rec = self.hub.transfers.state(resume, host)
+            if (
+                rec is None
+                or not rec.get("partial")
+                or int(rec["size"]) != offset
+                or int(rec["expect"]) != promised
+            ):
+                # The staging moved on (swept, finished by another attempt, or a
+                # different file): this body holds a tail with nothing to attach
+                # it to, so it cannot be written anywhere. Read it out and answer.
+                self._reply(
+                    {"error": "stale resume: send the file from the start", "restart": True}, 409
+                )
+                self._drain(remaining)
+                return
 
         def read(n: int) -> bytes:
             nonlocal remaining
@@ -690,7 +895,9 @@ class _Handler(BaseHTTPRequestHandler):
             return chunk
 
         try:
-            out = self.hub.upload_transfer(host, to_host, name, read)
+            out = self.hub.upload_transfer(
+                host, to_host, name, read, expect=promised, resume=resume
+            )
         except OSError as exc:
             # No room / no permission on the staging disk. Say so and drain:
             # the sender is mid-body and can only read this reply if we eat the
@@ -699,11 +906,42 @@ class _Handler(BaseHTTPRequestHandler):
             self._reply({"error": f"staging failed: {exc}"}, 507)
             self._drain(remaining)
             return
-        if out.get("ok") and remaining != 0:
-            self.hub.transfers.discard(str(out.get("id")))
-            self._reply({"error": "truncated upload"}, 400)
+        if out.get("partial"):
+            # The body ended before the length it promised: the connection died.
+            # What arrived stays staged — the sender comes back for the rest
+            # (§62) — and the answer says where it stopped.
+            self._reply({**out, "error": "truncated upload"}, 400)
             return
-        self._reply(out, 400 if "error" in out else 200)
+        if "error" in out:
+            # Some guards answer before a byte is read (unknown host, a send to
+            # itself): replying and closing with the body still in the socket is
+            # what Windows turns into RST, so the sender sees a dead connection
+            # instead of this reason — the same rule the OSError branch above
+            # follows (spec §47).
+            self._reply(out, 400)
+            self._drain(remaining)
+            return
+        self._reply(out, 200)
+
+    def _transfer_pending(self, params: dict) -> None:
+        """Has this file already been staged here? The sender asks first (§62)."""
+        self._reply(
+            self.hub.pending_transfer(
+                (params.get("host") or [""])[0],
+                (params.get("to") or [""])[0],
+                (params.get("name") or [""])[0],
+                _query_int(params, "size") or 0,
+                (params.get("head") or [""])[0],
+            )
+        )
+
+    def _transfer_state(self, params: dict) -> None:
+        """What the hub still holds of a transfer, for either of its two ends."""
+        self._reply(
+            self.hub.transfer_state(
+                (params.get("id") or [""])[0], (params.get("host") or [""])[0]
+            )
+        )
 
     def _drain(self, length: int) -> None:
         """Eat a body we have already answered, so the writer gets that answer."""

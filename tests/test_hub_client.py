@@ -14,6 +14,7 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
+from fungi import landing
 from fungi.hub import client as client_mod
 from fungi.hub.client import HubClient, HubError, _windows
 
@@ -53,11 +54,18 @@ class _InMemoryHub(HubClient):
     `die_every` kills every one of them.
     """
 
-    def __init__(self, payload: bytes, die_after: int | None = None, die_every: bool = False):
+    def __init__(
+        self,
+        payload: bytes,
+        die_after: int | None = None,
+        die_every: bool = False,
+        only_first: int | None = None,
+    ):
         super().__init__("http://127.0.0.1:9", "token", "beta")
         self.payload = payload
         self.die_after = die_after
         self.die_every = die_every
+        self.only_first = only_first
         self.asked: list[tuple[int, int]] = []
         self._died = False
 
@@ -66,8 +74,9 @@ class _InMemoryHub(HubClient):
 
     def _open_window(self, transfer_id: str, first: int, last: int):
         self.asked.append((first, last))
+        dies = self.only_first is None or first == self.only_first
         die = None
-        if self.die_after is not None and (self.die_every or not self._died):
+        if self.die_after is not None and dies and (self.die_every or not self._died):
             die = self.die_after
         return _Body(self.payload[first : last + 1], die, self._died_now), True
 
@@ -125,11 +134,13 @@ def test_a_delivery_over_several_windows_lands_byte_for_byte(tmp_path):
 
 def test_a_window_that_dies_resumes_where_it_stopped(tmp_path, monkeypatch):
     """The point of ranges: a dropped link costs a stretch of the file, not the
-    file. The resumed request has to start at the byte the dead one reached."""
+    file. The resumed request has to start at the byte the dead one reached, and
+    with the bytes an interrupted read already handed over that byte moves past
+    what the socket had delivered (§62) — not back to the start of the window."""
     monkeypatch.setattr(client_mod, "WINDOW_RETRY_WAIT_S", 0.01)
     land = _landing_dir(tmp_path)
     payload = _payload(12 * MiB)
-    client = _InMemoryHub(payload, die_after=64 * 1024)
+    client = _InMemoryHub(payload, die_after=64 * 1024, only_first=0)
     dest = land / "landed.bin"
 
     client.download_transfer("tid", dest)
@@ -139,15 +150,81 @@ def test_a_window_that_dies_resumes_where_it_stopped(tmp_path, monkeypatch):
     assert (64 * 1024, 4 * MiB - 1) in client.asked, "the window restarted from zero"
 
 
-def test_a_window_that_never_succeeds_lands_nothing(tmp_path, monkeypatch):
+def test_a_window_that_never_succeeds_keeps_its_part_and_no_real_name(tmp_path, monkeypatch):
+    """Out of attempts the delivery fails — and what it did fetch stays under the
+    `.part` name with a note beside it (§62), because the next attempt at this
+    same staged transfer continues from there. The real name still sees nothing."""
     monkeypatch.setattr(client_mod, "WINDOW_RETRY_WAIT_S", 0.01)
     land = _landing_dir(tmp_path)
-    client = _InMemoryHub(_payload(12 * MiB), die_after=0, die_every=True)
+    client = _InMemoryHub(_payload(12 * MiB), die_after=MiB, die_every=True)
 
     with pytest.raises(HubError):
         client.download_transfer("tid", land / "landed.bin")
 
-    assert list(land.iterdir()) == [], "a half-fetched delivery was left behind"
+    assert not (land / "landed.bin").exists(), "a half-fetched delivery wore the real name"
+    assert sorted(p.name for p in land.iterdir()) == [
+        "landed.bin.tid.part",
+        "landed.bin.tid.part.json",
+    ]
+
+
+# ── a delivery that dies is continued by the next attempt (§62) ──
+
+
+def test_the_next_attempt_only_asks_for_what_is_missing(tmp_path, monkeypatch):
+    """The whole point of the note: yesterday's half-delivery costs what it had
+    not fetched, and the stretches already on disk are not asked for again."""
+    monkeypatch.setattr(client_mod, "WINDOW_RETRY_WAIT_S", 0.01)
+    land = _landing_dir(tmp_path)
+    payload = _payload(12 * MiB)
+    dest = land / "landed.bin"
+
+    # Every window dies 1 MiB in, per attempt: what each one reaches before the
+    # delivery gives up depends on when the other windows stop it, so the note
+    # is the thing the next attempt has to agree with — not a number here.
+    dying = _InMemoryHub(payload, die_after=MiB, die_every=True)
+    with pytest.raises(HubError):
+        dying.download_transfer("tid", dest)
+
+    part = land / "landed.bin.tid.part"
+    note = landing.PartRecord.read(part)
+    assert note is not None and note.transfer == "tid", "the dead delivery left no note"
+    covered = landing.Spans()
+    size = part.stat().st_size
+    covered.adopt([(first, min(last, size)) for first, last in note.spans])
+    assert covered.bytes > 0
+
+    healthy = _InMemoryHub(payload)
+    healthy.download_transfer("tid", dest)
+
+    assert dest.read_bytes() == payload
+    assert sorted(p.name for p in land.iterdir()) == ["landed.bin"]
+    asked = set(healthy.asked)
+    for start, end in _windows(len(payload), 4):
+        at = covered.end_of_run(start)
+        if at >= end:
+            continue  # this window was already whole: it costs no connection
+        assert (at, end - 1) in asked, f"the window at {start} did not resume at {at}"
+
+
+def test_a_different_staged_transfer_does_not_continue_the_old_part(tmp_path, monkeypatch):
+    """A re-send that had to start over mints a new id: the part the old delivery
+    left describes bytes of *another* delivery, and adopting them would hand the
+    receiver a file made of two of them."""
+    monkeypatch.setattr(client_mod, "WINDOW_RETRY_WAIT_S", 0.01)
+    land = _landing_dir(tmp_path)
+    payload = _payload(12 * MiB)
+    dest = land / "landed.bin"
+
+    dying = _InMemoryHub(payload, die_after=MiB, die_every=True)
+    with pytest.raises(HubError):
+        dying.download_transfer("tid-1", dest)
+
+    fresh = _InMemoryHub(payload)
+    fresh.download_transfer("tid-2", dest)
+
+    assert dest.read_bytes() == payload
+    assert (0, 4 * MiB - 1) in fresh.asked, "the next delivery continued a stranger's part"
 
 
 # ── a hub from before this existed ──
