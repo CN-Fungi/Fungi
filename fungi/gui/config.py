@@ -226,9 +226,10 @@ class ConfigPage(QWidget):
         self.bixian_serve.returnPressed.connect(self._save_bixian)
         root.addWidget(_row("启动命令", self.bixian_serve))
         bixian_hint = BodyLabel(
-            "开着桌面控制时，Agent 分不清该点哪个（编号读不出来、或几个控件同名），就把带编号的"
-            "图交给这台机器配的决策服务，由它挑一个；不填就照旧——它把候选列给你选。\n"
-            "没在跑的服务由启动命令自动起；更多键（k / 超时 / ask）写在 config.json 的 decider 段。"
+            "开着桌面控制时，Agent 分不清该点哪个（编号读不出来、或几个控件同名），先把带编号的"
+            "图交给这台机器配的决策服务，由它先看一眼挑一个；不填就照旧——编号图回到 Agent，\n"
+            "它自己看图挑，连它三次都认不出才会拿着图来问你。没在跑的服务由启动命令自动起；\n"
+            "更多键（k / 超时 / ask）写在 config.json 的 decider 段。"
         )
         bixian_hint.setWordWrap(True)
         root.addWidget(bixian_hint)
@@ -572,7 +573,7 @@ class ConfigPage(QWidget):
         elif decider.get("ask"):
             self.bixian_status.setText("已保存：一次性进程 ask（没有地址可测）")
         else:
-            self.bixian_status.setText("未配置 · intent= 不挑号（把带编号的候选列给你选）")
+            self.bixian_status.setText("未配置 · intent= 不挑号（编号图回到 Agent，它自己看图挑）")
 
     @staticmethod
     def _bixian_sentence(info: dict) -> str:
@@ -591,7 +592,7 @@ class ConfigPage(QWidget):
             return f"配置读不出来：{info.get('reason')}"
         if state == "oneshot":
             return "配的是一次性进程（ask）：每次现起现问，没有地址可测"
-        return "未配置 · intent= 不挑号（把带编号的候选列给你选）"
+        return "未配置 · intent= 不挑号（编号图回到 Agent，它自己看图挑）"
 
     def _toggle_ghostworld(self, checked: bool) -> None:
         """GhostWorld 角色控制开关（spec §43）：即时写盘；关掉时结束监视进程。
