@@ -1346,15 +1346,19 @@ class YesSirHandler(BaseHTTPRequestHandler):
         not the whole file.
         """
         name = unquote(self.headers.get("X-Fungi-Filename") or "")
+        length = int(self.headers.get("Content-Length") or 0)
         if not name:
             # A page from before this wire changed (spec §48) still posts
             # multipart; say what to do about it instead of "missing header".
+            # Reply, then eat the body: closing with it still in the socket is
+            # an RST on Windows, and the page would read "connection aborted"
+            # instead of this sentence (§47 — the hub's guards learned it too).
             self._send_json(
                 {"error": "upload must be raw bytes with X-Fungi-Filename — reload the page"},
                 status=400,
             )
+            self._drain(length)
             return
-        length = int(self.headers.get("Content-Length") or 0)
         if length <= 0:
             self._send_json({"error": "empty upload"}, status=400)
             return
@@ -1369,7 +1373,10 @@ class YesSirHandler(BaseHTTPRequestHandler):
             # A session id becomes part of a file name, so an unusable one is a
             # refusal — never a quiet fallback to "then this body is the file".
             if not sid or offset is None or total is None or total <= 0 or offset + length > total:
+                # Answered before a byte is read — the case that showed up as a
+                # load-induced 10053 on the sender (§47): reply, then eat.
                 self._send_json({"error": "bad upload window"}, status=400)
+                self._drain(length)
                 return
         else:
             # The page handed over the file in one body: it is a window too, the
@@ -1380,6 +1387,7 @@ class YesSirHandler(BaseHTTPRequestHandler):
         up = UPLOADS.session(sid, name, total, _inbox_dir())
         if up["total"] != total or up["name"] != safe_name(name):
             self._send_json({"error": "this upload session belongs to another file"}, status=400)
+            self._drain(length)  # same rule: the refusal has to arrive (§47)
             return
         try:
             got = self._receive_upload(up, offset, length)
@@ -1460,19 +1468,42 @@ class YesSirHandler(BaseHTTPRequestHandler):
         """
         at = offset
         left = length
-        with up["part"].open("r+b") as out:
-            out.seek(offset)
-            while left > 0:
-                chunk = self.rfile.read(min(UPLOAD_READ, left))
-                if not chunk:
-                    break
-                out.write(chunk)
-                at += len(chunk)
-                left -= len(chunk)
+        try:
+            with up["part"].open("r+b") as out:
+                out.seek(offset)
+                while left > 0:
+                    chunk = self.rfile.read(min(UPLOAD_READ, left))
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    at += len(chunk)
+                    left -= len(chunk)
+        except OSError:
+            # The handler's 507 is written next: eat what is left of the body
+            # first, or Windows turns the close into an RST and the phone never
+            # reads the reason (§47 — the same rule the hub's guards follow).
+            self._drain(left)
+            raise
         if at > offset:
             up["spans"].add(offset, at)
             UPLOADS.note(up)
         return at - offset
+
+    def _drain(self, length: int) -> None:
+        """Eat a body we have already answered, so the writer gets that answer.
+
+        `length` is the bytes not yet read (0 when everything already arrived).
+        The hub's `_drain` is this same method — one rule, two servers (§47).
+        """
+        left = length
+        try:
+            while left > 0:
+                chunk = self.rfile.read(min(65536, left))
+                if not chunk:
+                    break
+                left -= len(chunk)
+        except OSError:
+            self.close_connection = True  # the sender gave up first
 
     def _handle_download(self, url) -> None:
         """PC -> phone: hand the phone a file that is on this machine (§52).

@@ -191,6 +191,12 @@ def test_stream_chat_early_close_without_finish_signal_raises():
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
+            # Eat the request body before answering: closing with it still in
+            # the socket is an RST on Windows, and the client then loses this
+            # stream to 10053 instead of reading it to its (missing) end —
+            # the red this test used to show in full runs only, never alone.
+            # The two siblings that capture the body already read it first.
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
