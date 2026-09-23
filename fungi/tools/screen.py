@@ -35,9 +35,14 @@ import ctypes.wintypes as wt
 import importlib
 import importlib.util
 import io
+import json
+import os
 import re
+import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -46,6 +51,7 @@ from typing import Any, ClassVar
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageGrab, ImageStat
 
+from fungi import config as config_mod
 from fungi.agent import BoundTool
 from fungi.config import Config
 from fungi.events import Sink
@@ -83,6 +89,17 @@ TYPE_CHAR_DELAY_S = 0.15  # 逐字输入: the gap between characters — a *watc
 # style exists to avoid. The knob stays — `char_delay` overrides it per call (spec §37).
 LAUNCH_WAIT_S = 3.0  # a gesture that starts a process: its window is not up immediately
 SHOT_MAX_DIM = 1568  # same vision sweet spot as files.IMAGE_MAX_DIM
+# The decider seam (see "the decider seam" below): the numbers, and why each one is that number.
+DECIDER_FILE = "decider.json"  # beside config.json; not in the repo, it names local paths
+# Measured: a listing carries the window's own shell (2x2 px) and its render host (an a11y box
+# over the whole client area) as candidates. Drawn over for a decider, those two take 0.58/0.42
+# of the answer and leave the row the task is about at 1e-6 — so neither is ever asked about.
+DECIDER_MIN_SIDE_PX = 8
+DECIDER_MAX_AREA_SHARE = 0.5
+DECIDER_WAIT_S = 300.0  # a cold model reads 713 weight shards before its first answer
+DECIDER_HANDSHAKE_S = 3.0  # how long "are you there" waits before it counts as a no
+CREATE_NO_WINDOW = 0x08000000  # a background child gets no console of its own
+CREATE_NEW_PROCESS_GROUP = 0x00000200
 
 _u32 = ctypes.WinDLL("user32", use_last_error=True)
 _gdi = ctypes.WinDLL("gdi32", use_last_error=True)
@@ -140,11 +157,78 @@ _u32.GetCursorPos.restype = wt.BOOL
 # (SHORT, and negative when the key is down: the high bit is what matters).
 _u32.GetAsyncKeyState.argtypes = [ctypes.c_int]
 _u32.GetAsyncKeyState.restype = ctypes.c_short
+# Which desktop receives input: the lock screen and a screensaver are desktops of their own,
+# and from this session's 'Default' there is no way to inject into them (see desktop_problem).
+_u32.OpenInputDesktop.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+_u32.OpenInputDesktop.restype = ctypes.c_void_p
+_u32.CloseDesktop.argtypes = [ctypes.c_void_p]
+_u32.GetUserObjectInformationW.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_int,
+    ctypes.c_void_p,
+    wt.DWORD,
+    ctypes.POINTER(wt.DWORD),
+]
 
 SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
 SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
 SW_RESTORE = 9
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+DESKTOP_SWITCHDESKTOP = 0x0100
+UOI_NAME = 2
+
+
+class ScreenUnavailable(RuntimeError):  # noqa: N818 — the name is the diagnosis the user reads
+    """The machine cannot be driven from this process right now — and saying which way is
+    half the answer: an injection that cannot land and a screen that cannot be read are the
+    same failure to the caller ("nothing happened"), and its two causes (a lock screen, a
+    session that is not the console's) need different things from the user."""
+
+
+def input_desktop_name() -> str:
+    """The desktop that currently receives input: 'Default' when the user is at the machine,
+    something else ('Screen-saver', 'Winlogon') when a lock screen or a screensaver owns it.
+
+    Measured on this box 2026-09-17, with the session locked: the input desktop was
+    'Screen-saver' while this process sat on 'Default', and from there `SendInput` fails with
+    ERROR_ACCESS_DENIED, `GetCursorPos` fails, `GetForegroundWindow` returns 0 and the screen
+    capture comes back empty — every one of which the tool used to report as its own fault
+    ("INJECTION FAILED"), with no hint that the user is simply not there.
+
+    `""` means "cannot tell" — a stub user32 without the call, or an older Windows that
+    refuses it — which is not the same as "locked": only a real other name is a diagnosis.
+    """
+    try:
+        handle = _u32.OpenInputDesktop(0, False, DESKTOP_SWITCHDESKTOP)
+    except (AttributeError, OSError, ValueError):
+        return ""
+    if not handle:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(256)
+        need = wt.DWORD()
+        if not _u32.GetUserObjectInformationW(
+            handle, UOI_NAME, buf, ctypes.sizeof(buf), ctypes.byref(need)
+        ):
+            return ""
+        return buf.value
+    except (AttributeError, OSError, ValueError):
+        return ""
+    finally:
+        with contextlib.suppress(AttributeError, OSError, ValueError):
+            _u32.CloseDesktop(handle)
+
+
+def desktop_problem() -> str | None:
+    """Why this machine's desktop cannot be acted on at all, or None."""
+    name = input_desktop_name()
+    if name and name.casefold() != "default":
+        return (
+            f"the input desktop is {name!r}, not this session's 'Default' — the machine is "
+            "locked or a screensaver is up. No key or click can be injected and no screen "
+            "pixels can be read until the user is back; nothing was sent."
+        )
+    return None
 
 
 def _ensure_dpi() -> None:
@@ -437,9 +521,23 @@ class _BITMAPINFOHEADER(ctypes.Structure):
 
 def grab_screen() -> Frame:
     """Whole virtual desktop. Below IMAGE_MAX_DIM on a typical box, so the model
-    gets near-native pixels; still call the window shot for small text."""
+    gets near-native pixels; still call the window shot for small text.
+
+    The one failure that is not this tool's fault is reported as such: a locked,
+    disconnected or headless session gives the display device nothing to read, so
+    `ImageGrab` raises OSError and the caller would otherwise see a bare traceback
+    instead of "the machine is locked" (measured 2026-09-17: a locked session
+    returns an empty capture, and PIL's grab raises on the disconnected case).
+    """
     _ensure_dpi()
-    img = ImageGrab.grab(all_screens=True).convert("RGB")
+    try:
+        img = ImageGrab.grab(all_screens=True).convert("RGB")
+    except OSError as exc:
+        raise ScreenUnavailable(
+            desktop_problem()
+            or f"the screen could not be captured ({exc}) — a locked, disconnected or otherwise "
+            "headless session gives the display device nothing to read"
+        ) from exc
     return Frame(img, _virtual_origin(), None, time.time())
 
 
@@ -521,7 +619,9 @@ def grab_window(hwnd: int) -> Frame | None:
     if _dpi_unaware(hwnd):
         if foreground_hwnd() != hwnd:
             return None
-        screen = ImageGrab.grab(all_screens=True).convert("RGB")
+        # One capture path only: the diagnosis (locked / disconnected session) has
+        # to come with every picture, not just the whole-screen one.
+        screen = grab_screen().image
         origin = _virtual_origin()
         box = (rect[0] - origin[0], rect[1] - origin[1], rect[2] - origin[0], rect[3] - origin[1])
         return Frame(screen.crop(box), (rect[0], rect[1]), hwnd, time.time())
@@ -791,6 +891,9 @@ class Target:
     rect: tuple[int, int, int, int]
     patterns: tuple[str, ...] = ()
     source: str = "a11y"
+    # How this target was chosen, when that is worth saying: the decider seam fills
+    # it in so the result reports that a model picked the number (and how sure it was).
+    via: str = ""
 
     @property
     def center(self) -> tuple[int, int]:
@@ -805,8 +908,10 @@ class Target:
             kind = f"[{'+'.join(self.patterns)}]" if self.patterns else "[text]"
             name = self.name or self.cls or "(unnamed)"
         number = f"#{self.n} " if self.n else ""  # a label carries no listing number
+        chosen = f" via {self.via}" if self.via else ""
         return (
-            f"{number}{kind} {name!r} cls={self.cls or '-'} rect={self.rect} centre={self.center}"
+            f"{number}{kind} {name!r} cls={self.cls or '-'} rect={self.rect} "
+            f"centre={self.center}{chosen}"
         )
 
 
@@ -1641,11 +1746,15 @@ def resolve_target(hwnd: int, args: dict, *, allow_ocr: bool = True) -> Target |
 
     Ambiguity is surfaced, never guessed: several matches come back as a list
     for the model to pick from (the prototype's "don't silently take the first"
-    rule). A name with no match is `no_target`, with the a11y candidates listed.
+    rule) — unless this machine has a decider configured, which is asked to pick among them
+    instead. A name with no match is `no_target`, with the a11y candidates listed.
     """
     number = args.get("target")
     name = str(args.get("name") or "").strip()
+    intent = str(args.get("intent") or "").strip()
     if number is None and not name:
+        if intent:
+            return _decider_resolve(hwnd, intent)
         return (
             "ERROR: pass target=<number from targets> or name=<visible text>. "
             "Call the targets action first to see the numbers."
@@ -1706,6 +1815,18 @@ def resolve_target(hwnd: int, args: dict, *, allow_ocr: bool = True) -> Target |
         return hits[0]
     if len(hits) > 1:
         listed = "\n".join(cand.label for cand in hits[:12])
+        if intent:
+            # What the number-free form of a name cannot do: several controls answer to it, and
+            # taking the first is the kind of guess this tool does not make. The decider is asked
+            # instead — and if it declines, the ambiguity is still surfaced rather than resolved.
+            frame = grab_window(hwnd)
+            if frame is not None:
+                picked, why = _decider_pick(
+                    hwnd, intent, hits, frame, what=f"the control called {name!r}"
+                )
+                if picked is not None:
+                    return picked
+                return f"{why}\n  It had to choose among these:\n{listed}"
         return f"ERROR: {len(hits)} controls match {name!r} — pick a number with target=\n{listed}"
     if allow_ocr:
         frame = grab_window(hwnd)
@@ -1724,6 +1845,349 @@ def resolve_target(hwnd: int, args: dict, *, allow_ocr: bool = True) -> Target |
     known = _session.labels if _session.labels_hwnd == hwnd else {}
     tail = f" Labels you set here: {', '.join(sorted(known))}." if known else ""
     return f"ERROR: no_target: nothing named {name!r} in this window.{tail} Candidates:\n{listed}"
+
+
+# ── the decider seam: when this machine has a model, the model names the number ──
+# The tool's own position does not change: coordinates are still not the caller's, and every
+# gesture still names a target the *program* located. What changes is who reads the listing —
+# instead of the caller picking a number out of it, a model may pick it, and Fungi asks one
+# only when this machine says there is one to ask (a config, and the weights it names on disk).
+#
+# Nothing here knows what model it is talking to. The wire is one JSON object in and one out:
+#
+#     {"intent": "...", "options": [{"id": 12, "label": "发送", "box": [x0,y0,x1,y1]}],
+#      "image": "<png path>"}                              # the picture, our own numbering drawn
+#     -> {"decision": "YES"|"UNDECIDED", "id": 12, "p": 0.97, "confidence": 0.95,
+#         "options": [...], "marked": "<png path>"}
+#
+# and the decider is a program Fungi starts or calls, never an import: the model's runtime (torch,
+# a venv, a GPU) stays entirely on the other side. Every failure here is a reason *string*, never
+# an exception: a seam that is only supposed to help must not be able to break a tool call.
+class DeciderDown(RuntimeError):  # noqa: N818 — same: the name says what happened, not "an error"
+    """The decider cannot answer right now — carrying the reason, which is the useful part."""
+
+
+def _decider_config() -> dict:
+    """The decision service this machine is pointed at — `{}` when there is none.
+
+    Two sources, in this order, both the same JSON:
+      * `FUNGI_DECIDER` — for a caller that wants to point this box somewhere else for one run
+      * `decider.json` beside `config.json` (exe-adjacent when frozen) — the box's own file (it
+        names local paths, so it is gitignored; the repo never carries one)
+
+    Keys: `url` (a resident service), `serve` (how to start it), `ask` (a one-shot process),
+    `weights` (a path that must exist for the seam to be on at all), `k`, `timeout`, `wait`,
+    `autostart`. `policy` is deliberately not one of them: it belongs to the decider, comes back
+    over `/health` and is forwarded with every request (see `_decider_ask`).
+    `_source` and `_problem` are filled in for the report.
+    """
+    raw = os.environ.get("FUNGI_DECIDER", "")
+    source = "FUNGI_DECIDER"
+    if not raw.strip():
+        path = config_mod.CONFIG_PATH.with_name(DECIDER_FILE)
+        if not path.is_file():
+            return {}
+        raw, source = path.read_text(encoding="utf-8"), str(path)
+    try:
+        config = json.loads(raw)
+    except ValueError as exc:
+        return {"_source": source, "_problem": f"{source} is not valid JSON: {exc}"}
+    if not isinstance(config, dict):
+        return {"_source": source, "_problem": f"{source} is not a JSON object"}
+    if not config:
+        return {}  # an empty object is "off", exactly like no file at all
+    config["_source"] = source
+    return config
+
+
+def _decider_data_dir() -> Path:
+    """Where the picture shown to a decider goes, and where its log lands.
+
+    A writable directory of this tool's own (`writable_dir` falls back to
+    %LOCALAPPDATA%\\Fungi\\data when the program directory is read-only, which is
+    the case for a Program Files install): the file has to be somewhere the decider
+    process can open it too, and that is the point of naming it in the request.
+    """
+    path = config_mod.writable_dir(config_mod.PROJECT_ROOT / "data", "data") / "decider"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _decider_health(base: str, timeout: float = DECIDER_HANDSHAKE_S) -> dict | None:
+    """What the service says about itself, or None when nothing answers there."""
+    try:
+        with urllib.request.urlopen(base.rstrip("/") + "/health", timeout=timeout) as reply:
+            return json.loads(reply.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _decider_post(base: str, path: str, payload: dict, timeout: float) -> dict:
+    """One POST, JSON out. Raises `DeciderDown` with whatever the other end said."""
+    call = urllib.request.Request(
+        base.rstrip("/") + path,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(call, timeout=timeout) as reply:
+            return json.loads(reply.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        said = exc.read().decode("utf-8", "replace")[:300]
+        raise DeciderDown(f"the decider refused the request: {said}") from exc
+    except (OSError, ValueError) as exc:
+        raise DeciderDown(f"the decider call failed: {exc}") from exc
+
+
+def _decider_launch(cfg: dict) -> None:
+    """Start the decider as a process of its own — it has to outlive this call.
+
+    A child that died with the tool call would pay the model's whole load on every
+    gesture (measured in the tool this was ported from: 29-44 s of a ~56 s one-shot
+    answer). Detached instead: no console of its own (`CREATE_NO_WINDOW` — the venv's
+    python.exe is a redirector that spawns a second process, and a child with no console
+    to inherit is given one), its own process group, stdin closed, and the log in the
+    decider's data directory where the next run can read why it never came up.
+    """
+    argv = [str(item) for item in cfg["serve"]]
+    # The handle is deliberately not closed: the child process writes into it.
+    log = (_decider_data_dir() / "decider.log").open("ab")
+    with contextlib.suppress(OSError):
+        subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            close_fds=True,
+            creationflags=CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+        )
+
+
+def _decider_ready(cfg: dict, base: str) -> tuple[dict | None, str]:
+    """(health, note): the service is up and answering, or None when it never did.
+
+    A decider that is up but still reading its weights is waited for here rather than reported:
+    the wait is the model's load, it happens once, and the alternative — asking a caller to come
+    back later — is a state a tool call cannot remember.
+    """
+    started = False
+    health = _decider_health(base)
+    if health is None and cfg.get("serve") and cfg.get("autostart", True):
+        _decider_launch(cfg)
+        started = True
+
+    def done(seen: dict | None) -> bool:
+        return bool(seen) and (
+            seen.get("loaded") or seen.get("load_error") or seen.get("model_present") is False
+        )
+
+    if done(health):
+        return health, ""
+    began = time.monotonic()
+    deadline = began + float(cfg.get("wait") or DECIDER_WAIT_S)
+    while time.monotonic() < deadline:
+        health = _decider_health(base)
+        if done(health):
+            break
+        time.sleep(0.5)
+    waited = f"{time.monotonic() - began:.0f}s"
+    if started and done(health):
+        return health, f"; started it and waited {waited} for the weights"
+    if started:
+        return health, f"; started it but it was not ready after {waited}"
+    return health, ""
+
+
+def _decider_ask(cfg: dict, request: dict) -> dict:
+    """One request over whichever transport this machine configured. Raises `DeciderDown`."""
+    base = str(cfg.get("url") or "").strip()
+    timeout = float(cfg.get("timeout") or 120.0)
+    if base:
+        health, note = _decider_ready(cfg, base)
+        if health is None:
+            raise DeciderDown(f"nothing answers at {base}{note} — start it, or fix the url")
+        if health.get("model_present") is False:
+            raise DeciderDown(f"the decider at {base} has no weights ({health.get('model')})")
+        if health.get("load_error"):
+            raise DeciderDown(f"the decider at {base} could not load: {health['load_error']}")
+        if not health.get("loaded"):
+            raise DeciderDown(f"the decider at {base} is still loading{note}")
+        request = dict(request)
+        if not request.get("policy") and health.get("policy"):
+            request["policy"] = health["policy"]
+        return _decider_post(base, "/decide", request, timeout)
+    argv = cfg.get("ask")
+    if not argv:
+        raise DeciderDown("the config has neither `url` nor `ask` — nothing to send a request to")
+    try:
+        done = subprocess.run(
+            [str(item) for item in argv],
+            check=False,
+            input=json.dumps(request, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise DeciderDown(f"the decider process did not run: {exc}") from exc
+    for line in reversed((done.stdout or "").splitlines()):
+        try:
+            answer = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(answer, dict):
+            return answer
+    raise DeciderDown(f"the decider printed no JSON (exit {done.returncode})")
+
+
+def _intent_overlap(intent: str, name: str) -> int:
+    """How many character pairs the intent and a candidate's name share.
+
+    Only a tie-break for "more candidates than the decider can be asked about at once", and only
+    ever used to decide *who gets asked*: the model still sees the tool's own order, because the
+    order on screen is what a person reads the screen by.
+    """
+    if len(name) < 2:
+        return 0
+    left = {intent[i : i + 2] for i in range(len(intent) - 1)}
+    right = {name[i : i + 2] for i in range(len(name) - 1)}
+    return len(left & right)
+
+
+def _decider_candidates(
+    candidates: list[Target], frame: Frame, k: int, intent: str
+) -> list[Target]:
+    """Which candidates are worth drawing a number on — the tool's own order, at most k of them.
+
+    The picture is what the model reads, so unnamed candidates stay: a canvas button is a
+    legitimate answer here (that is what this seam buys over a text-only decision). What goes is
+    what poisons the question instead of adding to it, both measured on a real frame: the window's
+    own shell (a 2x2 px `Qt51514QWindowIcon`) and its render host (an a11y box over the whole
+    client area). Drawn over, the model spent 0.58/0.42 on those two and left the row the task was
+    about at 1e-6. Only what is *asked about* is filtered here — the listing is untouched.
+    """
+    window = window_rect(frame.hwnd) if frame.hwnd else None
+    area = ((window[2] - window[0]) * (window[3] - window[1])) if window else 0
+    keep: list[Target] = []
+    for cand in candidates:
+        left, top, right, bottom = cand.rect
+        width, height = right - left, bottom - top
+        if width < DECIDER_MIN_SIDE_PX or height < DECIDER_MIN_SIDE_PX:
+            continue
+        if window and (
+            right <= window[0] or left >= window[2] or bottom <= window[1] or top >= window[3]
+        ):
+            continue
+        if cand.source == "a11y" and area and (width * height) / area >= DECIDER_MAX_AREA_SHARE:
+            continue
+        keep.append(cand)
+    if len(keep) > k:
+        keep = sorted(
+            sorted(keep, key=lambda c: (-_intent_overlap(intent, c.name), c.n))[:k],
+            key=lambda c: c.n,
+        )
+    return keep
+
+
+def _decider_undecided(intent: str, asked: list[Target], answer: dict, what: str) -> str:
+    """The hand-off: no number is invented, and the caller gets what it needs to answer itself."""
+    if answer.get("error"):
+        return f"ERROR: the decider refused the request: {answer['error']}"
+    best = float(answer.get("p") or 0.0)
+    ranking = "\n".join(
+        f"    #{row.get('id')} {row.get('label') or '(no name)'} p={float(row.get('p') or 0):.3f}"
+        for row in (answer.get("options") or [])[:6]
+    )
+    look = (
+        f" It looked at {answer['marked']} — the same picture, numbered 1..{len(asked)} by it."
+        if answer.get("marked")
+        else ""
+    )
+    return (
+        f"UNDECIDED: the decider is not sure what {what} is for ({intent!r}) — its best was "
+        f"p={best:.3f}, under the {answer.get('threshold')} it needs.{look}\n"
+        "  Read that picture and pass target=<n> for the one you pick; its ranking, with the "
+        f"tool's own numbers, was:\n{ranking}"
+    )
+
+
+def _decider_pick(
+    hwnd: int, intent: str, candidates: list[Target], frame: Frame, *, what: str = "this gesture"
+) -> tuple[Target | None, str]:
+    """Ask the configured decider which candidate this gesture is for.
+
+    `(target, "")` when one was named, `(None, message)` otherwise — and the message is already
+    the thing to hand back to the caller, saying which kind of "no" it is: not configured, not
+    on this disk, not answering, or not sure.
+    """
+    cfg = _decider_config()
+    if cfg.get("_problem"):
+        return None, f"ERROR: {cfg['_problem']}"
+    if not cfg:
+        return None, (
+            "ERROR: no decider is configured on this machine, so intent= cannot name a number. "
+            "Write decider.json beside config.json (or set FUNGI_DECIDER); with nothing "
+            "configured, target= and name= still work."
+        )
+    weights = str(cfg.get("weights") or "")
+    if weights and not Path(weights).exists():
+        return None, (
+            f"ERROR: the decider's model is not on this disk ({weights}, named by "
+            f"{cfg['_source']}) — pass target= or name=, or point the config at a model that is."
+        )
+    try:
+        k = int(cfg.get("k") or 9)
+    except (TypeError, ValueError):
+        k = 9
+    asked = _decider_candidates(candidates, frame, k, intent)
+    if not asked:
+        return None, (
+            "ERROR: nothing in this listing is worth asking a decider about — every candidate is "
+            "the window itself (or outside it). Run targets again, or pass target=/name=."
+        )
+    image = _decider_data_dir() / f"decider-0x{hwnd:X}.png"
+    frame.image.save(image, "PNG")
+    request = {
+        "intent": intent,
+        "options": [
+            {"id": cand.n, "label": cand.name, "box": list(frame.to_local(cand.rect))}
+            for cand in asked
+        ],
+        "image": str(image),
+    }
+    try:
+        answer = _decider_ask(cfg, request)
+    except DeciderDown as exc:
+        return None, f"ERROR: {exc}"
+    chosen = next((cand for cand in asked if str(cand.n) == str(answer.get("id"))), None)
+    if answer.get("decision") != "YES" or chosen is None:
+        return None, _decider_undecided(intent, asked, answer, what)
+    chosen.via = (
+        f"decider p={float(answer.get('p') or 0):.2f} "
+        f"conf={float(answer.get('confidence') or 0):.2f}"
+    )
+    return chosen, ""
+
+
+def _decider_resolve(hwnd: int, intent: str) -> Target | str:
+    """`intent=` instead of a number: build the listing if it is not there yet, then ask."""
+    if _session.listings.get(hwnd) is None:
+        made = _action_targets({"hwnd": hwnd})
+        if isinstance(made, str) and made.startswith("ERROR"):
+            return made
+    listing = _session.listings.get(hwnd)
+    if listing is None:
+        return "ERROR: no listing to ask about — run targets first"
+    frame = grab_window(hwnd)
+    if frame is None:
+        return (
+            f"ERROR: could not capture window 0x{hwnd:X} — a decider is shown the picture, so "
+            "there is nothing to ask until it can be read (action=restore with hwnd= and retry)."
+        )
+    picked, message = _decider_pick(hwnd, intent, list(listing.candidates.values()), frame)
+    return picked if picked is not None else message
 
 
 # ── read-only actions ─────────────────────────────────────────────────────
@@ -2452,7 +2916,11 @@ def _action_type(args: dict, sink, should_abort, on_answer, call_id) -> str | Im
     text = str(args.get("text") or "")
     if not text:
         return "ERROR: type needs text=<the string to enter>"
-    wants = args.get("target") is not None or bool(args.get("name"))
+    wants = (
+        args.get("target") is not None
+        or bool(args.get("name"))
+        or bool(str(args.get("intent") or "").strip())
+    )
     awake = window_state(hwnd) == "normal"
     target: Target | None = None
     if wants and awake:
@@ -3093,13 +3561,27 @@ def _tray_overflow_entry(win: Win, tray_rows: list[Target]) -> Entry | None:
         set_foreground(tray)
         click_at(*chevron.center)
     deadline = time.monotonic() + TRAY_FLYOUT_S
+    last: tuple | None = None
+    candidate: Target | None = None
     while time.monotonic() < deadline:
         flyout = _tray_flyout()
         if flyout is not None:
             found = _shell_row(_surface_rows(flyout.hwnd), win)
             if found is not None:
-                return _entry(flyout.hwnd, found, "托盘图标", 1)
+                candidate = found
+                # The flyout *grows* as it fills, so a rectangle read the moment it appears can
+                # point a slot off: measured 2026-09-17, the first click landed on the
+                # neighbouring icon and opened that application's panel — the wake's retry got it
+                # right, but a misfire that opens a stranger's panel is not something to leave in.
+                # Wait for the surface to stop moving and click the row as it is then.
+                sample = (window_rect(flyout.hwnd), found.rect)
+                if sample == last:
+                    return _entry(flyout.hwnd, found, "托盘图标", 1)
+                last = sample
         time.sleep(0.1)
+    if candidate is not None:
+        # An unsettled flyout is still worth a click: the retry path is what the caller has.
+        return _entry(flyout.hwnd, candidate, "托盘图标", 1)
     if opened:
         _close_tray_flyout()
     return None
@@ -3377,7 +3859,7 @@ _INPUT_ACTIONS = {
 }
 
 
-def _run(
+def _dispatch(
     cfg: Config,
     sink: Sink,
     args: dict,
@@ -3386,6 +3868,7 @@ def _run(
     should_abort: Callable[[], bool] | None = None,
     on_answer: Callable[[dict], None] | None = None,
 ) -> str | ImageRead:
+    """Pick the action and run it. `_run` is the tool entry point around this."""
     action = str(args.get("action") or "").strip().lower()
     if not cfg.pc_control:
         return "ERROR: screen control is off (config.json pc_control=false)"
@@ -3412,6 +3895,13 @@ def _run(
         return f"ERROR: hwnd must be a number, got {hwnd!r}"
     if not _u32.IsWindow(hwnd):
         return f"ERROR: no such window: 0x{hwnd:X}"
+    if handler is not None:
+        # The machine's state, not "the tool is broken": with the session locked the
+        # input desktop is not this one and nothing can be injected into it, while the
+        # read-only actions above still describe what is on screen.
+        problem = desktop_problem()
+        if problem:
+            return f"ERROR: {problem}"
     try:
         if action == "restore":  # asks nothing, so it takes no ask plumbing
             return _action_restore(args)
@@ -3422,6 +3912,37 @@ def _run(
         # only a human can clear, exactly like a stuck Ctrl.
         release_all_keys()
         release_all_buttons()
+
+
+def _run(
+    cfg: Config,
+    sink: Sink,
+    args: dict,
+    *,
+    call_id: str | None = None,
+    should_abort: Callable[[], bool] | None = None,
+    on_answer: Callable[[dict], None] | None = None,
+) -> str | ImageRead:
+    """The tool entry point, plus the two failures that are a property of the machine and
+    not of the call: a screen that cannot be read from this desktop, and input actions on
+    a desktop that receives nothing.
+
+    Read-only actions still work with the session locked — `windows`, `targets` and a window
+    `shot` describe the machine as it is — so only the input actions are refused, and they
+    are refused *before* anything is injected: with the user away there is no key or click
+    that could land, and telling them that is more useful than reporting a failed injection.
+    """
+    try:
+        return _dispatch(
+            cfg,
+            sink,
+            args,
+            call_id=call_id,
+            should_abort=should_abort,
+            on_answer=on_answer,
+        )
+    except ScreenUnavailable as exc:
+        return f"ERROR: {exc}"
 
 
 SCHEMA = {
@@ -3445,11 +3966,20 @@ SCHEMA = {
             "Coordinates are deliberately NOT accepted: the tool resolves the target "
             "itself from the accessibility tree (exact) or OCR, so a click always "
             "lands where the program says the control is, never where a model "
-            "estimated. Workflow: windows → targets(hwnd) → click/type on a number; "
+            "estimated. When you cannot pick a number — the picture is unreadable to you, or "
+            "several controls share a name — `click`, `double_click`, `type` and `scroll` "
+            "accept `intent=<what the gesture is for>` instead, and the number then comes from "
+            "the decision service *this machine* has configured (decider.json beside "
+            "config.json, or FUNGI_DECIDER); with nothing configured, or the service not "
+            "answering, the call comes back refused with the reason, and `target=`/`name=` keep "
+            "working. Workflow: windows → targets(hwnd) → click/type on a number; "
             "each action returns the window's new picture so you can check the "
             "effect yourself. Input actions ask nothing per action: the settings switch "
             "(config.json pc_control) is the consent, and turning it off stops the agent "
-            "immediately. "
+            "immediately. With the machine locked, or its input desktop not the console "
+            "session's own 'Default', every input action is refused with the reason — nothing "
+            "can be injected while the user is away — and the read-only actions (windows, "
+            "targets, a window shot) still describe the machine as it is. "
             "Minimized or tray-hidden windows: they keep off-screen geometry, so measure "
             'nothing until `restore` has run — `windows include="all"` is how you get their '
             "hwnd, and the taskbar row in that list is where tray icons themselves live. "
@@ -3572,6 +4102,19 @@ SCHEMA = {
                         "The control's name or visible text instead of a number "
                         "(e.g. the button caption). Ambiguous matches come back as a list. "
                         "For drag it names the thing being carried."
+                    ),
+                },
+                "intent": {
+                    "type": "string",
+                    "description": (
+                        "What the gesture is *for*, for when you cannot read the numbered "
+                        "picture or several controls share a name (e.g. '发送这条消息', 'the "
+                        "confirm button'). click/double_click/type/scroll accept it instead of "
+                        "target=/name=, and the number comes from the decision service this "
+                        "machine has configured — decider.json beside config.json, or the "
+                        "FUNGI_DECIDER environment variable — never from a model inside this "
+                        "tool. With nothing configured, or the service not answering, the call "
+                        "comes back refused with the reason and target=/name= still work."
                     ),
                 },
                 "text": {

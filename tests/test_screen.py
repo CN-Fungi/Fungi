@@ -7,11 +7,13 @@ time-boxed arm that always ends in a disarm, and nothing is injected when a key
 name is unknown.
 """
 
+import json
 import time
 
 import pytest
 from PIL import Image, ImageDraw
 
+from fungi import config as config_mod
 from fungi.config import Config
 from fungi.tools import screen
 from fungi.tools.files import ImageRead
@@ -2072,3 +2074,424 @@ def test_a_route_reads_the_drop_point_again_once_the_window_is_back(monkeypatch)
     assert rec.events[-1][:2] == (1696, 702)  # the client centre the window has *now*
     assert "came back on screen" in out and "verified" in out
     assert "-48000" not in out
+
+
+# ── the flyout settles before it is clicked (measured 2026-09-17) ──────────
+def test_the_overflow_flyout_must_stop_growing_before_its_row_is_clicked(monkeypatch):
+    """The island *grows* as it fills, so a row read the moment it appears can point a slot
+    off: measured 2026-09-17, the first click landed on the neighbouring icon and opened that
+    application's panel. The row is therefore only handed back once the flyout's own
+    rectangle and the row's rectangle have been identical on two polls in a row."""
+    arrow = _cand(1, "显示隐藏的图标", "SystemTray.NormalButton", (1829, 1328, 1877, 1400))
+    # The icon row as it reads *while the surface is still filling*, 40px too high…
+    filling = _cand(1, " QQ: 3754901636", "SystemTray.NormalButton", (1944, 1143, 2029, 1287))
+    # …and where it ends up once the flyout has stopped moving.
+    settled = _cand(1, " QQ: 3754901636", "SystemTray.NormalButton", (1944, 1183, 2029, 1327))
+    polls = [((1700, 1140, 2040, 1290), filling), ((1700, 1180, 2040, 1330), settled)]
+    seen = {"rows": 0}
+    state = {"open": False}
+
+    def current():
+        return polls[min(seen["rows"] // 2, 1)]
+
+    def rect_of(hwnd):
+        if hwnd == 31:  # the flyout: its own rectangle grows with its contents
+            return current()[0]
+        return _TASKBAR_BOX if hwnd == 900 else _DESKTOP_BOX
+
+    def _wins(include_hidden=False):
+        box, _row = current()
+        return [
+            screen.Win(
+                31,
+                "",
+                "TopLevelWindowForOverflowXamlIsland",
+                box,
+                5,
+                "explorer.exe",
+                "normal" if state["open"] else "hidden",
+            ),
+            _qq(),
+        ]
+
+    def _row(rows, win):
+        if rows and rows[0] is arrow:
+            return None  # the notification strip itself: the icon is behind the arrow
+        seen["rows"] += 1
+        return current()[1]
+
+    clicked: list[tuple[int, int]] = []
+
+    def _click(x, y, **_kwargs):
+        clicked.append((x, y))
+        state["open"] = True  # the arrow is what opens it
+
+    monkeypatch.setattr(screen, "_u32", _Shell())
+    monkeypatch.setattr(screen, "window_rect", rect_of)
+    monkeypatch.setattr(screen, "list_windows", _wins)
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: (
+            [(arrow, object())] if hwnd == 900 else [(current()[1], object())]
+        ),
+    )
+    monkeypatch.setattr(screen, "_shell_row", _row)
+    monkeypatch.setattr(screen, "click_at", _click)
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "hidden")
+    monkeypatch.setattr(screen, "foreground_hwnd", lambda: 77)
+    monkeypatch.setattr(screen, "_await_state", lambda hwnd, want, timeout: True)
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+
+    assert "clicked its 托盘图标" in screen.shell_wake(1)
+    # Only the arrow, and then the row at the rectangle it had *stopped* at.
+    assert clicked == [arrow.center, settled.center]
+    assert seen["rows"] >= 3, "a row seen once was clicked: that is the misfire this waits out"
+
+
+def test_an_unsettled_flyout_is_still_clicked_rather_than_left_hanging(monkeypatch):
+    """The deadline is a fallback, not a second failure: a surface that never stops moving
+    still yields the last row seen (the caller's retry is what it has), and the flyout is
+    only closed when nothing was found at all."""
+    arrow = _cand(1, "显示隐藏的图标", "SystemTray.NormalButton", (1829, 1328, 1877, 1400))
+    drift = {"n": 0}
+    closed: list[bool] = []
+
+    def rect_of(hwnd):
+        return (1700, 1140 + drift["n"], 2040, 1290 + drift["n"])
+
+    def _row(rows, win):
+        drift["n"] += 1  # this surface never stops moving: it must not settle
+        return _cand(
+            1, " QQ: 3754901636", "SystemTray.NormalButton", (1944, 1143, 2029, 1287 + drift["n"])
+        )
+
+    monkeypatch.setattr(screen, "_u32", _Shell())
+    monkeypatch.setattr(screen, "window_rect", rect_of)
+    monkeypatch.setattr(
+        screen,
+        "list_windows",
+        lambda include_hidden=False: [
+            screen.Win(
+                31,
+                "",
+                "TopLevelWindowForOverflowXamlIsland",
+                rect_of(31),
+                5,
+                "explorer.exe",
+                "normal",
+            ),
+            _qq(),
+        ],
+    )
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: [(_row([], None), object())],
+    )
+    monkeypatch.setattr(screen, "_shell_row", _row)
+    monkeypatch.setattr(screen, "click_at", lambda *a, **k: None)
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "_close_tray_flyout", lambda: closed.append(True))
+    # A clock that moves but never far: the loop runs a handful of polls and then gives up.
+    ticks = iter(range(10_000))
+    monkeypatch.setattr(screen.time, "monotonic", lambda: 100.0 + next(ticks) * 0.5)
+
+    entry = screen._tray_overflow_entry(_qq(), [arrow])
+    assert entry is not None and entry.where == "托盘图标"  # the last candidate, not a hang
+    assert entry.target.name.strip().startswith("QQ:")  # …the row as it read last
+    assert drift["n"] >= 4, "the surface never settled, so the deadline is what ended this"
+    assert closed == []  # nothing is closed over a row it just handed back
+
+
+# ── a screen that cannot be read, and a desktop that takes no input ─────────
+class _NoDisplay:
+    """PIL's ImageGrab on a locked or disconnected session: the display device hands it
+    nothing and the grab raises instead of returning an empty picture."""
+
+    @staticmethod
+    def grab(**_kwargs):
+        raise OSError("screen grab failed")
+
+
+def test_a_screen_that_cannot_be_read_names_the_machine_not_the_tool(monkeypatch):
+    monkeypatch.setattr(screen, "ImageGrab", _NoDisplay)
+    with pytest.raises(screen.ScreenUnavailable) as caught:
+        screen.grab_screen()
+    assert "could not be captured" in str(caught.value)
+
+    cfg = Config()
+    cfg.pc_control = True
+    out = screen._run(cfg, None, {"action": "shot"})
+    assert isinstance(out, str) and out.startswith("ERROR: the screen could not be captured")
+
+    # When the input desktop itself is the reason, that is what the caller is told: it is
+    # the difference between "lock the screen and come back" and "this box has no display".
+    monkeypatch.setattr(screen, "input_desktop_name", lambda: "Winlogon")
+    locked = screen._run(cfg, None, {"action": "shot"})
+    assert isinstance(locked, str) and "the input desktop is 'Winlogon'" in locked
+
+
+def test_a_machine_taking_no_input_refuses_to_inject_but_still_reports(monkeypatch):
+    """With the session locked the input desktop is not this one: nothing can be injected
+    into it, while windows/targets still describe what is on screen. The tool owes the
+    caller the machine's state — not "the tool is broken"."""
+    cfg = Config()
+    cfg.pc_control = True
+    monkeypatch.setattr(screen, "_u32", _U32())
+    monkeypatch.setattr(screen, "input_desktop_name", lambda: "Screen-saver")
+    monkeypatch.setitem(screen._INPUT_ACTIONS, "click", lambda *a, **k: pytest.fail("injected"))
+
+    out = screen._run(cfg, None, {"action": "click", "hwnd": 42, "target": 1})
+    assert isinstance(out, str) and out.startswith("ERROR:")
+    assert "'Screen-saver'" in out and "nothing was sent" in out
+
+    # The read-only half is untouched: the listing is how the caller sees what is there.
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (1000, 500, 1400, 800))
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame())
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: [
+            (_cand(1, "保存", "Button", (1000, 500, 1060, 530), ("Invoke",)), object())
+        ],
+    )
+    listing = screen._run(cfg, None, {"action": "targets", "hwnd": 42})
+    assert str(listing).startswith("TARGETS in hwnd=0x2A")
+
+
+def test_a_stub_user32_is_cannot_tell_not_locked(monkeypatch):
+    """`input_desktop_name` has to survive a user32 without the call: "cannot tell" must
+    not read as "locked", or every test (and any older Windows) would refuse to work."""
+    monkeypatch.setattr(screen, "_u32", _U32())  # the tests' stub has no OpenInputDesktop
+    assert screen.input_desktop_name() == ""
+    assert screen.desktop_problem() is None
+
+
+# ── intent=: a local decider picks the number ─────────────────────────────
+def _decider_env(monkeypatch, tmp_path, config: dict | None = None):
+    """Point the seam at a decider without touching this machine's own `decider.json`."""
+    monkeypatch.setattr(config_mod, "CONFIG_PATH", tmp_path / "config.json")
+    if config is None:
+        monkeypatch.delenv("FUNGI_DECIDER", raising=False)
+    else:
+        monkeypatch.setenv("FUNGI_DECIDER", json.dumps(config))
+    monkeypatch.setattr(screen, "_decider_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (1000, 480, 1200, 600))
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame())
+
+
+def test_intent_without_a_decider_is_refused_with_the_reason(monkeypatch, tmp_path):
+    """A seam that only helps must fail open and say why: with nothing configured the
+    caller gets the reason instead of a number nobody chose."""
+    _decider_env(monkeypatch, tmp_path)
+    _listed(42, _cand(1, "取消", "Button", (1000, 500, 1060, 530)))
+
+    out = screen.resolve_target(42, {"intent": "发送这条消息"})
+    assert isinstance(out, str) and out.startswith("ERROR:")
+    assert "no decider is configured" in out and "FUNGI_DECIDER" in out
+
+
+def test_a_configured_decider_names_the_number(monkeypatch, tmp_path):
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111"})
+    cancel = _cand(1, "取消", "Button", (1000, 500, 1060, 530))
+    send = _cand(2, "发送", "Button", (1000, 540, 1120, 570))
+    _listed(42, cancel, send)
+    monkeypatch.setattr(
+        screen,
+        "_decider_ask",
+        lambda cfg, request: {"decision": "YES", "id": 2, "p": 0.93, "confidence": 0.91},
+    )
+
+    picked = screen.resolve_target(42, {"intent": "发送这条消息"})
+    assert isinstance(picked, screen.Target) and picked is send
+    # The result has to say a decider chose it — otherwise the model cannot tell a number
+    # the program matched from one a model picked.
+    assert "via decider p=0.93 conf=0.91" in picked.label
+    assert cancel.via == ""
+
+
+def test_an_undecided_decider_hands_the_question_back(monkeypatch, tmp_path):
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111"})
+    cancel = _cand(1, "取消", "Button", (1000, 500, 1060, 530))
+    send = _cand(2, "发送", "Button", (1000, 540, 1120, 570))
+    _listed(42, cancel, send)
+    monkeypatch.setattr(
+        screen,
+        "_decider_ask",
+        lambda cfg, request: {
+            "decision": "UNDECIDED",
+            "id": 2,
+            "p": 0.41,
+            "threshold": 0.8,
+            "options": [{"id": 2, "label": "发送", "p": 0.41}],
+        },
+    )
+
+    out = screen.resolve_target(42, {"intent": "发送这条消息"})
+    assert isinstance(out, str) and out.startswith("UNDECIDED:")
+    assert "p=0.410" in out and "0.8" in out
+    assert "pass target=<n>" in out and "#2 发送" in out
+    assert not isinstance(out, screen.Target) and cancel.via == "" and send.via == ""
+
+
+def test_a_decider_is_asked_only_when_the_caller_says_what_the_gesture_is_for(monkeypatch):
+    """With several controls answering to a name and no `intent=`, the old answer stands:
+    the ambiguity is listed for the caller to pick from. Nothing consults a machine the
+    caller never pointed at."""
+    pairs = [
+        (_cand(1, "项目 01", "", (1000, 500, 1100, 520)), object()),
+        (_cand(2, "项目 02", "", (1000, 520, 1100, 540)), object()),
+    ]
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: pairs)
+    monkeypatch.setattr(screen, "_ocr_targets", lambda *a, **k: [])
+    monkeypatch.setattr(screen, "_decider_pick", lambda *a, **k: pytest.fail("asked a decider"))
+
+    out = screen.resolve_target(42, {"name": "项目"})
+    assert isinstance(out, str) and out.startswith("ERROR: 2 controls match")
+    assert "pick a number with target=" in out
+
+
+def test_an_ambiguous_name_with_an_intent_is_handed_to_the_decider(monkeypatch, tmp_path):
+    """This is what a name cannot do on its own: several controls answer to it, and taking
+    the first is the guess this tool does not make."""
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111"})
+    first = _cand(1, "项目 01", "", (1000, 500, 1100, 520))
+    second = _cand(2, "项目 02", "", (1000, 520, 1100, 540))
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: [(first, object()), (second, object())],
+    )
+    monkeypatch.setattr(
+        screen,
+        "_decider_ask",
+        lambda cfg, request: {"decision": "YES", "id": 2, "p": 0.88, "confidence": 0.8},
+    )
+
+    picked = screen.resolve_target(42, {"name": "项目", "intent": "第二个项目"})
+    assert isinstance(picked, screen.Target) and picked is second
+    assert "via decider" in picked.label
+
+    # …and a decider that declines leaves the ambiguity standing, with the list attached.
+    third = _cand(3, "项目 01", "", (1000, 500, 1100, 520))
+    fourth = _cand(4, "项目 02", "", (1000, 520, 1100, 540))
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: [(third, object()), (fourth, object())],
+    )
+    monkeypatch.setattr(
+        screen,
+        "_decider_ask",
+        lambda cfg, request: {"decision": "UNDECIDED", "id": 1, "p": 0.2, "threshold": 0.8},
+    )
+    out = screen.resolve_target(42, {"name": "项目", "intent": "第二个项目"})
+    assert isinstance(out, str) and out.startswith("UNDECIDED:")
+    assert "It had to choose among these" in out and "#4 [text] '项目 02'" in out
+    assert third.via == "" and fourth.via == ""
+
+
+def test_intent_builds_the_listing_when_the_window_has_never_been_listed(monkeypatch, tmp_path):
+    """Fungi keeps listings in memory (there is no on-disk one to reload), so `intent=` has
+    to be able to cut the candidates itself — and to report the listing's own failure."""
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111"})
+    monkeypatch.setattr(screen, "_u32", _U32())
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: [
+            (_cand(1, "发送", "Button", (1000, 500, 1060, 530), ("Invoke",)), object())
+        ],
+    )
+    monkeypatch.setattr(
+        screen,
+        "_decider_ask",
+        lambda cfg, request: {"decision": "YES", "id": 1, "p": 0.9, "confidence": 0.9},
+    )
+
+    picked = screen.resolve_target(42, {"intent": "发送这条消息"})
+    assert isinstance(picked, screen.Target) and picked.name == "发送"
+    assert 42 in screen._session.listings  # the listing it had to build is kept for the caller
+
+    # A window that cannot be listed comes back as that error, not as a decider request.
+    screen._session.listings.pop(42)
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "minimized")
+    out = screen.resolve_target(42, {"intent": "发送这条消息"})
+    assert isinstance(out, str) and out.startswith("ERROR:") and "is minimized" in out
+
+
+def test_intent_is_offered_by_the_schema_and_gated_by_the_switch():
+    """`intent` is still desktop control: it lives behind the same pc_control switch, and
+    the model is told it exists (both in the property and in the tool description)."""
+    params = screen.SCHEMA["function"]["parameters"]["properties"]
+    assert "intent" in params and "decider.json" in params["intent"]["description"]
+    description = screen.SCHEMA["function"]["description"]
+    assert "intent=" in description and "input desktop" in description
+
+    out = screen._run(Config(), None, {"action": "click", "hwnd": 42, "intent": "发送"})
+    assert isinstance(out, str) and out.startswith("ERROR: screen control is off")
+
+
+def test_intent_travels_from_the_tool_call_to_the_decider_and_injects_nothing(
+    monkeypatch, tmp_path
+):
+    """The whole seam, through the real entry point: the argument reaches the resolver
+    (nothing in the dispatch needs to know about it), the decider is asked, and a refusal
+    comes back as the answer instead of a click."""
+    cfg = Config()
+    cfg.pc_control = True
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111"})
+    monkeypatch.setattr(screen, "_u32", _U32())
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: [
+            (_cand(1, "发送", "Button", (1000, 500, 1060, 530), ("Invoke",)), object())
+        ],
+    )
+    monkeypatch.setattr(
+        screen,
+        "_decider_ask",
+        lambda cfg, request: {"decision": "UNDECIDED", "id": 1, "p": 0.1, "threshold": 0.8},
+    )
+    monkeypatch.setattr(screen, "click_at", lambda *a, **k: pytest.fail("injected a click"))
+
+    out = screen._run(cfg, None, {"action": "click", "hwnd": 42, "intent": "发送这条消息"})
+    assert isinstance(out, str) and out.startswith("UNDECIDED:")
+
+
+def test_typing_by_intent_still_looks_for_a_control(monkeypatch, tmp_path):
+    """`type` resolves a target only when one was asked for — a bare `intent=` counts as
+    asking (the same rule the number and the name follow)."""
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111"})
+    box = _cand(1, "", "Edit", (1000, 500, 1100, 530), ("Value",))
+    _listed(42, box)
+    monkeypatch.setattr(
+        screen,
+        "_decider_ask",
+        lambda cfg, request: {"decision": "YES", "id": 1, "p": 0.9, "confidence": 0.9},
+    )
+    resolved: list[object] = []
+    monkeypatch.setattr(
+        screen, "resolve_target", lambda hwnd, args, **k: resolved.append(args) or box
+    )
+    monkeypatch.setattr(screen, "_guarded_input", lambda hwnd: (True, ""))
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "_focus_target", lambda hwnd, target: True)
+    monkeypatch.setattr(screen, "_read_back_settled", lambda hwnd, target: ("", "the box"))
+    monkeypatch.setattr(screen, "type_text", lambda text, **k: (len(text), None))
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+
+    out = screen._action_type(
+        {"hwnd": 42, "text": "hi", "intent": "the message box"}, None, None, None, None
+    )
+    assert resolved and resolved[0]["intent"] == "the message box"
+    assert "TYPE 2 chars" in str(out)

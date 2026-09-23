@@ -2880,3 +2880,83 @@ private 模式没有 IndexedDB → 退回今天的行为（这份内存，没了
   浏览器存下来的文件与源逐字节相同、IndexedDB 里的碎片也清空了。
 - 门禁：`python -m ruff check fungi tests` 干净 · `PYTHONIOENCODING=utf-8 python -m pytest tests -q`
   → **746 passed, 0 skipped**（本机装了 playwright：那 38 例浏览器用例真跑；没装的 runner 上会 skip，数字对不上不是 bug）。
+## 63. 桌控三件（2026-09-23 用户点名）：`intent=` 问本机的 decider、托盘浮窗停稳再点、锁屏如实报
+
+**用户原话**：「帮我将 flower 和 athand 中的新增功能整合进 fungi」→ 收窄成「**athand 照你说的**」。
+athand 是 2026-09-17 从 `fungi/tools/screen.py` 切出去单独发布的脚本（同一份代码、同一批实测注释）。
+这一节把它**切出去之后**改出来的三件事搬回来。其余差异是「一个脚本、一次调用一个进程、没有人可问」
+逼出来的形状（`selftest`、CLI、盘上的 listing/labels/strikes、`_escalate` 不提问）—— 那些**不搬**：
+Fungi 的 screen 工具在一个 agent 回合里跑，进程内的 `Session` 就是记忆，而且它有一个**用户**可问。
+
+### 63.1 `intent=`：号码可以由本机的一个决策服务来给
+
+工具自己的立场没变：**坐标不是调用方的**，每个手势仍然指向一个程序定位到的候选。变的是
+**谁来看那张编号图**。当模型读不出号码、或者好几个控件叫同一个名字时，`click` / `double_click` /
+`type` / `scroll` 可以改报 `intent=<这个手势是为了干什么>`，号码交给**这台机器配好的**决策服务。
+
+- **接缝只认配置文件与 HTTP**：`decider.json`（在 `config.json` 旁边，冻结后在 exe 旁边）或
+  `FUNGI_DECIDER` 环境变量，键是 `url` / `serve` / `ask` / `weights` / `k` / `timeout` / `wait` /
+  `autostart`。**代码里没有任何模型的名字，也不 import 任何模型**：模型的运行时与显存完全留在对面
+  （作者自己的 BiXian 是参考实现）。请求是一个 JSON 对象进、一个出：
+  `{intent, options:[{id,label,box}], image}` → `{decision, id, p, confidence, threshold, options, marked}`。
+- `weights` 是**开关**：它指的路径不在盘上，整个接缝就关掉，并说清它找的是哪个路径。
+- **什么时候问**：没有 `target=`/`name=` 而给了 `intent=`；或者 `name=` 命中好几个
+  （athand 那边多命中是 `hits[0]` 静默取第一个 —— 这里改成问 decider，它 decline 了就把歧义原样端出来，
+  仍然不猜）。
+- **fail-open，而且失败是字符串不是异常**：没配 · 权重不在 · 服务不应答 · 权重还在加载 ·
+  `UNDECIDED`（peak 没过阈值）—— 每一种都回一句人话，**动作不发生**。
+- 画给 decider 的那张图里，候选**先去壳**：窗口自己的壳（2×2 px）与渲染宿主（盖满客户区的 a11y 框）
+  实测能把 0.58/0.42 的注意全吃掉，而任务那一行落到 1e-6。最多 k 个，**保留原始编号顺序**
+  （模型看到的空间顺序才是人看界面的顺序）。图落在 `writable_dir(PROJECT_ROOT/'data','data')/decider/`，
+  请求里给的是路径 —— 对面自己读。
+- `autostart` 默认开（与 athand 同）：配了 `serve` 而没人应答就按
+  `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP` 起一个（日志在同一个目录里），然后等它读完权重。
+- **权限不变**：intent 仍然是桌控，仍然在 `pc_control` 那个开关后面（关掉 = 工具根本不进工具面）。
+
+### 63.2 托盘浮窗停稳再点（athand 2026-09-17 修的实测缺陷）
+
+通知区的溢出浮窗**边填边长大**，所以刚出现时读到的矩形可能指向隔壁那一格：实测第一次点击落在
+**邻居图标**上、把那个应用的面板打开了（唤醒的重试救回来了，但「点开陌生人面板」不该留着）。
+现在要等「浮窗自己的矩形 + 那一行的矩形」**连续两次采样不变**再点；到点还没停稳就用最后看到的
+那个候选（调用方的重试就是它的兜底），而且只有什么都没找到时才把它关掉。Fungi 这一份是原样搬回来
+的 —— 缺陷当初就在这里。
+
+### 63.3 锁屏、或者输入桌面不是本会话时，如实说
+
+`OpenInputDesktop` 能问出「现在接收输入的是哪个桌面」：不是 `Default`（`Screen-saver` / `Winlogon`）
+就是锁屏或屏保。那种状态下 `SendInput` 全部失败、`GetCursorPos` 失败、`GetForegroundWindow` 回 0、
+抓屏回来是空的 —— 以前这些一律报成「INJECTION FAILED」，也就是**把机器状态说成工具坏了**。
+
+- `desktop_problem()` 在**注入之前**把输入动作拒掉，回的是「机器锁着/屏保，什么都没发出去」；
+- **只读动作不受影响**：`windows`、`targets`、窗口 `shot` 仍然描述这台机器（锁屏时也能看）；
+- `grab_screen()` 抓不动时抛 `ScreenUnavailable`，由工具入口（`_run`）转成 `ERROR: …`；
+  整屏与窗口两条抓屏路径共用一个实现，所以诊断跟着每一张图走；
+- **判据必须能在测试桩下活着**：测试里的 `screen._u32` 是个小 Python 桩，没有 `OpenInputDesktop`；
+  所以 `input_desktop_name()` 对每个调用都容错，`""` 表示**说不准**（老 Windows、桩），
+  这跟「锁着」是两回事 —— 只有真报出别的名字才算诊断。
+
+### 63.4 没搬的（如实记）
+
+- **`selftest`（18 项自检）**：它验的是「一个脚本能不能在这台机器上驱动桌面」，Fungi 的等价物是
+  `tests/test_screen.py`（打桩）+ 真机验收配方，不需要第二套。
+- **CLI 与 `_dispatch` 的参数解析、盘上的 listing/labels/strikes**：一次调用一个进程的记忆问题，
+  Fungi 里 `Session` 就在进程内。
+- **`_raise_for_input`**（type/key 要求目标真在前台，否则拒绝）：athand 那边实测到「前台是别的窗口时
+  字打进别的窗口，而结果还报 done」。Fungi 这条路先走 `_guarded_input`（按应用自己的门把它抬起来），
+  取舍不同所以没搬 —— **但那个洞在 Fungi 这边同样存在**（`set_foreground` 失败时 `type` 会把字打进
+  前台那个窗口），值得单独做一次。
+
+### 63.5 验收
+
+`tests/test_screen.py`（+14 例，全部打桩：不碰真桌面、不摸真 UIA、不注入）：
+
+- 浮窗**停稳再点**（两次采样一致才回，且点的是停稳后的那个矩形）· 从不停稳的浮窗仍然交出最后一次
+  候选（不挂死、也不把它关掉）；
+- 抓不动时 `_run` 回 `ERROR: the screen could not be captured …` · 输入桌面不是 `Default` 时
+  **先拒注入**、`targets` 照常工作 · 测试桩下是「说不准」不是「锁着」；
+- `intent=` 没配 decider 时给出理由（并且不动手）· 配了 decider 时挑出正确候选、结果里带上
+  decider 的置信度 · `UNDECIDED` 时把问题交回调用方、不挑 · `name=` 多命中且没有 intent 时仍然是
+  原来那句 `controls match` · 多命中**带** intent 时交给 decider · 没有 listing 时先建一份再问 ·
+  schema 里有 `intent` 且仍受 `pc_control` 开关管 · 一个工具调用带着 intent 走完**不注入任何东西**。
+
+门禁：见 §62.6（同一棵树、同一次跑）。
