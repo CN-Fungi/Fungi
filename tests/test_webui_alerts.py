@@ -79,6 +79,10 @@ def _open_page(browser, room, path="/"):
     page = ctx.new_page()
     page.goto(url)
     page.wait_for_function("() => typeof Alerts === 'object'")
+    # Same rule as the three sibling modules: on a machine without a configured
+    # config.json the API-key modal covers the pane, and a modal that eats every
+    # click would make the sample lie (or time out, as it did in CI).
+    page.evaluate("() => document.getElementById('config-overlay')?.classList.remove('show')")
     return ctx, page
 
 
