@@ -157,3 +157,5 @@ Ghostworld是本人两个月前基于**光线投射**开发的3D渲染引擎，�
 9.13 添加了Computer Use能力！（虽然很鸡肋🥲）
 
 9.15 添加了Ghostworld桥接！
+
+9.24 复刻Jev，为Computer Use添加了可选决策层
