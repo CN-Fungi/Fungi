@@ -11,7 +11,11 @@ html,body{font-family:var(--font);font-size:16px;line-height:1.6;color:var(--tex
 #topbar button:active{color:var(--text)}
 #title-wrap{flex:1;min-width:0;display:flex;align-items:baseline;gap:0.5rem;overflow:hidden}
 #session-title{color:var(--text);font-size:0.95rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#model-name{color:var(--dim);font-size:0.72rem;font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#model-select{background:transparent;border:1px solid transparent;border-radius:var(--radius-xs);color:var(--dim);font-size:0.72rem;font-family:var(--mono);max-width:44%;padding:2px 4px;cursor:pointer}
+#model-select:focus{outline:none;color:var(--text);border-color:var(--accent)}
+#model-select.ok{border-color:var(--accent);color:var(--accent2)}
+#model-select.bad{border-color:var(--error-border);color:var(--error-text)}
+#model-select.busy{opacity:0.6}
 #chat-wrap{flex:1;min-height:0;position:relative;display:flex;flex-direction:column}
 #messages{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:1rem 0.8rem;display:flex;flex-direction:column;gap:0.8rem}
 /* ---- messages ---- */

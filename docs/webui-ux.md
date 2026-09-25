@@ -248,6 +248,9 @@ agent 气泡轨道漂移 + 进度环。
 3. 静态路由加 `/m`、`/m.css`、`/m.js`（沿用 `_send_static`）。
 4. `GET /lan` 端点。
 5. 现有 API 全部不动（2026-09-11 实况——GET：`/` `/m` `/app.js /common.js /style.css /motion.js /m.css /m.js` `/vendor/*` `/model` `/config-status` `/lan` `/asks` `/sessions` `/session` `/peers` `/consent-mode` `/comm-log` `/mail` `/events` `/spawn-pending`；POST：`/chat` `/retry` `/stop` `/resume` `/answer` `/mail/read` `/configure` `/save` `/new` `/consent-mode` `/upload` `/pickfile` `/comm-send`）。
+   - 2026-09-25 追加（spec §66，只增不改）：`GET /model` 多回一个 `models`（下拉列表那份可选列表）；
+     新增 `POST /model`（切模型 + 自动探一次调用）。`/configure` 的 Model 框从「覆盖」改成「添加」。
+     缓存里的老页面只读 `d.model`，两处都还是它要的形状，照旧能用。
 
 ## GUI：手机端页（当时写在 `fungi/gui.py`，2026-09-10 起是 `fungi/gui/mobile.py`）
 

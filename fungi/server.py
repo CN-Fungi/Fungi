@@ -22,9 +22,16 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from fungi import landing, runlog, session
 from fungi.agent import SYSTEM_PROMPT, Agent, public_messages
-from fungi.config import PROJECT_ROOT, RESOURCE_ROOT, load_config, save_config
+from fungi.config import (
+    PROJECT_ROOT,
+    RESOURCE_ROOT,
+    load_config,
+    remember_model,
+    save_config,
+)
 from fungi.events import Sink
 from fungi.hub.app import RangeNotSatisfiableError, range_window, safe_name
+from fungi.llm import probe_model
 from fungi.tools.ask import resolve_ask
 from fungi.tools.mcp import mcp_extra_tools
 from fungi.trilayer import TriLayer
@@ -844,7 +851,8 @@ class YesSirHandler(BaseHTTPRequestHandler):
         ):  # flat vendor dir; no traversal
             self._send_static(route[1:])  # web/vendor/<file> — keep the dir prefix
         elif route == "/model":
-            self._send_json({"model": load_config().model})
+            cfg = load_config()
+            self._send_json({"model": cfg.model, "models": cfg.model_list})
         elif route == "/config-status":
             self._send_json({"configured": load_config().configured})
         elif route == "/lan":
@@ -990,6 +998,29 @@ class YesSirHandler(BaseHTTPRequestHandler):
         elif url.path == "/mail/read":
             data = self._read_body()
             self._send_json(self.runtime.mail_read(str(data.get("id") or "")))
+        elif url.path == "/model":
+            # spec §66: the header's dropdown calls this. Switching is a write
+            # plus one tiny completion — the page is told both facts separately,
+            # because "saved" and "and it answers" are not the same claim.
+            name = str(self._read_body().get("model") or "").strip()
+            if not name:
+                self._send_json({"ok": False, "detail": "no model given"}, status=400)
+                return
+            cfg = load_config()
+            fresh = remember_model(cfg, name)
+            save_config(cfg)
+            reachable, detail = probe_model(cfg.model, cfg.endpoint, cfg.api_key)
+            runlog.note("model switched to %s (new=%s, reachable=%s)", cfg.model, fresh, reachable)
+            self._send_json(
+                {
+                    "ok": True,
+                    "model": cfg.model,
+                    "models": cfg.model_list,
+                    "fresh": fresh,
+                    "reachable": reachable,
+                    "detail": detail,
+                }
+            )
         elif url.path == "/configure":
             data = self._read_body()
             cfg = load_config()
@@ -998,9 +1029,12 @@ class YesSirHandler(BaseHTTPRequestHandler):
             if data.get("endpoint"):
                 cfg.endpoint = data["endpoint"]
             if data.get("model"):
-                cfg.model = data["model"]
+                # §66: the modal's Model box adds to the pickable list instead of
+                # overwriting the one in use — the header's dropdown reads the
+                # same list, so a name typed once is one click away afterwards.
+                remember_model(cfg, str(data["model"]))
             save_config(cfg)
-            self._send_json({"ok": True})
+            self._send_json({"ok": True, "models": cfg.model_list})
         elif url.path == "/save":
             data = self._read_body()
             existing = self.runtime.sessions_load(data.get("id", ""))

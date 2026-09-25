@@ -11,7 +11,7 @@
   /* Build marker: bump per web/ change so any WebUI instance can self-identify
      (console + window.__FUNGI_WEB_VER) — stale cache vs new server is otherwise
      indistinguishable from the outside. */
-  window.__FUNGI_WEB_VER = 'web-tok-rate';
+  window.__FUNGI_WEB_VER = 'web-model-picker';
   try { console.info('[fungi-web]', window.__FUNGI_WEB_VER); } catch (e) {}
   /* ---------- http ---------- */
   /* One fetch wrapper. Mobile inits a token prefix + 403 hook; desktop inits
@@ -1730,6 +1730,81 @@
     };
   }
 
+  /* ---------- header model picker (spec §66) ---------- */
+  /* 用户 2026-09-25：「在左上角原来显示模型的位置也改成下拉列表」。原来那里只是**印着**
+     当前模型（`#model-name`），现在是个下拉列表，选中哪个就用哪个；列表就是设置页那个输入框
+     往里加的那一份（config.json 的 `model_list`），两个界面因此不会各说各话。
+
+     切换 = 一次 POST + 一次极小的补全调用，回来的两件事**分开报**：状态行说一句话
+     （那是条转瞬即逝的通道，下一轮对话就把它顶掉），select 自己留一个颜色（ok/bad，
+     `MODEL_NOTE_MS` 之后褪掉，title 里留着完整句子）—— 句子没了，那次测试的结果还在。 */
+  const MODEL_NOTE_MS = 8000;
+
+  function mountModelPicker(opts) {
+    opts = opts || {};
+    const el = document.getElementById(opts.id || 'model-select');
+    const note = opts.note || function () {};
+    const L = opts.labels || {};
+    if (!el) return null;  // 旧缓存的页面：这里没有下拉列表，脚本其余部分照常活着
+    let busy = false, fade = null;
+
+    function sentence(d) {
+      if (d.reachable) {
+        const served =
+          d.detail && d.detail !== d.model ? ' (' + (L.served || 'served as') + ' ' + d.detail + ')' : '';
+        return '\u2713 ' + d.model + ' ' + (L.ok || 'answers') + served;
+      }
+      return '\u2717 ' + d.model + ' ' + (L.bad || 'failed') + ' \u2014 ' + (d.detail || '');
+    }
+    function paint(models, current) {
+      const list = (models || []).slice();
+      if (current && list.indexOf(current) < 0) list.unshift(current);
+      el.innerHTML = list
+        .map(m => '<option value="' + escapeHtml(m) + '">' + escapeHtml(m) + '</option>')
+        .join('');
+      if (current) el.value = current;
+    }
+    function flash(cls, text) {
+      clearTimeout(fade);
+      el.classList.remove('ok', 'bad', 'busy');
+      el.classList.add(cls);
+      el.title = text;
+      fade = setTimeout(() => el.classList.remove('ok', 'bad'), MODEL_NOTE_MS);
+    }
+    async function load() {
+      try {
+        const d = await (await fetchJSON('/model')).json();
+        paint(d.models, d.model);
+        return d;
+      } catch (e) {
+        return null;
+      }
+    }
+    async function use(name) {
+      if (busy || !name) return null;
+      busy = true;
+      flash('busy', name);
+      note((L.switching || 'Switching to') + ' ' + name + '\u2026');
+      try {
+        const d = await (await postJSON('/model', { model: name })).json();
+        paint(d.models, d.model);
+        const said = sentence(d);
+        flash(d.reachable ? 'ok' : 'bad', said);
+        note(said);
+        return d;
+      } catch (e) {
+        flash('bad', String(e));
+        note((L.bad || 'failed') + ' \u2014 ' + e);
+        return null;
+      } finally {
+        busy = false;
+      }
+    }
+    el.addEventListener('change', () => { use(el.value); });
+    load();
+    return { load, use };
+  }
+
   window.FungiCommon = {
     initHttp, url, fetchJSON, postJSON,
     escapeHtml, fmtDate, getSessionTitle,
@@ -1737,6 +1812,7 @@
     initTransfer,
     buildToolCard, fillToolResult, attachSpawnClick,
     initAsks, initPendingAsks, initMailUnread, initSessionAlerts, tokenRate,
+    mountModelPicker,
     initPane, stripSilent, humanEcho,
     markTs, insertByTs, askTextOfCall, linkifyPaths, buildFileCard, humanBytes,
     renderTranscript, renderLiveEvents, whenLabel,

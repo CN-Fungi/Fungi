@@ -1,11 +1,19 @@
 """Tests for LLM delta assembly (offline)."""
 
+import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from fungi.llm import LLMAbortedError, LLMError, LLMResult, _apply_delta, stream_chat
+from fungi.llm import (
+    LLMAbortedError,
+    LLMError,
+    LLMResult,
+    _apply_delta,
+    probe_model,
+    stream_chat,
+)
 
 
 def test_tool_call_single_complete():
@@ -217,3 +225,75 @@ def test_stream_chat_early_close_without_finish_signal_raises():
         assert "finish signal" in str(excinfo.value)
     finally:
         server.shutdown()
+
+
+def test_probe_model_asks_cheaply_and_reports_the_served_name():
+    """§66：切模型之后自动测一次调用。探针是**非流式**的一次极小补全——它要的是
+    「这个模型答不答」，不是一轮对话；而且只有非流式才好上 15 秒的硬期限。"""
+    seen: dict = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            seen.update(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            payload = json.dumps({"model": "served-name", "choices": []}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, fmt, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ok, detail = probe_model(
+            "asked-name", f"http://127.0.0.1:{server.server_address[1]}/v1", "k"
+        )
+    finally:
+        server.shutdown()
+
+    assert (ok, detail) == (True, "served-name"), "provider 说它服务的是谁，也一并报上来"
+    assert seen["model"] == "asked-name", "问的是要切过去的那个名字"
+    assert seen["stream"] is False and "tools" not in seen, "不是一轮对话：不流式、不带工具"
+    assert 0 < seen["max_tokens"] <= 16, "只要几个 token，别为一次测试花钱"
+
+
+def test_probe_model_hands_back_the_providers_own_words():
+    """失败时把 provider 的原话带回去：设置页要显示的就是它（401/404 的正文最有用）。"""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = b'{"error": {"message": "model not found"}}'
+            self.send_response(404)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        ok, detail = probe_model("m", f"http://127.0.0.1:{server.server_address[1]}/v1", "k")
+    finally:
+        server.shutdown()
+
+    assert ok is False
+    assert "404" in detail and "model not found" in detail
+
+
+def test_probe_model_gives_up_on_an_endpoint_nobody_answers():
+    """连不上也要有话说，而且必须**立刻**回来：那条路是用户最常见的失败（地址打错）。"""
+    import socket
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    dead_port = probe.getsockname()[1]
+    probe.close()  # 没人监听这个端口了
+
+    ok, detail = probe_model("m", f"http://127.0.0.1:{dead_port}/v1", "k", timeout=2)
+
+    assert ok is False and "Connection failed" in detail

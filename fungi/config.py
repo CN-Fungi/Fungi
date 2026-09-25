@@ -78,6 +78,11 @@ class Config:
     api_key: str = DEFAULT_API_KEY
     endpoint: str = DEFAULT_ENDPOINT
     model: str = DEFAULT_MODEL
+    # The pickable models, most recently used first, `model` always among them
+    # (spec §66). The settings page and the WebUI header render this as a
+    # dropdown, so moving between the two or three models somebody actually uses
+    # never means retyping a name. Grows by adding — see remember_model.
+    model_list: list[str] = field(default_factory=list)
     # Per-layer model override: layer number (1/2/3) -> model name.
     # Layers without an entry fall back to `model` (see model_for).
     layer_models: dict[int, str] = field(default_factory=dict)
@@ -134,6 +139,23 @@ class Config:
     def model_for(self, layer: int) -> str:
         """Model for one TriLayer layer: per-layer override if set, else `model`."""
         return self.layer_models.get(layer) or self.model
+
+
+def remember_model(cfg: Config, model: str) -> bool:
+    """Put `model` at the front of `cfg.model_list` and make it the model in use.
+
+    spec §66 (user, 2026-09-25: "原先的输入框从覆盖变成添加, 如果与之前模型不一样就新添"):
+    the box adds, it never overwrites the pickable list. The model being switched
+    away from stays one click away, and typing the same name again does not add a
+    second row. Returns True when the name was new.
+    """
+    name = model.strip()
+    if not name:
+        return False
+    fresh = name not in cfg.model_list
+    cfg.model_list = [name, *[m for m in cfg.model_list if m != name]]
+    cfg.model = name
+    return fresh
 
 
 # Explorer's "Copy as path" hands over `C:\Users\me\GhostWorld`, and a lone
@@ -260,6 +282,15 @@ def load_config(path: Path | None = None) -> Config:
             cfg.endpoint = data["endpoint"]
         if data.get("model"):
             cfg.model = data["model"]
+        listed = data.get("model_list")
+        if isinstance(listed, list):
+            # dict.fromkeys: a hand-edited file with the same name twice must not
+            # paint two identical rows in the dropdown.
+            cfg.model_list = list(dict.fromkeys(m for m in (str(x).strip() for x in listed) if m))
+        # The model in use is always one of the pickable ones: the dropdown would
+        # otherwise open with nothing selected (spec §66).
+        if cfg.model not in cfg.model_list:
+            cfg.model_list.insert(0, cfg.model)
         models = data.get("models")
         if isinstance(models, dict):
             cfg.layer_models = {
@@ -314,6 +345,11 @@ def save_config(cfg: Config, path: Path | None = None) -> None:
     }
     if cfg.max_tokens:
         data["max_tokens"] = cfg.max_tokens
+    # Only when there is something to switch to: a one-entry list is just `model`
+    # spelled twice, and writing it would grow every user's config.json (§66).
+    others = list(dict.fromkeys(m for m in cfg.model_list if m != cfg.model))
+    if others:
+        data["model_list"] = [cfg.model, *others]
     if cfg.layer_models:
         data["models"] = {str(k): cfg.layer_models[k] for k in sorted(cfg.layer_models)}
     if cfg.system_prompt:

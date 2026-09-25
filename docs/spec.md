@@ -3103,3 +3103,96 @@ token数得到。」
   `scripts/make_ringtones.py` / `tests/test_hub_app.py`，共 112+/49-，全是手写换行与内联 dict 的旧形态），
   单独落一个纯格式提交 `254d8fd`，与本节的改动互不掺和。`scripts/check.ps1` 那一步**本来就是** `--check`
   （它头部注释也写着"改写无关文件不是门禁该干的事"）—— 漂移是树没跟上钉死的 `ruff==0.13.0`，不是脚本的错。
+
+
+## 66. 模型下拉列表（2026-09-25 用户点名）：启动器与 WebUI 头部都改成「选中哪个用哪个」
+
+**用户原话**（一条一条来的）：「启动器除现有输入框以外，添加模型下拉列表，下拉后选中哪个使用哪个」
+「原先的输入框从覆盖变成添加，如果与之前模型不一样就新添。添加后自动测试模型调用」
+「对于WebUI，需要你在左上角原来显示模型的位置也改成下拉列表，有关设计与启动器类似」。
+
+### 66.1 一份列表，两个界面读它
+
+- `config.json` 多一个 `model_list`：用过/加过的模型，**最近用的在最前**，正在用的那个永远在里头
+  （`load_config` 兜底插入 —— 否则下拉列表会开着是空的）。
+- **只有列表里还有别的名字时才写这个键**：从没切过模型的人，`config.json` 一个字节都不变。
+- `remember_model(cfg, model)`：把名字挪到最前 + 设成 `cfg.model`，返回「是不是新名字」；
+  同一个名字再来一次不加第二行（用户要的是"与之前不一样就新添"，不是每次回车都长一行）。
+- 手改出来的重复项 / 空串 / 全角空格读进来会被去重丢掉（`dict.fromkeys`），下拉列表里不会出现两行一样。
+- **没有第二份真相**：启动器、WebUI 头部、`/configure` 弹窗读写的都是这一个键。
+
+### 66.2 启动器（`fungi/gui/config.py`）
+
+- 「模型」那一行现在是 **下拉列表 + 输入框**：列表 = 可选模型（当前那个选中），框 = 添加。
+- 下拉选中：写盘 → 自动测一次调用 → 状态行「已切换到 X」。
+- 输入框回车：**添加**（不是覆盖）→ 进列表 + 切过去 → 自动测一次 → 「已添加并切换到 X」；
+  框清空等下个名字 —— 框里不再印当前模型（那是下拉列表的活儿）。
+- 探测走子线程（`llm.PROBE_TIMEOUT = 15`s 的硬期限），结果落到 `_probe_result` 由 250ms 的 `QTimer`
+  取走（这一页的老办法：不用 Signal 传参）—— **界面线程不许等网络**（`_refresh_bixian` 立的规矩）。
+- 结果说两处：`model_status` 一行（`✓ X 可用`，provider 报的名字和自己不一样就附上；失败 `✗ X 调不通：原话`）
+  + 失败再来一条 `InfoBar.error`（6 秒）。**调不通不把选择撤回去**：用户可能就是要拿它当靶子试。
+- `_pick_model` 用 `_loading_models` 挡住「程序自己填列表」触发的 `currentIndexChanged`：
+  否则每进一次页面就等于自己切了一次模型（要写盘 + 发一次请求）。
+- 探测期间用户又切了模型：那份回来的结果说的是上一个，直接丢掉（`model != load_config().model`）。
+
+### 66.3 WebUI（`web/common.js::mountModelPicker`，两个壳共用）
+
+- 头部那个只读的 `#model-name`（span，`/model` 一来就写进去）变成 `#model-select`（select）——
+  桌面上就是用户说的「左上角原来显示模型的位置」，手机壳 `/m` 顶上同一份实现（都是 `mountModelPicker`）。
+- `GET /model` → `{model, models}`；`POST /model {model}` → 写盘 + 探一次，回
+  `{ok, model, models, fresh, reachable, detail}`：**`ok` = 存住了，`reachable` = 它答了**（两件事分开报，
+  不是同一个断言）。
+- 结果也是两处：`#status` 一句话（下一轮对话会把它顶掉，所以那条通道只能当"顺口一说"）+
+  select 自己留颜色（`.ok` / `.bad`，8 秒后褪，完整那句留在 `title` 里）—— 句子没了，那次测试的结果还在。
+- 老缓存页面（没有 `#model-select`）不炸：`mountModelPicker` 找不到元素就返回 null，脚本其余部分照旧。
+- `/configure`（首次配置弹窗那个 Model 框）也从「覆盖」改成「添加」：WebUI 里键入过的名字，
+  之后就在头部下拉列表里。
+
+### 66.4 探针为什么不是 `stream_chat`
+
+`fungi/llm.py::probe_model`：**非流式**发一次极小补全（`max_tokens = PROBE_MAX_TOKENS = 16`，
+`stream: false`，不带 tools，prompt 就一个 "ping"），只要一个事实 + provider 说它服务的模型名。
+`stream_chat` 不合适：它的 `READ_TIMEOUT = 600` 是**每次读**的超时，探针要的是一条硬期限
+（15 秒），而且流式那一整套（SSE 解析、tool_call 拼装、错误 payload 落盘）在"它答不答"这个问题上
+一个字都用不上。失败时把 provider 的原话（`HTTP 401: …`）原样带回去 —— 设置页要显示的就是它。
+
+### 66.5 验收
+
+- `tests/test_config.py`（3 条）：列表round-trip（加/去重/切回，且只有一个名字时不写这个键）、
+  手写文件只给了 `model` 时下拉列表不许空、手写重复项被去掉。
+- `tests/test_llm.py`（3 条）：探针只花几个 token（`stream: false`、不带 tools、`max_tokens ≤ 16`）、
+  把 provider 报的模型名带回来、失败带回原话、无人监听的端口要**立刻**回 `Connection failed`。
+- `tests/test_gui.py`（2 条）：下拉选中 / 输入框添加都写盘 + 自动测（`probe_model` 打桩）+ 状态行出结果 +
+  同名不添第二行；调不通时状态行是 `✗` 且选择不被撤回。
+- `tests/test_webui_models.py`（3 条，真 Chromium + 真 `RoomServer` + 打桩的探针）：桌面下拉列表 =
+  `config.json` 那份（`#model-name` 已不在页面上）→ 选一个 → 自动测 → 写盘（旧的还在列表里）→ `ok` 颜色 +
+  状态行；调不通 → `bad` 颜色 + provider 原话，选择不撤回；手机 `/m` 同一套断言。
+- 修前红（`git stash push -- <源文件>`）：见 §66.6。
+- 门禁（最终树）：见 §66.6。
+
+### 66.6 修前红与门禁
+
+- **修前红**（`git stash push -- fungi/config.py fungi/llm.py fungi/server.py fungi/gui/config.py web`，新用例
+  全留在工作区；回合后 `git stash pop` 干净）：
+  - `tests/test_config.py` → **3 failed**（`module 'fungi.config' has no attribute 'remember_model'`、
+    两处 `'Config' object has no attribute 'model_list'`）；
+  - `tests/test_gui.py -k "model or enter_saves"` → **3 failed**（`fungi.gui.config` 没有 `llm_mod`；
+    改过契约那条是 `assert 'orig-model' == ''` —— 老代码把当前模型摆在框里，正好撞上新规矩）；
+  - `tests/test_llm.py` → **1 error，整个文件收起**（`from fungi.llm import probe_model` 导不出来）；
+  - `tests/test_webui_models.py` → **3 errors**（`fungi.server` 没有 `probe_model`）。
+  改回实现后这 12 条全绿。
+- **改了一条老用例的契约（不是重钉偶然行为）**：`test_enter_saves_config_from_any_field` 原来把「模型框
+  回车 = 保存」也算在内，而用户这一条点名要的就是**把模型框从「覆盖」改成「添加」**。现在它只钉 key /
+  接口地址两格，顺带断言模型不在输入框里、在下拉列表里选中（`currentText() == "orig-model"`）；模型那
+  一格的新契约由两条新用例钉。修前红那一轮里它正是红的。
+- **合并的账单（远端 09-23 那条测试基建改动）**：`test: a fresh clone counts as a machine too` 让测试沙箱不再
+  继承本机的真实 `config.json`（改成 `{}`）→ `/config-status` 答「未配置」→ API-key 弹层上屏。
+  alerts / friend / sessions / transfer 四个浏览器用例文件早就有那句 `config-overlay` 放行，
+  `tests/test_webui_rate.py`（本批写的，那会儿本机有真 key，弹层从没上过屏）漏了它，桌面那两条用例点
+  `#send` 被弹层挡到 30 秒超时 —— 合完第一次门禁的 4 failed 里就有它俩。已按同一句补上，并给本批两个新
+  浏览器文件也装上（那边沙箱配置里写了 key，弹层本不该出现，这句是双保险）。
+- **这棵树上的一份打包件不算数**：用户桌面上那份 `Fungi.exe`（`_internal\web\common.js` 里
+  `mountModelPicker` 出现 0 次）里没有 §64/§65/§66 和远端 v0.9.0 —— 换 exe 之前他在启动器与 WebUI 里
+  都看不到下拉列表。
+- 门禁（最终树）：`PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **776 passed**（332s）；
+  `python -m ruff check .`、`python -m ruff format --check .` 全绿；工作区除用户自己的 `shots/` 外干净。

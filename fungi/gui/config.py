@@ -5,6 +5,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (
@@ -25,6 +26,7 @@ from qfluentwidgets import (
 )
 
 from .. import config as config_mod
+from .. import llm as llm_mod
 from ..config import DEFAULT_API_KEY, PROJECT_ROOT
 from ..tools.video import _HEALABLE, _module_available, _video_ready
 from . import ring
@@ -74,10 +76,25 @@ class ConfigPage(QWidget):
         root.addWidget(_row("接口地址", self.endpoint_edit))
 
         self.model_edit = LineEdit()
-        self.model_edit.setFixedWidth(360)
-        root.addWidget(_row("模型", self.model_edit))
+        self.model_edit.setFixedWidth(240)
+        # 模型这一行（spec §66，用户 2026-09-25「添加模型下拉列表，下拉后选中哪个使用哪个 /
+        # 原先的输入框从覆盖变成添加」）：下拉列表 = 能用的模型，选中哪个就用哪个；右边那个
+        # 输入框是「添加」——回车把新名字加进列表并切过去，然后自动测一次调用。
+        self.model_combo = ComboBox()
+        self.model_combo.setFixedWidth(220)
+        self.model_combo.currentIndexChanged.connect(self._pick_model)
+        root.addWidget(_row("模型", self.model_combo, self.model_edit))
+        self.model_status = BodyLabel()
+        self.model_status.setWordWrap(True)
+        root.addWidget(self.model_status)
+        # 探测跑在子线程里，结果落在这儿由定时器取走（这一页的老办法：不用 Signal 传参）
+        self._probe_result: tuple[str, bool, str] | None = None
+        self._probe_timer = QTimer(self)
+        self._probe_timer.setInterval(250)
+        self._probe_timer.timeout.connect(self._poll_probe)
+        self._loading_models = False  # 程序自己填下拉列表时不算用户的选择
 
-        # 没有保存按钮：三个输入框回车即写盘（见文件末尾 returnPressed 接线），
+        # 没有保存按钮：输入框回车即写盘（见下面的 returnPressed 接线），
         # 用鼠标点走不算（editingFinished 故意不接）。
         root.addSpacing(4)
 
@@ -299,10 +316,12 @@ class ConfigPage(QWidget):
         for edit in (self.key_edit, self.endpoint_edit, self.model_edit):
             edit.textChanged.connect(self._refresh_status)
         # Enter commits from whichever field you are in, exactly like 保存配置
-        # (which also clears all three afterwards: the key never lingers on
+        # (which clears the key field afterwards: the key never lingers on
         # screen). editingFinished would save on tab-out too — not wanted.
-        for edit in (self.key_edit, self.endpoint_edit, self.model_edit):
+        for edit in (self.key_edit, self.endpoint_edit):
             edit.returnPressed.connect(self._save)
+        # 模型那格回车是「添加」不是「保存」（spec §66）：加进下拉列表、切过去、测一次
+        self.model_edit.returnPressed.connect(self._add_model)
         self._load_fields()
         self._refresh_status()
 
@@ -449,9 +468,10 @@ class ConfigPage(QWidget):
             f"当前 {mask}（留空 = 保持不变）" if mask else "API Key（留空 = 保持不变）"
         )
         self.endpoint_edit.setPlaceholderText("留空 = 保持不变")
-        self.model_edit.setPlaceholderText("留空 = 保持不变")
         self.endpoint_edit.setText(cfg.endpoint)
-        self.model_edit.setText(cfg.model)
+        # 模型不再住在这个框里：当前用的是哪个由下拉列表显示，框是「添加」那一格（spec §66）
+        self.model_edit.clear()
+        self._load_models(cfg)
         self.key_edit.clear()  # 只有掩码在占位符里：真 key 从不上屏
         # Bixian 两格同理：框里显示的就是盘里存的那份（argv 拼回一行）
         self.bixian_url.setText(str(cfg.decider.get("url") or ""))
@@ -463,7 +483,9 @@ class ConfigPage(QWidget):
         key = self.key_edit.text().strip() or cfg.api_key
         state = "已配置" if key and key != DEFAULT_API_KEY else "未配置（使用占位 key，无法对话）"
         self.status.setText(
-            f"当前状态：{state}\n改完按回车即保存（三个输入框各自生效；留空 = 保持不变）"
+            f"当前状态：{state}\n"
+            f"改完按回车即保存：API Key / 接口地址留空 = 保持不变；"
+            f"模型那格回车 = 添加并切换（当前 {cfg.model}）"
         )
 
     def _save(self) -> None:
@@ -472,15 +494,114 @@ class ConfigPage(QWidget):
             cfg.api_key = self.key_edit.text().strip()
         if self.endpoint_edit.text().strip():
             cfg.endpoint = self.endpoint_edit.text().strip()
-        if self.model_edit.text().strip():
-            cfg.model = self.model_edit.text().strip()
         config_mod.save_config(cfg)
         # 保存后回到当前值（不是清空）：框里始终显示的就是正在用的配置
         self._load_fields()
         self._refresh_status()
         InfoBar.success(
-            "已保存", "模型配置已写入 config.json", duration=2500, parent=self.window_ref
+            "已保存", "API Key / 接口地址已写入 config.json", duration=2500, parent=self.window_ref
         )
+
+    # ---------- 模型下拉列表（spec §66） ----------
+
+    def _load_models(self, cfg) -> None:
+        """把可选的模型画进下拉，并选中正在用的那个。
+
+        `_loading_models` 挡住程序填空触发的 currentIndexChanged：那一下不是用户的选择，
+        否则每进一次页面就等于自己切了一次模型（还要写盘 + 发一次测试请求）。
+
+        列表自己把「正在用的那个」摆在最前（`load_config` 也是这么保证的）—— 这样即使
+        有人递给这一页一个手搓的 `Config`（`model_list` 空着），下拉列表也不会开着是空的。
+        """
+        names = [cfg.model, *[m for m in cfg.model_list if m != cfg.model]] if cfg.model else []
+        self._loading_models = True
+        try:
+            self.model_combo.clear()
+            self.model_combo.addItems(names)
+            index = self.model_combo.findText(cfg.model)
+            if index >= 0:
+                self.model_combo.setCurrentIndex(index)
+        finally:
+            self._loading_models = False
+        self.model_edit.setPlaceholderText("输入新模型名，回车 = 添加并切换")
+        extra = len(names) - 1
+        self.model_status.setText(
+            f"当前用 {cfg.model}" + (f" · 列表里还有 {extra} 个可切" if extra > 0 else "")
+        )
+
+    def _write_model(self, model: str) -> bool:
+        """把「用哪个模型」写盘（下拉选中与输入框添加共用）。返回它是不是新名字。"""
+        cfg = config_mod.load_config()
+        fresh = config_mod.remember_model(cfg, model)
+        config_mod.save_config(cfg)
+        return fresh
+
+    def _pick_model(self, index: int) -> None:
+        """下拉列表里选中哪个就用哪个，然后自动测一次调用（spec §66）。"""
+        if self._loading_models:
+            return
+        name = self.model_combo.itemText(index)
+        cfg = config_mod.load_config()
+        if not name or name == cfg.model:
+            return
+        self._write_model(name)
+        self._load_models(config_mod.load_config())
+        self._refresh_status()
+        self._probe(name, "已切换到")
+
+    def _add_model(self) -> None:
+        """输入框回车 = 添加，不是覆盖（spec §66）：「如果与之前模型不一样就新添」。
+
+        加进列表、切过去、测一次调用。名字与之前一样时不再重复添一行（`remember_model`
+        去重），但仍然是一次「就用它」。
+        """
+        name = self.model_edit.text().strip()
+        if not name:
+            return
+        fresh = self._write_model(name)
+        self.model_edit.clear()
+        self._load_models(config_mod.load_config())
+        self._refresh_status()
+        self._probe(name, "已添加并切换到" if fresh else "已切换到")
+
+    def _probe(self, model: str, prefix: str) -> None:
+        """写盘之后问一次极小补全，看这个模型到底答不答（spec §66）。
+
+        网络走子线程（15 秒上限），结果落到 `_probe_result` 由 `_probe_timer` 取走：
+        这一页不许在界面线程里等网络（进页面不联网，那是 `_refresh_bixian` 立的规矩）。
+        """
+        cfg = config_mod.load_config()
+        self.model_status.setText(f"{prefix} {model} · 正在测试这次调用…")
+        self._probe_result = None
+        self._probe_timer.start()
+
+        def run() -> None:
+            self._probe_result = (model, *llm_mod.probe_model(cfg.model, cfg.endpoint, cfg.api_key))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _poll_probe(self) -> None:
+        got = self._probe_result
+        if got is None:
+            return
+        self._probe_result = None
+        self._probe_timer.stop()
+        model, ok, detail = got
+        if model != config_mod.load_config().model:
+            return  # 探测期间用户又切了：这份结果说的是上一个模型，别报
+        self.model_status.setText(self._model_sentence(model, ok, detail))
+        if ok:
+            InfoBar.success("模型可用", f"{model} 调通了", duration=2500, parent=self.window_ref)
+        else:
+            InfoBar.error("模型调不通", f"{model}：{detail}", duration=6000, parent=self.window_ref)
+
+    @staticmethod
+    def _model_sentence(model: str, ok: bool, detail: str) -> str:
+        """探测结果 → 一句人话（措辞归这一页；llm 那边只回事实）。"""
+        if ok:
+            served = f"（provider 报的是 {detail}）" if detail and detail != model else ""
+            return f"✓ {model} 可用{served}"
+        return f"✗ {model} 调不通：{detail}"
 
     def _toggle_diary(self, checked: bool) -> None:
         """实验性日记开关：即时写盘，下一轮对话生效（agent 每轮重建）。"""

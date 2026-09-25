@@ -1144,7 +1144,12 @@ document.getElementById('theme-switch').addEventListener('click', function () {
 setBusy(false);
 if (!TOKEN) document.getElementById('rescan-overlay').classList.remove('hide'); // no token: rescan required
 else document.getElementById('rescan-overlay').classList.add('hide'); // valid token: drop the rescan card
-fetchJSON('/model').then(r => r.json()).then(d => { document.getElementById('model-name').textContent = d.model || ''; }).catch(() => {});
+/* 头部那个模型（spec §66）：原来是印上去的字，现在是下拉列表，选中哪个就用哪个。 */
+FC.mountModelPicker({
+  note: t => { status.textContent = t; },
+  labels: { switching: '正在切换到', ok: '可用', bad: '调不通', served: '实际是' },
+});
+
 loadSessions().then(() => {
   let saved = null;
   try { saved = localStorage.getItem('fungi-session-m'); } catch (e) {}

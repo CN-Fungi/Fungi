@@ -1249,7 +1249,13 @@ def test_enter_joins_room_and_ignores_a_press_mid_scan(window, monkeypatch):
 
 
 def test_enter_saves_config_from_any_field(window, monkeypatch):
-    """设置页三个输入框：预填当前值（key 只露掩码），回车 = 保存，保存后回到当前值。"""
+    """设置页两个输入框：预填当前值（key 只露掩码），回车 = 保存，保存后回到当前值。
+
+    模型那一格 2026-09-25（§66）起**不在**这条规矩里了 —— 用户：「原先的输入框从覆盖变成添加」。
+    它的回车是「添加并切换」，当前用的是哪个由旁边那个下拉列表显示；那条契约由
+    `test_the_model_row_picks_from_the_list_and_the_box_adds` 与
+    `test_a_model_that_does_not_answer_is_reported_not_reverted` 钉。
+    """
     from fungi.config import Config
 
     state = {
@@ -1265,9 +1271,11 @@ def test_enter_saves_config_from_any_field(window, monkeypatch):
     page._load_fields()
     # 已在用的值摆在框里；key 本身不上屏，占位符里是可辨认的掩码
     assert page.endpoint_edit.text() == "https://orig.example/v1/chat/completions"
-    assert page.model_edit.text() == "orig-model"
     assert page.key_edit.text() == ""
     assert "sk-or…-key" in page.key_edit.placeholderText()
+    # 模型不在输入框里（那是「添加」那一格）：正在用的那个在下拉列表里选中
+    assert page.model_edit.text() == ""
+    assert page.model_combo.currentText() == "orig-model"
 
     page.key_edit.setText("sk-enter-key-1234")
     QTest.keyClick(page.key_edit, Qt.Key_Return)
@@ -1279,11 +1287,6 @@ def test_enter_saves_config_from_any_field(window, monkeypatch):
     QTest.keyClick(page.endpoint_edit, Qt.Key_Return)
     assert state["cfg"].endpoint == "https://example.invalid/v1/chat/completions"
     assert page.endpoint_edit.text() == "https://example.invalid/v1/chat/completions"
-
-    page.model_edit.setText("deepseek-v4-flash-vision-exp")
-    QTest.keyClick(page.model_edit, Qt.Key_Return)
-    assert state["cfg"].model == "deepseek-v4-flash-vision-exp"
-    assert page.model_edit.text() == "deepseek-v4-flash-vision-exp"
 
     # 空框 = 保持不变（老语义没变）
     page.endpoint_edit.clear()
@@ -1710,3 +1713,103 @@ def test_tray_icon_flashes_while_mail_is_unread(window, ringing):
     assert "未读" in tray.toolTip()
     tray.set_alert(False)
     assert tray.toolTip() == "Fungi"
+
+
+def _wait_ui(pred, timeout_s: float = 4.0) -> bool:
+    """探测跑在子线程、结果由 250ms 的定时器取走：等它，但不睡满。"""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        QApplication.processEvents()
+        if pred():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _stub_probe(monkeypatch, result=(True, None)):
+    """替掉真网络，只记下「问了哪个模型」；返回那个列表。"""
+    from fungi.gui import config as config_page
+
+    asked: list[str] = []
+
+    def fake(model, endpoint, api_key, timeout=None):
+        asked.append(model)
+        return (result[0], result[1] if result[1] is not None else model)
+
+    monkeypatch.setattr(config_page.llm_mod, "probe_model", fake)
+    return asked
+
+
+def _read_config(window):
+    from fungi.gui import config as config_page
+
+    return json.loads(config_page.config_mod.CONFIG_PATH.read_text(encoding="utf-8"))
+
+
+def test_the_model_row_picks_from_the_list_and_the_box_adds(window, monkeypatch):
+    """§66（用户 2026-09-25「添加模型下拉列表，下拉后选中哪个使用哪个 / 原先的输入框
+    从覆盖变成添加，如果与之前模型不一样就新添 / 添加后自动测试模型调用」）。"""
+    from PyQt5.QtGui import QShowEvent
+
+    from fungi.gui import config as config_page
+
+    cfg = config_page.config_mod.load_config()
+    cfg.api_key, cfg.endpoint, cfg.model, cfg.model_list = "k", "e", "m1", ["m1"]
+    config_page.config_mod.save_config(cfg)
+    asked = _stub_probe(monkeypatch)
+
+    page = window.cfg_page
+    page.showEvent(QShowEvent())
+    assert page.model_combo.currentText() == "m1", "下拉列表里就是正在用的那个"
+    assert [page.model_combo.itemText(i) for i in range(page.model_combo.count())] == ["m1"]
+    assert page.model_edit.text() == "", "框里不再印着当前模型：那是下拉列表的活儿"
+
+    # 输入框回车 = 添加：进列表、切过去、自动测一次
+    page.model_edit.setText("m2")
+    page.model_edit.returnPressed.emit()
+    assert _wait_ui(
+        lambda: page.model_edit.text() == "" and page.model_combo.currentText() == "m2"
+    ), "添加之后列表里出现这一项，并且就用它"
+    assert _wait_ui(lambda: bool(asked)), "添加之后自动测了一次调用"
+    assert asked == ["m2"]
+    assert [page.model_combo.itemText(i) for i in range(page.model_combo.count())] == ["m2", "m1"]
+    data = _read_config(window)
+    assert (data["model"], data["model_list"]) == ("m2", ["m2", "m1"]), "旧的那个还在列表里"
+
+    # 下拉列表里选回 m1：写盘（切过去）+ 又测一次
+    page.model_combo.setCurrentIndex(1)
+    assert _wait_ui(lambda: len(asked) == 2)
+    assert asked[1] == "m1"
+    data = _read_config(window)
+    assert (data["model"], data["model_list"]) == ("m1", ["m1", "m2"])
+    assert _wait_ui(lambda: "✓" in page.model_status.text()), "测试结果就写在这一行"
+
+    # 同一个名字再来一次：不加第二行（列表长度不变）
+    page.model_edit.setText("m2")
+    page.model_edit.returnPressed.emit()
+    assert _wait_ui(lambda: len(asked) == 3)
+    assert [page.model_combo.itemText(i) for i in range(page.model_combo.count())] == ["m2", "m1"]
+    assert len(_read_config(window)["model_list"]) == 2
+
+
+def test_a_model_that_does_not_answer_is_reported_not_reverted(window, monkeypatch):
+    """调不通就直说（✗ + 那句原话），但**不改回去**：用户可能就是要拿它当靶子试
+    （错名字、临时挂掉的网关），替他把选择撤掉才是意外。"""
+    from PyQt5.QtGui import QShowEvent
+
+    from fungi.gui import config as config_page
+
+    cfg = config_page.config_mod.load_config()
+    cfg.api_key, cfg.endpoint, cfg.model, cfg.model_list = "k", "e", "m1", ["m1"]
+    config_page.config_mod.save_config(cfg)
+    _stub_probe(monkeypatch, result=(False, "HTTP 404: model not found"))
+
+    page = window.cfg_page
+    page.showEvent(QShowEvent())
+    page.model_edit.setText("m-dead")
+    page.model_edit.returnPressed.emit()
+
+    assert _wait_ui(lambda: "✗" in page.model_status.text())
+    assert "m-dead" in page.model_status.text()
+    assert "model not found" in page.model_status.text(), "provider 的原话要留在屏上"
+    assert _read_config(window)["model"] == "m-dead", "选择没被撤回去"

@@ -187,3 +187,56 @@ def test_the_model_trio_comes_from_the_file_and_never_from_the_environment(tmp_p
         "https://file.example/v1",
         "file-model",
     )
+
+
+def test_the_model_list_keeps_every_name_the_box_ever_added(tmp_path):
+    """§66（用户 2026-09-25「原先的输入框从覆盖变成添加，如果与之前模型不一样就新添」）：
+    下拉列表是一份越长越长的备选，切换只是把它里面的某个名字挪到最前，谁都不丢。"""
+    p = tmp_path / "config.json"
+    config.save_config(config.Config(api_key="k", endpoint="e", model="m1"), p)
+    # 只有一个名字时根本不写这个键：不去动用户的 config.json
+    assert "model_list" not in json.loads(p.read_text(encoding="utf-8"))
+
+    cfg = config.load_config(p)
+    assert config.remember_model(cfg, "m2") is True, "新名字：算添了一行"
+    config.save_config(cfg, p)
+    assert json.loads(p.read_text(encoding="utf-8"))["model_list"] == ["m2", "m1"]
+
+    cfg = config.load_config(p)
+    assert (cfg.model, cfg.model_list) == ("m2", ["m2", "m1"])
+    assert config.remember_model(cfg, "m2") is False, "同一个名字再来一次不加第二行"
+    assert cfg.model_list == ["m2", "m1"], "顺序也不动"
+    assert config.remember_model(cfg, "m1") is False, "切回旧的那个：它还在"
+    assert (cfg.model, cfg.model_list) == ("m1", ["m1", "m2"])
+
+
+def test_the_model_in_use_is_always_one_of_the_pickable_ones(tmp_path):
+    """手改过的 config.json 只写了 model、没写 model_list：下拉列表不能开着是空的。"""
+    p = tmp_path / "config.json"
+    p.write_text(
+        json.dumps({"api_key": "k", "endpoint": "e", "model": "typed-by-hand"}),
+        encoding="utf-8",
+    )
+    cfg = config.load_config(p)
+    assert (cfg.model, cfg.model_list) == ("typed-by-hand", ["typed-by-hand"])
+
+
+def test_a_hand_edited_list_does_not_get_two_identical_rows(tmp_path):
+    """盘里手写重复项、空串，或者 model 不在列表里：读进来就是能给下拉列表用的那三行。"""
+    p = tmp_path / "config.json"
+    p.write_text(
+        json.dumps(
+            {
+                "api_key": "k",
+                "endpoint": "e",
+                "model": "m2",
+                "model_list": ["m1", "m1", "", "  ", "m2"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = config.load_config(p)
+    assert cfg.model_list == ["m1", "m2"], "去重、去空、model 在最前"
+
+    assert config.remember_model(cfg, "") is False, "空名字什么也不干"
+    assert cfg.model_list == ["m1", "m2"]

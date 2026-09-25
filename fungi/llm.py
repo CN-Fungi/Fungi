@@ -15,6 +15,10 @@ from pathlib import Path
 from . import runlog
 
 READ_TIMEOUT = 600  # socket inactivity timeout per read, seconds
+# A probe is a question with a deadline, not a turn: 15s is past every healthy
+# provider and short enough that a settings page can say "no answer" (spec §66).
+PROBE_TIMEOUT = 15
+PROBE_MAX_TOKENS = 16  # smallest a provider takes; 1 is refused by some
 
 DeltaCallback = Callable[[str, str], None]  # (kind, text) with kind in {"text", "reasoning"}
 _reached: set[str] = set()  # endpoints that answered once: one line, not one per turn
@@ -53,6 +57,42 @@ def _reachable(endpoint: str, model: str) -> None:
     if endpoint not in _reached:
         _reached.add(endpoint)
         runlog.note("model reachable: %s (%s)", endpoint, model)
+
+
+def probe_model(
+    model: str, endpoint: str, api_key: str, timeout: float = PROBE_TIMEOUT
+) -> tuple[bool, str]:
+    """Ask one tiny non-streamed completion; True = this model answers (§66).
+
+    Deliberately not `stream_chat`: a probe needs a hard deadline (READ_TIMEOUT is
+    per-read and ten minutes), and there is nothing in the answer worth keeping.
+    The reply is discarded — what comes back is the *fact*, plus the model name the
+    provider says it served (which is how a renamed/decommissioned alias shows up:
+    you asked for A, it answered as B).
+    """
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": PROBE_MAX_TOKENS,
+        "stream": False,
+    }
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
+    except urllib.error.HTTPError as exc:
+        return False, f"HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')[:300]}"
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        return False, f"Connection failed: {getattr(exc, 'reason', exc)}"
+    except json.JSONDecodeError as exc:
+        return False, f"answer was not JSON: {exc}"
+    served = str(body.get("model") or "") if isinstance(body, dict) else ""
+    return True, served
 
 
 def _apply_delta(tool_acc: dict[int, dict], delta: dict) -> None:

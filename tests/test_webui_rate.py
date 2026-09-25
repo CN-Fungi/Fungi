@@ -97,6 +97,12 @@ def _open_page(browser, room, path="/"):
     page = ctx.new_page()
     page.goto(url)
     page.wait_for_function("() => typeof loadSessions === 'function'")
+    # Same rule as the four sibling modules (alerts/friend/sessions/transfer): with an
+    # unconfigured config.json the API-key modal covers the pane, and this file clicks
+    # `#send`. It was written before the sandbox stopped seeding this machine's real
+    # config.json (09-23, "a fresh clone counts as a machine too"), so the modal was
+    # never on screen here and the missing line went unnoticed.
+    page.evaluate("() => document.getElementById('config-overlay')?.classList.remove('show')")
     return ctx, page
 
 

@@ -773,7 +773,13 @@ document.getElementById('btn-browse').addEventListener('click', async () => {
     if (d.path) { input.value = (input.value ? input.value + ' ' : '') + d.path; input.focus(); }
   } catch (e) {}
 });
-fetch('/model').then(r => r.json()).then(d => { document.getElementById('model-name').textContent = ' \u2014 ' + d.model; });
+/* The header's model dropdown (spec §66): it loads the list itself and reports a
+   switch on the status line — which the next turn overwrites, hence the colour
+   the picker keeps on itself. */
+const modelPicker = FC.mountModelPicker({
+  note: t => { status.textContent = t; },
+  labels: { switching: 'Switching to', ok: 'answers', bad: 'did not answer', served: 'served as' },
+});
 loadSessions().then(() => {
   // Reload keeps the current session: restore it and reattach if its turn
   // is still running server-side (the /events tape replays what was missed).
@@ -847,9 +853,7 @@ resumeIfPending();
           const d2 = await r2.json();
           if (d2.ok) {
             document.getElementById('config-overlay').classList.remove('show');
-            fetch('/model').then(r3 => r3.json()).then(d3 => {
-              document.getElementById('model-name').textContent = ' \u2014 ' + d3.model;
-            });
+            if (modelPicker) modelPicker.load();  // §66: the name just typed is now in the dropdown
           }
         } catch (e) {}
       });
