@@ -46,13 +46,13 @@ def dingdong() -> np.ndarray:
 
     audio = np.zeros(samples)
     audio[0:note_len] = sound1
-    audio[int(0.5 * SAMPLE_RATE):int(0.5 * SAMPLE_RATE) + note_len] = sound2
+    audio[int(0.5 * SAMPLE_RATE) : int(0.5 * SAMPLE_RATE) + note_len] = sound2
 
     envelope = np.ones(samples)
     attack, decay = int(0.1 * SAMPLE_RATE), int(0.3 * SAMPLE_RATE)
     envelope[:attack] = np.linspace(0, 1, attack)
-    envelope[attack:attack + decay] = np.exp(-3 * (t[attack:attack + decay] - 0.1))
-    envelope[attack + decay:] = np.exp(-8 * (t[attack + decay:] - 0.4))
+    envelope[attack : attack + decay] = np.exp(-3 * (t[attack : attack + decay] - 0.1))
+    envelope[attack + decay :] = np.exp(-8 * (t[attack + decay :] - 0.4))
     return _pcm(audio * envelope)
 
 
@@ -60,7 +60,9 @@ def chime() -> np.ndarray:
     """Wind chime: C5 E5 G5 C6, bell harmonics, exponential decay."""
     duration, samples = 2.5, int(SAMPLE_RATE * 2.5)
     audio = np.zeros(samples)
-    for i, (freq, amp) in enumerate(zip([523.25, 659.25, 783.99, 1046.50], [0.5, 0.4, 0.3, 0.2], strict=False)):
+    for i, (freq, amp) in enumerate(
+        zip([523.25, 659.25, 783.99, 1046.50], [0.5, 0.4, 0.3, 0.2], strict=False)
+    ):
         start = i * 0.3
         if start >= duration:
             continue
@@ -87,10 +89,14 @@ def beep() -> np.ndarray:
     audio = 0.7 * (0.5 * np.sign(np.sin(2 * np.pi * freq * t))) + 0.3 * np.sin(2 * np.pi * freq * t)
 
     envelope = np.ones(samples)
-    attack, sustain, release = int(0.05 * SAMPLE_RATE), int(0.4 * SAMPLE_RATE), int(0.15 * SAMPLE_RATE)
+    attack, sustain, release = (
+        int(0.05 * SAMPLE_RATE),
+        int(0.4 * SAMPLE_RATE),
+        int(0.15 * SAMPLE_RATE),
+    )
     envelope[:attack] = np.linspace(0, 1, attack)
-    envelope[attack:attack + sustain] = 0.8
-    envelope[attack + sustain:] = np.linspace(0.8, 0, release)
+    envelope[attack : attack + sustain] = 0.8
+    envelope[attack + sustain :] = np.linspace(0.8, 0, release)
     return _pcm(audio * envelope)
 
 
@@ -155,8 +161,8 @@ def synth() -> np.ndarray:
     attack, decay, release = int(0.05 * SAMPLE_RATE), int(0.3 * SAMPLE_RATE), int(0.2 * SAMPLE_RATE)
     sustain = 0.7
     envelope[:attack] = np.linspace(0, 1, attack)
-    envelope[attack:attack + decay] = np.linspace(1, sustain, decay)
-    envelope[attack + decay:-release] = sustain
+    envelope[attack : attack + decay] = np.linspace(1, sustain, decay)
+    envelope[attack + decay : -release] = sustain
     envelope[-release:] = np.linspace(sustain, 0, release)
     return _pcm(audio * envelope)
 

@@ -208,7 +208,9 @@ class ConfigPage(QWidget):
         self.bixian_status.setWordWrap(True)
         root.addWidget(self.bixian_status)
         self.bixian_url = LineEdit()
-        self.bixian_url.setPlaceholderText("服务地址，例如 http://127.0.0.1:8111（留空 = 不用挑号）")
+        self.bixian_url.setPlaceholderText(
+            "服务地址，例如 http://127.0.0.1:8111（留空 = 不用挑号）"
+        )
         self.bixian_url.setMinimumWidth(420)
         self.bixian_url.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.bixian_url.setClearButtonEnabled(True)

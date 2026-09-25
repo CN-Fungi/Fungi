@@ -332,8 +332,14 @@ class UploadParts:
             spans.adopt([(first, min(last, size)) for first, last in record.spans if first < size])
             if spans.bytes:
                 runlog.note("continuing the phone upload of %s from %d bytes", name, spans.bytes)
-                return {"sid": sid, "name": name, "total": int(total), "part": part,
-                        "spans": spans, "ts": time.time()}
+                return {
+                    "sid": sid,
+                    "name": name,
+                    "total": int(total),
+                    "part": part,
+                    "spans": spans,
+                    "ts": time.time(),
+                }
         # Not this upload's part: the bytes of whatever used to be here are not
         # something this session may continue, so they go (§62, the same rule a
         # delivery's note follows).
@@ -342,8 +348,14 @@ class UploadParts:
         landing.PartRecord.clear(part)
         part.parent.mkdir(parents=True, exist_ok=True)
         part.touch()
-        return {"sid": sid, "name": name, "total": int(total), "part": part, "spans": spans,
-                "ts": time.time()}
+        return {
+            "sid": sid,
+            "name": name,
+            "total": int(total),
+            "part": part,
+            "spans": spans,
+            "ts": time.time(),
+        }
 
     def get(self, sid: str) -> dict | None:
         with self._guard:

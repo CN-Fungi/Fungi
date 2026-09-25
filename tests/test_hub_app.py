@@ -479,7 +479,9 @@ def test_a_real_delivery_over_several_windows_lands_whole(room, tmp_path):
 # ── an upload that stops early is continued, not restarted (§62) ──
 
 
-def _upload_raw(base: str, params: dict, body: bytes, token: str = "room-token") -> tuple[int, dict]:
+def _upload_raw(
+    base: str, params: dict, body: bytes, token: str = "room-token"
+) -> tuple[int, dict]:
     """One upload body, with whatever resume parameters the caller wants.
 
     `total` (the whole file's length) is a query parameter rather than the
@@ -529,7 +531,8 @@ def test_an_upload_that_stops_early_keeps_a_partial_staging(room, tmp_path):
     cut = 240 * 1024
 
     code, out = _upload_raw(
-        base, {"host": "alpha", "to": "beta", "name": "big.bin", "total": len(payload)},
+        base,
+        {"host": "alpha", "to": "beta", "name": "big.bin", "total": len(payload)},
         payload[:cut],
     )
 
@@ -555,13 +558,19 @@ def test_the_sender_is_told_what_is_already_staged(room, tmp_path):
     payload = bytes(range(256)) * (400 * 1024 // 256)
     cut = 240 * 1024
     _code, part = _upload_raw(
-        base, {"host": "alpha", "to": "beta", "name": "big.bin", "total": len(payload)},
+        base,
+        {"host": "alpha", "to": "beta", "name": "big.bin", "total": len(payload)},
         payload[:cut],
     )
 
     found = _pending(base, "big.bin", len(payload), _head_of(payload))
-    assert found == {"ok": True, "id": part["id"], "received": cut, "partial": True,
-                     "name": "big.bin"}
+    assert found == {
+        "ok": True,
+        "id": part["id"],
+        "received": cut,
+        "partial": True,
+        "name": "big.bin",
+    }
 
     # same name and length, different file
     other = bytes(reversed(payload))
@@ -582,14 +591,21 @@ def test_a_resume_hands_over_the_rest_and_the_file_is_fetchable(room, tmp_path):
     payload = bytes(range(256)) * (400 * 1024 // 256)
     cut = 240 * 1024
     _code, part = _upload_raw(
-        base, {"host": "alpha", "to": "beta", "name": "big.bin", "total": len(payload)},
+        base,
+        {"host": "alpha", "to": "beta", "name": "big.bin", "total": len(payload)},
         payload[:cut],
     )
 
     code, out = _upload_raw(
         base,
-        {"host": "alpha", "to": "beta", "name": "big.bin", "total": len(payload),
-         "id": part["id"], "offset": cut},
+        {
+            "host": "alpha",
+            "to": "beta",
+            "name": "big.bin",
+            "total": len(payload),
+            "id": part["id"],
+            "offset": cut,
+        },
         payload[cut:],
     )
 
@@ -614,15 +630,22 @@ def test_a_resume_at_the_wrong_offset_is_refused_and_touches_nothing(room, tmp_p
     payload = bytes(range(256)) * (400 * 1024 // 256)
     cut = 240 * 1024
     _code, part = _upload_raw(
-        base, {"host": "alpha", "to": "beta", "name": "big.bin", "total": len(payload)},
+        base,
+        {"host": "alpha", "to": "beta", "name": "big.bin", "total": len(payload)},
         payload[:cut],
     )
     staged = hub.transfers.root / f"{part['id']}__big.bin"
 
     code, out = _upload_raw(
         base,
-        {"host": "alpha", "to": "beta", "name": "big.bin", "total": len(payload),
-         "id": part["id"], "offset": 100 * 1024},
+        {
+            "host": "alpha",
+            "to": "beta",
+            "name": "big.bin",
+            "total": len(payload),
+            "id": part["id"],
+            "offset": 100 * 1024,
+        },
         payload[100 * 1024 :],
     )
 
@@ -651,8 +674,13 @@ def test_the_sender_does_not_send_a_file_the_hub_already_holds(room, tmp_path, m
     monkeypatch.setattr(sender, "_post_upload", _never)
     again = sender.upload_transfer(str(src), "report.bin", "beta")
 
-    assert again == {"ok": True, "id": first["id"], "name": "report.bin",
-                     "size": src.stat().st_size, "staged": True}
+    assert again == {
+        "ok": True,
+        "id": first["id"],
+        "name": "report.bin",
+        "size": src.stat().st_size,
+        "staged": True,
+    }
 
 
 def test_the_sender_finishes_a_staging_an_earlier_attempt_left(room, tmp_path, monkeypatch):
@@ -669,7 +697,8 @@ def test_the_sender_finishes_a_staging_an_earlier_attempt_left(room, tmp_path, m
     src = tmp_path / "report.bin"
     src.write_bytes(payload)
     _code, part = _upload_raw(
-        base, {"host": "alpha", "to": "beta", "name": "report.bin", "total": len(payload)},
+        base,
+        {"host": "alpha", "to": "beta", "name": "report.bin", "total": len(payload)},
         payload[:cut],
     )
     sender = HubClient(base, "room-token", "alpha")
@@ -729,8 +758,9 @@ def test_no_completed_transfer_is_reported_for_a_partial_staging(room):
         clients[name].post("/api/join", {"name": name, "token": "room-token"})
     payload = b"y" * (400 * 1024)
     _code, part = _upload_raw(
-        base, {"host": "alpha", "to": "beta", "name": "big.bin", "total": len(payload)},
-        payload[:200 * 1024],
+        base,
+        {"host": "alpha", "to": "beta", "name": "big.bin", "total": len(payload)},
+        payload[: 200 * 1024],
     )
 
     status, _headers, body = _fetch(

@@ -165,7 +165,6 @@ class Spans:
             out.append((at, end))
         return out
 
-
     def ranges(self) -> list[tuple[int, int]]:
         """A snapshot of the union, to write down where a later delivery reads it (§62)."""
         with self._lock:

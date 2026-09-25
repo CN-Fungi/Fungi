@@ -238,9 +238,7 @@ class Transfers:
             and rec.get("dst") == dst_host
         )
 
-    def pending(
-        self, name: str, src_host: str, dst_host: str, size: int, head: str
-    ) -> dict | None:
+    def pending(self, name: str, src_host: str, dst_host: str, size: int, head: str) -> dict | None:
         """The staging this same file is already on its way into, if there is one (§62).
 
         Two things are being asked here, and they are the same question: *has this
@@ -543,9 +541,7 @@ class Hub:
             }
         return {"ok": True, **rec}
 
-    def pending_transfer(
-        self, host: str, to_host: str, name: str, size: int, head: str
-    ) -> dict:
+    def pending_transfer(self, host: str, to_host: str, name: str, size: int, head: str) -> dict:
         """What this hub already holds of the file the sender is about to send (§62).
 
         Answered for the sender only: it is the sender's own file, and the staging
@@ -558,17 +554,27 @@ class Hub:
         rec = self.transfers.pending(name or "file", host, to_host, size, head)
         if rec is None:
             return {"ok": False, "reason": "nothing staged for this file"}
-        return {"ok": True, "id": rec["id"], "received": int(rec["size"]),
-                "partial": bool(rec.get("partial")), "name": rec["name"]}
+        return {
+            "ok": True,
+            "id": rec["id"],
+            "received": int(rec["size"]),
+            "partial": bool(rec.get("partial")),
+            "name": rec["name"],
+        }
 
     def transfer_state(self, transfer_id: str, host: str) -> dict:
         """Still staged, and how far it got — for either end of the transfer (§62)."""
         rec = self.transfers.state(transfer_id, host)
         if rec is None:
             return {"ok": False, "reason": "not found"}
-        return {"ok": True, "id": rec["id"], "name": rec["name"], "size": int(rec["size"]),
-                "total": int(rec.get("expect") or rec["size"]),
-                "partial": bool(rec.get("partial"))}
+        return {
+            "ok": True,
+            "id": rec["id"],
+            "name": rec["name"],
+            "size": int(rec["size"]),
+            "total": int(rec.get("expect") or rec["size"]),
+            "partial": bool(rec.get("partial")),
+        }
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -938,9 +944,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _transfer_state(self, params: dict) -> None:
         """What the hub still holds of a transfer, for either of its two ends."""
         self._reply(
-            self.hub.transfer_state(
-                (params.get("id") or [""])[0], (params.get("host") or [""])[0]
-            )
+            self.hub.transfer_state((params.get("id") or [""])[0], (params.get("host") or [""])[0])
         )
 
     def _drain(self, length: int) -> None:

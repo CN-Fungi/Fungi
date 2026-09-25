@@ -279,7 +279,9 @@ class HubClient:
         """
         with Landing(Path(dest), None, tag=_tag(transfer_id), transfer=transfer_id) as land:
             start = land.spans.end_of_run(0)
-            with urllib.request.urlopen(self._stream_request(transfer_id, start), timeout=120) as resp:
+            with urllib.request.urlopen(
+                self._stream_request(transfer_id, start), timeout=120
+            ) as resp:
                 ranged = self._ranged_from(resp, start)
                 if start and not ranged:
                     land.restart()
@@ -506,7 +508,9 @@ class HubClient:
                 "staged": True,
             }
         offset = int(known.get("received") or 0) if known else 0
-        out = self._post_upload(src, name, to_host, total, offset, str(known.get("id") or ""), progress)
+        out = self._post_upload(
+            src, name, to_host, total, offset, str(known.get("id") or ""), progress
+        )
         if out.get("restart"):
             # The staging moved on between the question and the body (swept, or
             # finished by another attempt): this body is a tail, so it cannot be
@@ -524,8 +528,14 @@ class HubClient:
         if not size or not head:
             return {}
         query = urllib.parse.urlencode(
-            {"token": self.token, "host": self.host, "to": to_host, "name": name,
-             "size": size, "head": head}
+            {
+                "token": self.token,
+                "host": self.host,
+                "to": to_host,
+                "name": name,
+                "size": size,
+                "head": head,
+            }
         )
         try:
             out = self._request("GET", f"/api/transfer/pending?{query}")
