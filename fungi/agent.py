@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from fungi import skills, tools
-from fungi.config import Config
+from fungi.config import Config, provider_for
 from fungi.events import EmitFn, Sink
 from fungi.llm import LLMAbortedError, LLMError, LLMResult, stream_chat
 from fungi.tools.files import ImageRead
@@ -251,10 +251,15 @@ class Agent:
 
         if self._aborted():
             raise LLMAbortedError(LLMResult())
+        model = self.model or self.cfg.model
+        # Which endpoint+key to talk to (spec §68): a name we have learned a pairing
+        # for carries it here too, so a per-layer override (trilayer) may sit on
+        # another vendor without the whole session having to move.
+        endpoint, api_key = provider_for(self.cfg, model) or (self.cfg.endpoint, self.cfg.api_key)
         result = stream_chat(
-            self.model or self.cfg.model,
-            self.cfg.endpoint,
-            self.cfg.api_key,
+            model,
+            endpoint,
+            api_key,
             messages,
             tool_defs,
             on_delta,

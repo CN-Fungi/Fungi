@@ -1813,3 +1813,76 @@ def test_a_model_that_does_not_answer_is_reported_not_reverted(window, monkeypat
     assert "m-dead" in page.model_status.text()
     assert "model not found" in page.model_status.text(), "provider 的原话要留在屏上"
     assert _read_config(window)["model"] == "m-dead", "选择没被撤回去"
+
+
+def test_picking_a_model_brings_its_own_endpoint_and_key(window, monkeypatch):
+    """§68：列表里住着两家时，选谁就把谁那套 url+key 端上来（框里跟着换、盘里也换）。"""
+    from PyQt5.QtGui import QShowEvent
+
+    from fungi.gui import config as config_page
+
+    deepseek = ("https://api.deepseek.com/chat/completions", "sk-deepseek-key-1234567890")
+    mimo = ("https://api.xiaomimimo.com/v1/chat/completions", "sk-mimo-key-abcdefghijkl")
+    cfg = config_page.config_mod.load_config()
+    cfg.api_key, cfg.endpoint, cfg.model, cfg.model_list = (
+        deepseek[1],
+        deepseek[0],
+        "deepseek-x",
+        ["deepseek-x"],
+    )
+    config_page.config_mod.remember_provider(cfg, "deepseek-x", *deepseek)
+    config_page.config_mod.switch_model(cfg, "mimo-v2.6-flash")
+    config_page.config_mod.remember_provider(cfg, "mimo-v2.6-flash", *mimo)
+    config_page.config_mod.switch_model(
+        cfg, "mimo-v2.6-flash"
+    )  # 现在它有记忆了：这一下把 url+key 带过来
+    config_page.config_mod.save_config(cfg)
+    _stub_probe(monkeypatch)
+
+    page = window.cfg_page
+    page.showEvent(QShowEvent())
+    assert page.endpoint_edit.text() == mimo[0], "开着的这一页显示的就是正在用的地址"
+    assert "sk-mi…ijkl" in page.key_edit.placeholderText(), "密钥只露掩码，但要看得出换了一把"
+
+    page.model_combo.setCurrentIndex(1)  # 切回 deepseek 那个名字
+    assert _wait_ui(lambda: page.endpoint_edit.text() == deepseek[0]), "端点框自己跟着换"
+    assert "sk-de…7890" in page.key_edit.placeholderText()
+    assert page.key_edit.text() == "", "真 key 从不上屏"
+    data = _read_config(window)
+    assert (data["endpoint"], data["api_key"]) == deepseek, "盘里那两格也换过来了"
+    assert data["model"] == "deepseek-x"
+
+
+def test_a_probe_that_answers_teaches_the_pair(window, monkeypatch):
+    """§68 的「学」那一半：这一次调用回 200，就把它用的 url+key 记在这个名字上；
+    答不上来则什么都不记（没证据的配对不该写进 config.json）。"""
+    from PyQt5.QtGui import QShowEvent
+
+    from fungi.gui import config as config_page
+
+    cfg = config_page.config_mod.load_config()
+    cfg.api_key, cfg.endpoint, cfg.model, cfg.model_list = (
+        "sk-typed",
+        "https://typed.example/v1",
+        "m1",
+        ["m1"],
+    )
+    config_page.config_mod.save_config(cfg)
+    _stub_probe(monkeypatch)  # 答得上
+
+    page = window.cfg_page
+    page.showEvent(QShowEvent())
+    page.model_edit.setText("m2")  # 加一个新名字：此时这一套端点+密钥还没有名字记着
+    page.model_edit.returnPressed.emit()
+    assert _wait_ui(lambda: "✓" in page.model_status.text())
+    data = _read_config(window)
+    assert data["model_providers"] == {
+        "m2": {"endpoint": "https://typed.example/v1", "api_key": "sk-typed"}
+    }, "通了才记：名字 → 它刚才是发到哪儿通的"
+
+    # 反过来：答不上来的那次不留记录
+    _stub_probe(monkeypatch, result=(False, "HTTP 404: nope"))
+    page.model_edit.setText("m-dead")
+    page.model_edit.returnPressed.emit()
+    assert _wait_ui(lambda: "✗" in page.model_status.text())
+    assert "m-dead" not in _read_config(window)["model_providers"]

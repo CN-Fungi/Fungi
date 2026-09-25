@@ -11,11 +11,29 @@ html,body{font-family:var(--font);font-size:16px;line-height:1.6;color:var(--tex
 #topbar button:active{color:var(--text)}
 #title-wrap{flex:1;min-width:0;display:flex;align-items:baseline;gap:0.5rem;overflow:hidden}
 #session-title{color:var(--text);font-size:0.95rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#model-select{background:transparent;border:1px solid transparent;border-radius:var(--radius-xs);color:var(--dim);font-size:0.72rem;font-family:var(--mono);max-width:44%;padding:2px 4px;cursor:pointer}
-#model-select:focus{outline:none;color:var(--text);border-color:var(--accent)}
+/* 模型下拉列表（spec §66）：同桌面壳，自绘浮层 + GSAP 开合（原生 select 的弹出层是系统画的，
+   既吃不到这套 token 也没有动画）。手机顶栏窄，面板从触发器右沿往下掉，宽度跟着内容走。
+   选择器写成 `#topbar #model-select`：顶栏那条 `#topbar button`（20px 字号、12px 内边距，给汉堡/回退那些图标钮用的）比单个 id 更具体，而触发器现在是 button，会被它打肿。
+   这一页没有 --t-fast/--sheen（移动端 token 表里没有），时长按本页习惯写字面值 150ms。
+   宽度约束放在 .model-pick 上：`max-width:44%` 若写在触发器自己身上，包含块就是内容宽度
+   即它自己，百分比解析成几个字符宽（实测触发器被掐成 `mim...`）。 */
+.model-pick{position:relative;display:inline-flex;align-items:center;min-width:0;max-width:44%}
+#topbar #model-select{display:inline-flex;align-items:center;gap:4px;background:transparent;border:1px solid transparent;border-radius:var(--radius-xs);color:var(--dim);font-size:0.72rem;font-family:var(--mono);max-width:100%;padding:2px 4px;cursor:pointer;transition:color 150ms,border-color 150ms,opacity 150ms}
+#topbar #model-select:focus-visible{outline:none;color:var(--text);border-color:var(--accent)}
+.model-trigger-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.model-caret{width:0;height:0;flex:0 0 auto;border-left:3.5px solid transparent;border-right:3.5px solid transparent;border-top:4px solid currentColor;opacity:0.7;transition:transform 150ms var(--ease-out-expo)}
+.model-pick.open .model-caret{transform:rotate(180deg);opacity:1}
 #model-select.ok{border-color:var(--accent);color:var(--accent2)}
 #model-select.bad{border-color:var(--error-border);color:var(--error-text)}
 #model-select.busy{opacity:0.6}
+.model-menu{position:fixed;top:0;left:0;z-index:60;min-width:9rem;max-width:min(20rem, 80vw);max-height:14rem;overflow-y:auto;padding:4px;background:var(--surface);border:1px solid var(--border-light);border-radius:var(--radius-sm);box-shadow:var(--shadow-card)}
+.model-menu[hidden]{display:none}
+.model-item{display:flex;align-items:center;gap:8px;width:100%;padding:7px 8px;border:none;background:none;color:var(--text2);font-family:var(--mono);font-size:0.74rem;text-align:left;cursor:pointer;border-radius:var(--radius-xs);transition:background 150ms,color 150ms}
+.model-item-name{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.model-item-tick{flex:0 0 auto;opacity:0;color:var(--accent2);transition:opacity 150ms}
+.model-item:hover,.model-item.held{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--text)}
+.model-item.current{color:var(--accent2)}
+.model-item.current .model-item-tick{opacity:1}
 #chat-wrap{flex:1;min-height:0;position:relative;display:flex;flex-direction:column}
 #messages{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:1rem 0.8rem;display:flex;flex-direction:column;gap:0.8rem}
 /* ---- messages ---- */

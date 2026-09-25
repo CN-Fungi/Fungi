@@ -70,15 +70,28 @@ html,body{font-family:var(--font);font-size:var(--fs-md);line-height:1.6;color:v
 .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex-shrink:0;box-shadow:0 0 0 0 var(--accent-glow);animation:dotPulse 2.6s var(--ease-smooth) infinite}
 @keyframes dotPulse{0%,100%{box-shadow:0 0 0 0 var(--accent-glow)}45%{box-shadow:0 0 0 6px transparent}}
 #header strong{color:var(--text);font-weight:600;letter-spacing:-0.02em;font-size:0.92rem}
-/* 左上角那个模型（spec §66）：原来是印上去的字，现在是下拉列表。它得先看起来还像
-   原来那行小字（透明底、暗色、等宽），鼠标移上去才长出边框告诉你能点。 */
-#model-select{background:transparent;border:1px solid transparent;border-radius:var(--radius-xs);color:var(--dim);font-family:var(--mono);font-size:0.72rem;max-width:16rem;padding:2px 6px;cursor:pointer;transition:color var(--t-fast),border-color var(--t-fast),opacity var(--t-fast)}
+/* 模型下拉列表（spec §66）：触发器沿用原来那行文字的排版，面板是本页自己的浮层 ——
+   原生 <select> 的弹出层由系统画，吃不到这套 token，也没有开合过程（用户 2026-09-25 报告
+   「风格和原来的不搭，没有动画效果」）。颜色语义不变：切一次 = 一次极小的补全调用，结果留在
+   触发器上（颜色 + title），状态行被下一轮对话顶掉也还看得见。 */
+.model-pick{position:relative;display:inline-flex;align-items:center}
+#model-select{display:inline-flex;align-items:center;gap:5px;background:transparent;border:1px solid transparent;border-radius:var(--radius-xs);color:var(--dim);font-family:var(--mono);font-size:0.72rem;max-width:16rem;padding:2px 6px;cursor:pointer;transition:color var(--t-fast),border-color var(--t-fast),background var(--t-fast),opacity var(--t-fast)}
 #model-select:hover{color:var(--text);border-color:var(--border)}
-#model-select:focus{outline:none;color:var(--text);border-color:var(--accent)}
-/* 切一次 = 一次极小的补全调用，那次测试的结果得比状态行活得久：颜色留在 select 上（§66）。 */
+#model-select:focus-visible{outline:none;color:var(--text);border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 22%,transparent)}
+.model-trigger-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.model-caret{width:0;height:0;flex:0 0 auto;border-left:3.5px solid transparent;border-right:3.5px solid transparent;border-top:4px solid currentColor;opacity:0.7;transition:transform var(--t-fast) var(--ease-out-expo)}
+.model-pick.open .model-caret{transform:rotate(180deg);opacity:1}
 #model-select.ok{border-color:var(--accent);color:var(--accent2)}
 #model-select.bad{border-color:var(--error-border);color:var(--error-text)}
 #model-select.busy{opacity:0.6}
+.model-menu{position:fixed;top:0;left:0;z-index:60;min-width:11rem;max-width:20rem;max-height:15rem;overflow-y:auto;padding:4px;background:var(--surface);background-image:var(--sheen);border:1px solid var(--border-light);border-radius:var(--radius-sm);box-shadow:var(--shadow-card),var(--hairline)}
+.model-menu[hidden]{display:none}
+.model-item{display:flex;align-items:center;gap:8px;width:100%;padding:5px 8px;border:none;background:none;color:var(--text2);font-family:var(--mono);font-size:0.72rem;text-align:left;cursor:pointer;border-radius:var(--radius-xs);transition:background var(--t-fast),color var(--t-fast)}
+.model-item-name{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.model-item-tick{flex:0 0 auto;opacity:0;color:var(--accent2);transition:opacity var(--t-fast)}
+.model-item:hover,.model-item.held{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--text)}
+.model-item.current{color:var(--accent2)}
+.model-item.current .model-item-tick{opacity:1}
 #hamburger-sidebar{background:none;border:none;color:var(--dim);cursor:pointer;padding:5px 7px;border-radius:var(--radius-xs);font-size:16px;transition:all var(--t-fast)}
 #hamburger-sidebar:hover{color:var(--text)}
 #chat-wrap{flex:1;min-height:0;position:relative;display:flex;flex-direction:column}

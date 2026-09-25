@@ -83,6 +83,13 @@ class Config:
     # dropdown, so moving between the two or three models somebody actually uses
     # never means retyping a name. Grows by adding — see remember_model.
     model_list: list[str] = field(default_factory=list)
+    # Per-model endpoint+key memory (spec §68): model name -> {"endpoint":…, "api_key":…}.
+    # The pickable list may span vendors, and one config file has one endpoint and one
+    # key — so switching to a name has to bring the pair that name answers on, or the
+    # three MiMo names and the DeepSeek name can never be clickable from one list.
+    # Learned where we get proof (a probe came back ok) or where the user said so
+    # (they typed the pair and saved): see remember_provider / adopt_provider.
+    model_providers: dict[str, dict[str, str]] = field(default_factory=dict)
     # Per-layer model override: layer number (1/2/3) -> model name.
     # Layers without an entry fall back to `model` (see model_for).
     layer_models: dict[int, str] = field(default_factory=dict)
@@ -155,6 +162,61 @@ def remember_model(cfg: Config, model: str) -> bool:
     fresh = name not in cfg.model_list
     cfg.model_list = [name, *[m for m in cfg.model_list if m != name]]
     cfg.model = name
+    return fresh
+
+
+def provider_for(cfg: Config, model: str) -> tuple[str, str] | None:
+    """The `(endpoint, api_key)` this model last answered on - None = never learned.
+
+    spec §68: switching a model has to bring that name's own endpoint and key along
+    (the user's words, and why one config file was not enough, live in docs/spec.md).
+    """
+    known = cfg.model_providers.get(model.strip())
+    if not known:
+        return None
+    return str(known.get("endpoint") or ""), str(known.get("api_key") or "")
+
+
+def adopt_provider(cfg: Config, model: str) -> bool:
+    """Make `cfg.endpoint`/`cfg.api_key` the pair `model` is known to answer on.
+
+    True = the config moved. A model we never learned anything about keeps whatever
+    is in the config right now: the user may be about to type the pair by hand, and
+    silently pointing the file somewhere else would lose what they typed.
+    """
+    known = provider_for(cfg, model)
+    if known is None:
+        return False
+    endpoint, api_key = known
+    if not endpoint or not api_key or (endpoint == cfg.endpoint and api_key == cfg.api_key):
+        return False
+    cfg.endpoint, cfg.api_key = endpoint, api_key
+    return True
+
+
+def remember_provider(cfg: Config, model: str, endpoint: str, api_key: str) -> bool:
+    """Record the pair `model` answers on. True = this changed what we knew.
+
+    Called at the two moments we have a reason to believe a pairing is real: a probe
+    (or a switch, which probes) came back ok, or the user typed the pair and saved.
+    """
+    name, endpoint, api_key = model.strip(), endpoint.strip(), api_key.strip()
+    if not name or not endpoint or not api_key:
+        return False
+    if cfg.model_providers.get(name) == {"endpoint": endpoint, "api_key": api_key}:
+        return False
+    cfg.model_providers[name] = {"endpoint": endpoint, "api_key": api_key}
+    return True
+
+
+def switch_model(cfg: Config, model: str) -> bool:
+    """Make `model` the one in use, bringing its endpoint+key along. True = new name.
+
+    The one entry point the settings page and the WebUI's header both use, so
+    "selecting a model" means the same three writes in both shells (spec §66/§68).
+    """
+    fresh = remember_model(cfg, model)
+    adopt_provider(cfg, cfg.model)
     return fresh
 
 
@@ -291,6 +353,22 @@ def load_config(path: Path | None = None) -> Config:
         # otherwise open with nothing selected (spec §66).
         if cfg.model not in cfg.model_list:
             cfg.model_list.insert(0, cfg.model)
+        # Which endpoint+key each name answers on (spec §68). A half-written entry
+        # (no endpoint or no key) is not a pairing anybody can use: drop it here
+        # rather than carry a row that can only fail at the next switch.
+        known = data.get("model_providers")
+        if isinstance(known, dict):
+            cfg.model_providers = {
+                str(name).strip(): {
+                    "endpoint": str(v.get("endpoint") or ""),
+                    "api_key": str(v.get("api_key") or ""),
+                }
+                for name, v in known.items()
+                if isinstance(v, dict)
+                and str(name).strip()
+                and v.get("endpoint")
+                and v.get("api_key")
+            }
         models = data.get("models")
         if isinstance(models, dict):
             cfg.layer_models = {
@@ -350,6 +428,11 @@ def save_config(cfg: Config, path: Path | None = None) -> None:
     others = list(dict.fromkeys(m for m in cfg.model_list if m != cfg.model))
     if others:
         data["model_list"] = [cfg.model, *others]
+    if cfg.model_providers:
+        # Names are kept even after they leave the list: typing an old name back into
+        # the add box then works on the first try, which is the whole point of the
+        # memory (§68). One endpoint + one key per name is a few dozen bytes.
+        data["model_providers"] = {m: dict(p) for m, p in cfg.model_providers.items()}
     if cfg.layer_models:
         data["models"] = {str(k): cfg.layer_models[k] for k in sorted(cfg.layer_models)}
     if cfg.system_prompt:

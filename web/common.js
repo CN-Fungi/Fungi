@@ -1732,53 +1732,169 @@
 
   /* ---------- header model picker (spec §66) ---------- */
   /* 用户 2026-09-25：「在左上角原来显示模型的位置也改成下拉列表」。原来那里只是**印着**
-     当前模型（`#model-name`），现在是个下拉列表，选中哪个就用哪个；列表就是设置页那个输入框
-     往里加的那一份（config.json 的 `model_list`），两个界面因此不会各说各话。
+     当前模型（`#model-name`），现在是个自绘下拉列表，选中哪个就用哪个；列表就是设置页那个
+     输入框往里加的那一份（config.json 的 `model_list`），两个界面因此不会各说各话。
+
+     自绘而不是 `<select>`（同日用户报告：「风格和原来的不搭，没有动画效果」）：原生 select 的
+     弹出层是系统画的，吃不到这套 token（`--surface/--radius/--shadow-card/--t-fast`），也没有
+     开合过程——它跟旁边那些自绘控件（主题开关、折叠卡、抽屉）根本不是一种东西。现在触发器沿用
+     原来那行文字的排版（mono、小字号、暗淡→悬停转亮），面板是本文件自己的浮层，开合交给
+     `motion.js`（GSAP，reduced-motion 下模块折叠 → 瞬时开合，可见性仍由这里管）。
 
      切换 = 一次 POST + 一次极小的补全调用，回来的两件事**分开报**：状态行说一句话
-     （那是条转瞬即逝的通道，下一轮对话就把它顶掉），select 自己留一个颜色（ok/bad，
+     （那是条转瞬即逝的通道，下一轮对话就把它顶掉），触发器自己留一个颜色（ok/bad，
      `MODEL_NOTE_MS` 之后褪掉，title 里留着完整句子）—— 句子没了，那次测试的结果还在。 */
   const MODEL_NOTE_MS = 8000;
 
   function mountModelPicker(opts) {
     opts = opts || {};
-    const el = document.getElementById(opts.id || 'model-select');
+    const trigger = document.getElementById(opts.id || 'model-select');
     const note = opts.note || function () {};
     const L = opts.labels || {};
-    if (!el) return null;  // 旧缓存的页面：这里没有下拉列表，脚本其余部分照常活着
-    let busy = false, fade = null;
+    if (!trigger) return null;  // 旧缓存的页面：这里没有下拉列表，脚本其余部分照常活着
 
+    /* 面板由这里建（两个壳共用同一份结构），触发器留在各自的 HTML 里：
+       桌面在 #header，手机在顶栏，CSS 各管各的位置。 */
+    const wrap = document.createElement('div');
+    wrap.className = 'model-pick';
+    trigger.parentNode.insertBefore(wrap, trigger);
+    wrap.appendChild(trigger);
+    trigger.classList.add('model-trigger');
+    trigger.setAttribute('aria-haspopup', 'listbox');
+    trigger.setAttribute('aria-expanded', 'false');
+    const nameEl = document.createElement('span');
+    nameEl.className = 'model-trigger-name';
+    const caret = document.createElement('i');
+    caret.className = 'model-caret';
+    trigger.textContent = '';
+    trigger.appendChild(nameEl);
+    trigger.appendChild(caret);
+
+    /* 面板挂在 `body` 上、用 fixed 定位（2026-09-25 实测）：留在触发器旁边会被祖先的
+       `overflow:hidden` 裁掉——手机壳的 `#title-wrap{overflow:hidden}`（为了会话名的省略号）
+       正好套在触发器外面，于是行都在、就是看不见，点也点不到。浮层自己按触发器的位置摆，
+       滚动/改窗口尺寸时跟着走。 */
+    const menu = document.createElement('div');
+    menu.className = 'model-menu';
+    menu.setAttribute('role', 'listbox');
+    menu.hidden = true;
+    document.body.appendChild(menu);
+
+    let names = [], current = '', busy = false, fade = null, held = -1, isOpen = false, gen = 0;
+
+    /* 这个名单可能跨厂商（spec §68）：切模型连端点一起换，所以报结果时把「落在哪台主机上」
+       也说出来 —— 否则「调通了」看不出是发到哪家的地址上通的。密钥不上屏、也不进页面。 */
+    function hostOf(url) {
+      try { return new URL(url).host; } catch (e) { return ''; }
+    }
     function sentence(d) {
+      const on = d.endpoint ? ' @ ' + hostOf(d.endpoint) : '';
       if (d.reachable) {
         const served =
           d.detail && d.detail !== d.model ? ' (' + (L.served || 'served as') + ' ' + d.detail + ')' : '';
-        return '\u2713 ' + d.model + ' ' + (L.ok || 'answers') + served;
+        return '\u2713 ' + d.model + ' ' + (L.ok || 'answers') + served + on;
       }
-      return '\u2717 ' + d.model + ' ' + (L.bad || 'failed') + ' \u2014 ' + (d.detail || '');
+      return '\u2717 ' + d.model + ' ' + (L.bad || 'failed') + ' \u2014 ' + (d.detail || '') + on;
     }
-    function paint(models, current) {
-      const list = (models || []).slice();
-      if (current && list.indexOf(current) < 0) list.unshift(current);
-      el.innerHTML = list
-        .map(m => '<option value="' + escapeHtml(m) + '">' + escapeHtml(m) + '</option>')
+
+    function itemAt(i) {
+      return menu.children[i] || null;
+    }
+    function hold(i) {
+      const prev = itemAt(held);
+      if (prev) prev.classList.remove('held');
+      held = i;
+      const now = itemAt(held);
+      if (now) {
+        now.classList.add('held');
+        now.scrollIntoView({ block: 'nearest' });
+      }
+    }
+    /* 正在用的那个：名字 + 一枚勾（不是只有颜色——色盲模式与打印都还得看得出） */
+    function paint() {
+      nameEl.textContent = current || '—';
+      menu.innerHTML = names
+        .map(
+          m =>
+            '<button type="button" role="option" class="model-item' +
+            (m === current ? ' current' : '') +
+            '" data-model="' + escapeHtml(m) + '" aria-selected="' + (m === current) + '">' +
+            '<span class="model-item-name">' + escapeHtml(m) + '</span>' +
+            '<span class="model-item-tick" aria-hidden="true">\u2713</span></button>'
+        )
         .join('');
-      if (current) el.value = current;
+    }
+    /* 贴着触发器下方，**左沿对齐**并夹在视口里：桌面上触发器偏左（Fungi 之后），手机上它在
+       顶栏最左边 —— 按右沿对齐会让面板从触发器往左长，窄屏上直接长到屏幕外（实测第一版就是
+       那样，左边几截字符被切掉）。放不下时整体左移，双留 8px 边距。 */
+    function place() {
+      const r = trigger.getBoundingClientRect();
+      const width = menu.offsetWidth || 0;
+      let left = r.left;
+      if (width && left + width > window.innerWidth - 8) left = window.innerWidth - 8 - width;
+      menu.style.left = Math.max(8, left) + 'px';
+      menu.style.right = 'auto';
+      menu.style.top = r.bottom + 6 + 'px';
+    }
+    function open() {
+      if (isOpen) return;
+      isOpen = true;
+      gen += 1;
+      place();
+      menu.hidden = false;
+      wrap.classList.add('open');
+      trigger.setAttribute('aria-expanded', 'true');
+      /* 关闭动画还在跑时又被点开：`overwrite:'auto'`（motion.js 里设的）会把那条 out 补间掐掉，
+         它的 onComplete 不会跑 —— 所以「开着没」必须由 isOpen 说了算，不能看 `menu.hidden`
+         （补间没结束时它还是 false，快速两下点击就会卡成「看起来开着其实已经收掉」）。 */
+      window.fungiMotion?.menuIn?.(menu);
+      window.addEventListener('scroll', place, true);
+      window.addEventListener('resize', place);
+      let i = names.indexOf(current);
+      if (i < 0) i = 0;
+      hold(i >= 0 && names.length ? i : -1);
+    }
+    function close() {
+      if (!isOpen) return;
+      isOpen = false;
+      wrap.classList.remove('open');
+      trigger.setAttribute('aria-expanded', 'false');
+      window.removeEventListener('scroll', place, true);
+      window.removeEventListener('resize', place);
+      /* 迟到的收尾不许盖住刚打开的面板（实测栽过）：关闭补间的 onComplete 可能在重新打开之后
+         才回来，那一下会把 `hidden` 又摁成 true —— 面板明明 `aria-expanded=true`，行却是
+         `display:none`（Playwright 的报错正是 "element is not visible"）。代际号一比就知道
+         这声收尾属不属于当前这一次。 */
+      const mine = gen;
+      const finish = () => {
+        if (mine !== gen) return;
+        menu.hidden = true;
+        held = -1;
+      };
+      if (window.fungiMotion?.menuOut) window.fungiMotion.menuOut(menu, finish);
+      else finish();
     }
     function flash(cls, text) {
       clearTimeout(fade);
-      el.classList.remove('ok', 'bad', 'busy');
-      el.classList.add(cls);
-      el.title = text;
-      fade = setTimeout(() => el.classList.remove('ok', 'bad'), MODEL_NOTE_MS);
+      trigger.classList.remove('ok', 'bad', 'busy');
+      trigger.classList.add(cls);
+      trigger.title = text;
+      fade = setTimeout(() => trigger.classList.remove('ok', 'bad'), MODEL_NOTE_MS);
     }
     async function load() {
       try {
         const d = await (await fetchJSON('/model')).json();
-        paint(d.models, d.model);
+        setNames(d.models, d.model);
         return d;
       } catch (e) {
         return null;
       }
+    }
+    function setNames(models, cur) {
+      names = (models || []).slice();
+      if (cur && names.indexOf(cur) < 0) names.unshift(cur);
+      current = cur || '';
+      paint();
     }
     async function use(name) {
       if (busy || !name) return null;
@@ -1787,7 +1903,7 @@
       note((L.switching || 'Switching to') + ' ' + name + '\u2026');
       try {
         const d = await (await postJSON('/model', { model: name })).json();
-        paint(d.models, d.model);
+        setNames(d.models, d.model);
         const said = sentence(d);
         flash(d.reachable ? 'ok' : 'bad', said);
         note(said);
@@ -1800,7 +1916,43 @@
         busy = false;
       }
     }
-    el.addEventListener('change', () => { use(el.value); });
+
+    trigger.addEventListener('click', e => {
+      e.stopPropagation();
+      if (isOpen) close();
+      else open();
+    });
+    menu.addEventListener('click', e => {
+      const row = e.target.closest ? e.target.closest('.model-item') : null;
+      if (!row) return;
+      e.stopPropagation();
+      const name = row.dataset.model;
+      close();
+      use(name);
+    });
+    trigger.addEventListener('keydown', e => {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ') {
+        if (!isOpen) { open(); e.preventDefault(); return; }
+        if (e.key === 'ArrowDown') { hold(Math.min(held + 1, names.length - 1)); e.preventDefault(); }
+        else if (e.key === 'ArrowUp') { hold(Math.max(held - 1, 0)); e.preventDefault(); }
+        else if (e.key === 'Enter' || e.key === ' ') {
+          const row = itemAt(held);
+          if (row) { close(); use(row.dataset.model); }
+          e.preventDefault();
+        }
+      } else if (e.key === 'Escape' && isOpen) {
+        close();
+        e.preventDefault();
+      }
+    });
+    /* 点别处 / 按 Esc（焦点不在触发器上时）就收起来——面板是浮层，不是常驻侧栏。
+       面板已经不在 wrap 里（挂在 body 上），所以「里面」要连它一起算。 */
+    document.addEventListener('click', e => {
+      if (isOpen && !wrap.contains(e.target) && !menu.contains(e.target)) close();
+    });
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && isOpen) close();
+    });
     load();
     return { load, use };
   }

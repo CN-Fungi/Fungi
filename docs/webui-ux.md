@@ -251,6 +251,13 @@ agent 气泡轨道漂移 + 进度环。
    - 2026-09-25 追加（spec §66，只增不改）：`GET /model` 多回一个 `models`（下拉列表那份可选列表）；
      新增 `POST /model`（切模型 + 自动探一次调用）。`/configure` 的 Model 框从「覆盖」改成「添加」。
      缓存里的老页面只读 `d.model`，两处都还是它要的形状，照旧能用。
+   - 2026-09-25 再追加（spec §66.7 自绘下拉 / §68 每个模型记自己的端点与密钥）：头部那个模型列表是
+     **自绘**的下拉（原生 `<select>` 的弹出层由系统画，吃不到 token 也没有开合过程 —— 用户当天报告
+     「风格和原来的不搭，没有动画效果」）；面板 `position:fixed` 挂在 `body` 上（留在头部会被
+     `#title-wrap{overflow:hidden}` 裁掉），开合动画在 `motion.js` 的 `menuIn/menuOut`
+     （`reduced` 时模块整体折叠 = 瞬时开合）。`GET /model` 再多回一个 `endpoint`
+     （**密钥永不上页面**），`POST /model` 起连 url+key 一起切。旧的 `{model, models}` 形状仍是子集，
+     缓存页面照旧能用。
 
 ## GUI：手机端页（当时写在 `fungi/gui.py`，2026-09-10 起是 `fungi/gui/mobile.py`）
 

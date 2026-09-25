@@ -26,8 +26,9 @@ from fungi.config import (
     PROJECT_ROOT,
     RESOURCE_ROOT,
     load_config,
-    remember_model,
+    remember_provider,
     save_config,
+    switch_model,
 )
 from fungi.events import Sink
 from fungi.hub.app import RangeNotSatisfiableError, range_window, safe_name
@@ -852,7 +853,12 @@ class YesSirHandler(BaseHTTPRequestHandler):
             self._send_static(route[1:])  # web/vendor/<file> — keep the dir prefix
         elif route == "/model":
             cfg = load_config()
-            self._send_json({"model": cfg.model, "models": cfg.model_list})
+            # `endpoint` rides along since §68 (switching a model switches the url too);
+            # the key never goes to the page — it has no use for it and the config modal
+            # is the one place a user types it.
+            self._send_json(
+                {"model": cfg.model, "models": cfg.model_list, "endpoint": cfg.endpoint}
+            )
         elif route == "/config-status":
             self._send_json({"configured": load_config().configured})
         elif route == "/lan":
@@ -1007,15 +1013,19 @@ class YesSirHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "detail": "no model given"}, status=400)
                 return
             cfg = load_config()
-            fresh = remember_model(cfg, name)
+            fresh = switch_model(cfg, name)  # §68: 连带把名字自己的端点+密钥带过来
             save_config(cfg)
             reachable, detail = probe_model(cfg.model, cfg.endpoint, cfg.api_key)
+            if reachable and remember_provider(cfg, cfg.model, cfg.endpoint, cfg.api_key):
+                # 这次调用回 200 了: 把它用的那套 url+key 记在这个名字上 (§68).
+                save_config(cfg)
             runlog.note("model switched to %s (new=%s, reachable=%s)", cfg.model, fresh, reachable)
             self._send_json(
                 {
                     "ok": True,
                     "model": cfg.model,
                     "models": cfg.model_list,
+                    "endpoint": cfg.endpoint,
                     "fresh": fresh,
                     "reachable": reachable,
                     "detail": detail,
@@ -1024,15 +1034,20 @@ class YesSirHandler(BaseHTTPRequestHandler):
         elif url.path == "/configure":
             data = self._read_body()
             cfg = load_config()
+            if data.get("model"):
+                # §66: the modal's Model box adds to the pickable list instead of
+                # overwriting the one in use — the header's dropdown reads the same
+                # list, so a name typed once is one click away afterwards.
+                # §68: switching first lets a remembered pairing fill the file; the
+                # values typed into this very form then win over it (that is what
+                # "the user said so" means here).
+                switch_model(cfg, str(data["model"]))
             if data.get("api_key"):
                 cfg.api_key = data["api_key"]
             if data.get("endpoint"):
                 cfg.endpoint = data["endpoint"]
-            if data.get("model"):
-                # §66: the modal's Model box adds to the pickable list instead of
-                # overwriting the one in use — the header's dropdown reads the
-                # same list, so a name typed once is one click away afterwards.
-                remember_model(cfg, str(data["model"]))
+            # 手填的这套就是这个模型的端点+密钥 (§68): 记在名字上, 切走再切回来它自己跟上.
+            remember_provider(cfg, cfg.model, cfg.endpoint, cfg.api_key)
             save_config(cfg)
             self._send_json({"ok": True, "models": cfg.model_list})
         elif url.path == "/save":

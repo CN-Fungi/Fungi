@@ -184,6 +184,26 @@
     });
   })();
 
+  /* Header dropdown (spec §66): the panel grows out of the corner its caret sits in,
+     so it reads as belonging to the button instead of appearing. ≤200ms — it is a
+     control, not a scene (docs/webui-ux.md: 过渡 ≤400ms、不阻塞交互).
+     Visibility itself is the caller's `hidden` toggle: with reduced motion the module
+     collapses and the menu simply appears, which is the contract. */
+  function menuIn(el) {
+    if (!el) return;
+    gsap.fromTo(el, { opacity: 0, scale: 0.94, y: -6, transformOrigin: 'top right' },
+      { opacity: 1, scale: 1, y: 0, duration: 0.2, ease: 'expo.out',
+        onComplete: function () { clear(el); } });
+  }
+  function menuOut(el, done) {
+    if (!el) { if (done) done(); return; }
+    gsap.to(el, {
+      opacity: 0, scale: 0.96, y: -4, transformOrigin: 'top right',
+      duration: 0.14, ease: 'power2.in',
+      onComplete: function () { clear(el); if (done) done(); }
+    });
+  }
+
   window.fungiMotion = {
     reduced: false,
     msgIn: msgIn,
@@ -195,6 +215,8 @@
     waveOn: waveOn,
     waveOff: waveOff,
     counter: counter,
-    float: float
+    float: float,
+    menuIn: menuIn,
+    menuOut: menuOut
   };
 })();

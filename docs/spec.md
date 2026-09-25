@@ -3140,13 +3140,17 @@ token数得到。」
 
 ### 66.3 WebUI（`web/common.js::mountModelPicker`，两个壳共用）
 
-- 头部那个只读的 `#model-name`（span，`/model` 一来就写进去）变成 `#model-select`（select）——
+- 头部那个只读的 `#model-name`（span，`/model` 一来就写进去）变成 `#model-select`——
   桌面上就是用户说的「左上角原来显示模型的位置」，手机壳 `/m` 顶上同一份实现（都是 `mountModelPicker`）。
-- `GET /model` → `{model, models}`；`POST /model {model}` → 写盘 + 探一次，回
-  `{ok, model, models, fresh, reachable, detail}`：**`ok` = 存住了，`reachable` = 它答了**（两件事分开报，
-  不是同一个断言）。
+  **自绘**下拉（不是原生 `<select>`：同日第二次报告见 §66.7），面板结构由这个函数自己建，
+  触发器留在各自的 HTML 里（桌面在 `#header`、手机在 `#topbar`，CSS 各管各的位置）。
+- `GET /model` → `{model, models, endpoint}`（§68 起多回一个 `endpoint`；**密钥永不上页面**）；
+  `POST /model {model}` → 写盘（切模型连带换 url+key，§68）+ 探一次，回
+  `{ok, model, models, endpoint, fresh, reachable, detail}`：**`ok` = 存住了，`reachable` = 它答了**
+  （两件事分开报，不是同一个断言）。
 - 结果也是两处：`#status` 一句话（下一轮对话会把它顶掉，所以那条通道只能当"顺口一说"）+
-  select 自己留颜色（`.ok` / `.bad`，8 秒后褪，完整那句留在 `title` 里）—— 句子没了，那次测试的结果还在。
+  触发器自己留颜色（`.ok` / `.bad`，8 秒后褪，完整那句留在 `title` 里）—— 句子没了，那次测试的结果还在。
+  句尾带上落在哪台主机上（`@ api.xiaomimimo.com`）：一个列表里住两家时，"通了"得看得出通到哪家。
 - 老缓存页面（没有 `#model-select`）不炸：`mountModelPicker` 找不到元素就返回 null，脚本其余部分照旧。
 - `/configure`（首次配置弹窗那个 Model 框）也从「覆盖」改成「添加」：WebUI 里键入过的名字，
   之后就在头部下拉列表里。
@@ -3167,9 +3171,11 @@ token数得到。」
   把 provider 报的模型名带回来、失败带回原话、无人监听的端口要**立刻**回 `Connection failed`。
 - `tests/test_gui.py`（2 条）：下拉选中 / 输入框添加都写盘 + 自动测（`probe_model` 打桩）+ 状态行出结果 +
   同名不添第二行；调不通时状态行是 `✗` 且选择不被撤回。
-- `tests/test_webui_models.py`（3 条，真 Chromium + 真 `RoomServer` + 打桩的探针）：桌面下拉列表 =
-  `config.json` 那份（`#model-name` 已不在页面上）→ 选一个 → 自动测 → 写盘（旧的还在列表里）→ `ok` 颜色 +
-  状态行；调不通 → `bad` 颜色 + provider 原话，选择不撤回；手机 `/m` 同一套断言。
+- `tests/test_webui_models.py`（6 条，真 Chromium + 真 `RoomServer` + 打桩的探针）：桌面下拉列表 =
+  `config.json` 那份（`#model-name` 与任何原生 `<select>` 都已不在页面上）→ 点开 → 选一个 → 自动测 →
+  写盘（旧的还在列表里）→ `ok` 颜色 + 状态行 + 自己收起来；**样式与动画**（面板底色 == `--surface`、
+  圆角 == `--radius-sm`、开合逐帧采到中间帧）；调不通 → `bad` 颜色 + provider 原话，选择不撤回；
+  §68 两条（切过去换 url+key 并在话里报出主机名、回 200 才学）；手机 `/m` 同一套断言。
 - 修前红（`git stash push -- <源文件>`）：见 §66.6。
 - 门禁（最终树）：见 §66.6。
 
@@ -3201,6 +3207,39 @@ token数得到。」
   `python -m ruff check .`、`python -m ruff format --check .` 全绿；工作区除用户自己的 `shots/` 外干净。
   这一轮之后只动过 §66.2 那个布局（下拉列表独占一行、输入框保持 360 的宽度）：`tests/test_gui.py`
   整文件重跑 **79 passed**，ruff 仍全绿。
+
+### 66.7 自绘下拉（同日第二次报告：「风格和原来的不搭，没有动画效果」）
+
+第一版是原生 `<select>`：弹出层由系统画，吃不到这套 token（`--surface/--radius-sm/--shadow-card/
+--t-fast`），也没有开合过程 —— 跟旁边那些自绘控件（主题开关、折叠卡、抽屉）根本不是一个东西。现在：
+
+- **触发器**：沿用原来那行小字的排版（透明底、`--dim`、mono、0.72rem），悬停长边框、`:focus-visible`
+  描边、右侧一个 CSS 三角（`.model-caret`）打开时翻 180°；ok/bad/busy 三个状态色照旧留在它身上。
+- **面板**：`position:fixed` 挂在 `body` 上（`document.body.appendChild`），**不是**触发器的子节点 ——
+  留在原地会被祖先的 `overflow:hidden` 裁掉：手机壳的 `#title-wrap{overflow:hidden}`（会话名省略号
+  要用）正好套在触发器外面，实测行都在、就是不可见，Playwright 点不到（第一轮 6 条浏览器用例全红在
+  这个 `element is not visible` 上）。位置由 `place()` 按触发器的 `getBoundingClientRect()` 算，
+  滚动/改窗口尺寸时跟着走。
+- **行**：当前那个带一枚勾（不只靠颜色 —— 色盲模式与打印也看得出）+ `aria-selected`；悬停与键盘
+  高亮共用一套底色（`--accent` 12%）；`role="listbox"` / `role="option"`。
+- **动效**：`motion.js` 新增 `menuIn/menuOut`（GSAP 0.20s `expo.out` / 0.14s `power2.in`，从**右上角**
+  scale 出来 —— 那个角正是箭头所在），调用点一律 `window.fungiMotion?.menuIn?.(menu)`：
+  `prefers-reduced-motion` 下模块整体折叠成 `{reduced:true}` → 两个函数不存在 → 瞬时开合，
+  可见性本身由 JS 的 `hidden` 管，不靠动画（模块缺失时 UI 照常可用，这是动效契约）。
+- **开合状态由 `isOpen` 说了算，不看 `menu.hidden`**：关闭补间还没跑完时 `hidden` 仍是 false，用它
+  判断会让「快点两下」卡成「看着开着其实已经收掉」（实测就是这么红的）；`isOpen` 下再点开时
+  `overwrite:'auto'` 掐掉那条 out 补间，`hidden=false` 立刻生效。
+- **键盘**：触发器上 ArrowDown/Up 走行、Enter/Space 选中、Esc 收起；点别处自动收起。
+- **名字包一层 span 再省略号**（`.model-trigger-name`）：裸文本节点在手机顶栏（窄、`#title-wrap`
+  是 flex）会被挤成三行 `mimo-\nv2.6-\nflash`；包一层才能 `text-overflow:ellipsis`。
+- **面板左沿对齐触发器并夹在视口里**（放不下就整体左移）：按右沿对齐时，手机触发器在顶栏最左边，
+  面板从它往左长 → 直接长到屏幕外（实测左边几截字符被切掉）。真正**摆不摆得下**由 `place()`
+  按触发器的 `getBoundingClientRect()` 算，滚动/改窗口尺寸时跟着走。
+- **手机壳的宽度约束放 `.model-pick` 上**，不是触发器自己：写在触发器身上的 `max-width:44%`，
+  包含块是它自己的内容宽度 → 百分比解析成几个字符（实测触发器被掐成 `mim...`）。
+- **两条都钉进用例**（`tests/test_webui_models.py::test_the_dropdown_wears_this_uis_tokens_and_animates`）：
+  面板底色 == 这一页 `--surface` 的解析值、圆角 == `--radius-sm`（换主题跟着换，不是写死的颜色），
+  以及开/关**逐帧**采到的 `opacity` 里必须有中间帧 —— 瞬时出现就是在骗人。
 
 
 ## 67. 会话列表不再「重排」（2026-09-25 用户报告）：两次无谓的 DOM 搬动
@@ -3251,4 +3290,55 @@ token数得到。」
   是 `position:absolute`、新行的 top **从第一帧起就等于它的终点**、且**没有一帧**落在文件传输助手那一格上。
 - 手机壳（`web/m.js`）不在这条路上：它每次重绘是**重建**行（没有 Flip、没有绝对定位），所以既不会
   重叠也不会画到别处；本批没动它（用户报的是桌面那个有好友列表的壳）。
+- 门禁：见 §66.6。
+
+## 68. 每个模型记住自己的端点与密钥（2026-09-25 用户点名）：切换模型随之切换 url 和 key
+
+**用户原话**：「确实，每次调用 200 以后，之后切换模型应该是随之切换 url 和 key 的」。
+
+### 68.1 墙在哪：一个 config 只有一套端点
+
+§66 做完，用户把 `Mimo-v2.6-flash` 加进了启动器的下拉列表 —— 然后发现用不了：`fungi/llm.py` 的
+`stream_chat` / `probe_model` 只吃**一个** `endpoint` + `api_key`，`config.json` 也只有一格。切模型
+只改了 `model` 这个名字，请求照样发到上一家的地址上。而两家根本不通：小米网关（`GET /v1/models`
+实测）只服务 9 个 `mimo-*`（v2.5 / v2.6 家族），DeepSeek 那边没有 MiMo —— 所以「一个下拉列表里放
+两家模型」在旧结构下根本不成立，这不是配置写错了。
+
+### 68.2 记什么、什么时候记（学下来的两个时刻）
+
+`config.json` 多一个 `model_providers`：模型名 → `{endpoint, api_key}`。
+
+- **探针回来 200**：切/加模型都会探一次（§66），那一刻把它这一次用的 url+key 记在这个名字上。
+- **用户手填并保存**：设置页那两个框回车、WebUI 设置弹层的保存 —— 用户写下的就是口供。
+- **答不上来不记**：没证据的配对不写进 `config.json`（✗ 那一轮只在屏上报原话）。
+- `switch_model(cfg, name)` = `remember_model`（进列表 + 在用）+ `adopt_provider`（把这名字记下的
+  那套摊到 `endpoint`/`api_key` 上）—— 两个界面、所有调用点都走它，语义只有一处。
+- 没记过的名字**不动现状**：用户可能正打算手填一套，替他把端点指向别处才是意外。
+- 手改了一半的记录（缺 `endpoint` 或缺 `api_key`、名字空、值不是 dict）读进来就当没有这一条：
+  留着它只会在下次切换时把请求指向一个空地址。
+- 名字离开列表也留着记录（一条几十字节）：再敲回那个名字就能直接用，这是记忆的全部意义。
+- 写盘只写**变了**的：`remember_provider` 返回 False 时一个字节都不动（每次切/加模型都会走到这条路）。
+
+### 68.3 接线（谁在什么时候调）
+
+| 位置 | 动作 |
+|---|---|
+| `fungi/config.py` | `provider_for` / `adopt_provider` / `remember_provider` / `switch_model`；`load_config`/`save_config` 读写 `model_providers` |
+| `fungi/gui/config.py` | `_write_model` 走 `switch_model`；切完 `_show_provider` 把端点框与密钥掩码一起换；探针回 200 → `_remember_provider`；`_save`（手填那两格）也记一次 |
+| `fungi/server.py` | `POST /model` 走 `switch_model`，`reachable` 才记；`/configure` 先切（带出旧记忆）、再让手填的值覆盖它、然后记下这一套；`GET /model` 多回一个 `endpoint`（**密钥永不上页面**） |
+| `fungi/agent.py` | 每轮按名字取配对：`provider_for(cfg, model) or (cfg.endpoint, cfg.api_key)` —— 分层模型（`models: {1: 名字}`，trilayer）因此也能坐落在另一家上 |
+| `web/common.js` | 结果那句话报出落在哪台主机上（`✓ x answers @ api.xiaomimimo.com`）：一个列表里住两家时，「通了」得看得出通到哪家 |
+
+### 68.4 验收
+
+- `tests/test_config.py`（3 条）：两家来回切的 round-trip（含落盘/读回）、没记过的名字不动现状、
+  半条记录被丢掉且不会被采用。
+- `tests/test_gui.py`（2 条）：下拉切到有记忆的名字 → 端点框与密钥掩码跟着换 + 盘里换；探针 200 才学、
+  ✗ 不学。
+- `tests/test_webui_models.py`（2 条，真 Chromium）：切过去写对 url+key、话里报出主机名、切回来那套还在；
+  回 200 才学。
+- 真机（2026-09-25）：`mimo-v2.6-flash`（`https://api.xiaomimimo.com/v1/chat/completions`，小米那把 key）
+  经 Fungi 自己的代码跑通文本/工具/视觉三样（`收到`；`get_time` 被调用；读出手写数字 `7341`）；
+  `deepseek-v4-flash-vision-exp` 那套留在记忆里，切换即回到 DeepSeek。探针实测两条都 `reachable`，
+  `detail` 与配置名一致。
 - 门禁：见 §66.6。

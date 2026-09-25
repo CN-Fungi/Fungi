@@ -240,3 +240,86 @@ def test_a_hand_edited_list_does_not_get_two_identical_rows(tmp_path):
 
     assert config.remember_model(cfg, "") is False, "空名字什么也不干"
     assert cfg.model_list == ["m1", "m2"]
+
+
+def test_a_model_remembers_the_endpoint_and_key_it_answered_on(tmp_path):
+    """§68（用户 2026-09-25「每次调用 200 以后，之后切换模型应该随之切换 url 和 key」）：
+    一个列表里可以住两家——每个名字记着自己那套端点+密钥，切换时整套跟着走。"""
+    p = tmp_path / "config.json"
+    deepseek = ("https://api.deepseek.com/chat/completions", "sk-deepseek")
+    mimo = ("https://api.xiaomimimo.com/v1/chat/completions", "sk-mimo")
+    # 先落一次盘再读回来（真实路径：`load_config` 会把在用的那个模型放进列表，
+    # 之后切换才谈得上「旧名字还在不在」）
+    config.save_config(
+        config.Config(api_key=deepseek[1], endpoint=deepseek[0], model="deepseek-x"), p
+    )
+    cfg = config.load_config(p)
+    config.remember_provider(cfg, "deepseek-x", *deepseek)
+    config.switch_model(cfg, "mimo-v2.6-flash")
+    config.remember_provider(cfg, "mimo-v2.6-flash", *mimo)
+    assert config.adopt_provider(cfg, "mimo-v2.6-flash") is True, "刚学会的那套现在就得上岗"
+    config.save_config(cfg, p)
+
+    assert json.loads(p.read_text(encoding="utf-8"))["model_providers"] == {
+        "deepseek-x": {"endpoint": deepseek[0], "api_key": deepseek[1]},
+        "mimo-v2.6-flash": {"endpoint": mimo[0], "api_key": mimo[1]},
+    }
+
+    # 关掉程序再打开：切回 deepseek 那个名字，url+key 自己回来（不用重新糊一遍）
+    cfg = config.load_config(p)
+    assert (cfg.model, cfg.endpoint, cfg.api_key) == ("mimo-v2.6-flash", *mimo)
+    assert config.switch_model(cfg, "deepseek-x") is False, "老名字：不算新添一行"
+    assert (cfg.model, cfg.endpoint, cfg.api_key) == ("deepseek-x", *deepseek)
+    assert cfg.model_list == ["deepseek-x", "mimo-v2.6-flash"], "两个都还在列表里"
+
+
+def test_switching_to_an_unknown_name_leaves_the_pair_alone(tmp_path):
+    """没记过的新名字：端点+密钥保持现状（用户可能正打算手填一套），不许凭空指向别处。"""
+    cfg = config.Config(api_key="sk-now", endpoint="https://now.example/v1", model="m1")
+    assert config.provider_for(cfg, "m2") is None
+    assert config.switch_model(cfg, "m2") is True
+    assert (cfg.model, cfg.endpoint, cfg.api_key) == ("m2", "https://now.example/v1", "sk-now")
+
+    assert config.remember_provider(cfg, "m2", "https://now.example/v1", "") is False, (
+        "缺 key 不算一套"
+    )
+    assert config.remember_provider(cfg, "  ", "https://now.example/v1", "sk-x") is False, (
+        "缺名字也不算"
+    )
+    assert cfg.model_providers == {}
+
+    assert config.remember_provider(cfg, "m2", "https://now.example/v1", "sk-now") is True
+    assert config.remember_provider(cfg, "m2", "https://now.example/v1", "sk-now") is False, (
+        "一模一样不再动"
+    )
+
+
+def test_a_half_written_memory_row_is_dropped(tmp_path):
+    """手改 config.json 只写了一半（缺 key、名字空、值不是 dict）：读进来就当没有这一条 ——
+    留着它只会在下一次切换时把请求指向一个空的地址。"""
+    p = tmp_path / "config.json"
+    p.write_text(
+        json.dumps(
+            {
+                "api_key": "k",
+                "endpoint": "e",
+                "model": "m1",
+                "model_providers": {
+                    "half": {"endpoint": "https://half.example/v1"},
+                    "": {"endpoint": "https://x/v1", "api_key": "sk-x"},
+                    "junk": "not-a-dict",
+                    "good": {"endpoint": "https://good.example/v1", "api_key": "sk-good"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = config.load_config(p)
+    assert cfg.model_providers == {
+        "good": {"endpoint": "https://good.example/v1", "api_key": "sk-good"}
+    }
+    assert config.adopt_provider(cfg, "half") is False, "半条记录不会被采用"
+    assert (cfg.endpoint, cfg.api_key) == ("e", "k")
+    assert config.adopt_provider(cfg, "good") is True
+    assert (cfg.endpoint, cfg.api_key) == ("https://good.example/v1", "sk-good")
+    assert config.adopt_provider(cfg, "good") is False, "已经在用的这一套：不用再写一遍"

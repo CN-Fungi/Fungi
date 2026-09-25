@@ -456,6 +456,20 @@ class ConfigPage(QWidget):
             return ""
         return (key[:5] + "…" + key[-4:]) if len(key) > 12 else "…" + key[-4:]
 
+    def _show_provider(self, cfg) -> None:
+        """把「现在这套端点 + 密钥」摊在两格里（切模型会把它整组换掉，spec §68）。
+
+        只动这两格：`_load_fields` 还要清「添加」那一格，而切模型时用户可能正往那里打字。
+        端点不是秘密，直接显示；密钥只在占位符里显示掩码（老规矩：真 key 从不上屏）。
+        """
+        mask = self._key_mask(cfg.api_key)
+        self.key_edit.setPlaceholderText(
+            f"当前 {mask}（留空 = 保持不变）" if mask else "API Key（留空 = 保持不变）"
+        )
+        self.endpoint_edit.setPlaceholderText("留空 = 保持不变")
+        self.endpoint_edit.setText(cfg.endpoint)
+        self.key_edit.clear()
+
     def _load_fields(self) -> None:
         """Show the stored values in the boxes (2026-09-10 user report: three
         empty boxes meant "what is configured?" was only readable from the
@@ -465,16 +479,10 @@ class ConfigPage(QWidget):
         keeps meaning "leave it alone" (typing into it never nests inside a
         displayed value)."""
         cfg = config_mod.load_config()
-        mask = self._key_mask(cfg.api_key)
-        self.key_edit.setPlaceholderText(
-            f"当前 {mask}（留空 = 保持不变）" if mask else "API Key（留空 = 保持不变）"
-        )
-        self.endpoint_edit.setPlaceholderText("留空 = 保持不变")
-        self.endpoint_edit.setText(cfg.endpoint)
+        self._show_provider(cfg)
         # 模型不再住在这个框里：当前用的是哪个由下拉列表显示，框是「添加」那一格（spec §66）
         self.model_edit.clear()
         self._load_models(cfg)
-        self.key_edit.clear()  # 只有掩码在占位符里：真 key 从不上屏
         # Bixian 两格同理：框里显示的就是盘里存的那份（argv 拼回一行）
         self.bixian_url.setText(str(cfg.decider.get("url") or ""))
         self.bixian_serve.setText(_join_command(cfg.decider.get("serve")))
@@ -496,6 +504,9 @@ class ConfigPage(QWidget):
             cfg.api_key = self.key_edit.text().strip()
         if self.endpoint_edit.text().strip():
             cfg.endpoint = self.endpoint_edit.text().strip()
+        # 手填的这套就是「这个模型走这个端点+密钥」的口供（spec §68）：记在名字上，
+        # 切走再切回来还是它，不必重新糊一遍。
+        config_mod.remember_provider(cfg, cfg.model, cfg.endpoint, cfg.api_key)
         config_mod.save_config(cfg)
         # 保存后回到当前值（不是清空）：框里始终显示的就是正在用的配置
         self._load_fields()
@@ -532,9 +543,13 @@ class ConfigPage(QWidget):
         )
 
     def _write_model(self, model: str) -> bool:
-        """把「用哪个模型」写盘（下拉选中与输入框添加共用）。返回它是不是新名字。"""
+        """把「用哪个模型」写盘（下拉选中与输入框添加共用）。返回它是不是新名字。
+
+        spec §68：切模型连带把那名字自己的端点+密钥写进去（`switch_model` 里做的），
+        不然一个列表里放着两家模型时，切过去只会把请求发到上一家的地址上。
+        """
         cfg = config_mod.load_config()
-        fresh = config_mod.remember_model(cfg, model)
+        fresh = config_mod.switch_model(cfg, model)
         config_mod.save_config(cfg)
         return fresh
 
@@ -547,7 +562,9 @@ class ConfigPage(QWidget):
         if not name or name == cfg.model:
             return
         self._write_model(name)
-        self._load_models(config_mod.load_config())
+        cfg = config_mod.load_config()
+        self._load_models(cfg)
+        self._show_provider(cfg)  # §68: 换了模型就换了 url+key，框里得跟着变
         self._refresh_status()
         self._probe(name, "已切换到")
 
@@ -562,7 +579,9 @@ class ConfigPage(QWidget):
             return
         fresh = self._write_model(name)
         self.model_edit.clear()
-        self._load_models(config_mod.load_config())
+        cfg = config_mod.load_config()
+        self._load_models(cfg)
+        self._show_provider(cfg)  # §68: 这个名字带着自己的 url+key 就一起摆上来
         self._refresh_status()
         self._probe(name, "已添加并切换到" if fresh else "已切换到")
 
@@ -576,9 +595,11 @@ class ConfigPage(QWidget):
         self.model_status.setText(f"{prefix} {model} · 正在测试这次调用…")
         self._probe_result = None
         self._probe_timer.start()
+        endpoint, api_key = cfg.endpoint, cfg.api_key  # 这一次用的那一套，回 200 就记它
 
         def run() -> None:
-            self._probe_result = (model, *llm_mod.probe_model(cfg.model, cfg.endpoint, cfg.api_key))
+            ok, detail = llm_mod.probe_model(model, endpoint, api_key)
+            self._probe_result = (model, ok, detail, endpoint, api_key)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -588,14 +609,26 @@ class ConfigPage(QWidget):
             return
         self._probe_result = None
         self._probe_timer.stop()
-        model, ok, detail = got
+        model, ok, detail, endpoint, api_key = got
         if model != config_mod.load_config().model:
             return  # 探测期间用户又切了：这份结果说的是上一个模型，别报
         self.model_status.setText(self._model_sentence(model, ok, detail))
         if ok:
+            self._remember_provider(model, endpoint, api_key)
             InfoBar.success("模型可用", f"{model} 调通了", duration=2500, parent=self.window_ref)
         else:
             InfoBar.error("模型调不通", f"{model}：{detail}", duration=6000, parent=self.window_ref)
+
+    @staticmethod
+    def _remember_provider(model: str, endpoint: str, api_key: str) -> None:
+        """这一次调用回 200，就把用的那套 url+key 记在这个名字上（spec §68）。
+
+        用户原话：「每次调用 200 以后，之后切换模型应该是随之切换 url 和 key 的」。
+        只在学到的东西真的变了才写盘 —— 每次切/加模型都会走到这条路径上。
+        """
+        cfg = config_mod.load_config()
+        if config_mod.remember_provider(cfg, model, endpoint, api_key):
+            config_mod.save_config(cfg)
 
     @staticmethod
     def _model_sentence(model: str, ok: bool, detail: str) -> str:
