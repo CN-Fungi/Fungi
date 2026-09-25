@@ -156,6 +156,11 @@ def short(text: object, limit: int = MAX_ARG) -> str:
     return flat[:limit]
 
 
+def _source_of(name: str) -> str:
+    """Where a config field's value came from: the generic env var or the file."""
+    return f"env:{name}" if os.environ.get(name) else "config.json"
+
+
 def environment(mode: str, argv: list[str] | None = None) -> None:
     """The banner a diagnosis starts from: one run, one block of facts.
 
@@ -194,6 +199,25 @@ def _banner(mode: str, argv: list[str] | None) -> None:
         problem("config could not be loaded: %s", exc)
         return
     note("model=%s endpoint=%s api_key=%s", cfg.model, cfg.endpoint, bool(cfg.api_key))
+    # Where each of the three came from. `load_config` lets three generic names
+    # override the file, and a key belongs to its endpoint: on 2026-09-25 this
+    # box handed a Xiaomi MiMo key (OPENAI_API_KEY, set machine-wide for other
+    # agents) to api.deepseek.com and got a 401 whose message named a key the
+    # config file did not contain. The banner said only `api_key=True`.
+    key_src = _source_of("OPENAI_API_KEY")
+    note(
+        "来源: model=%s endpoint=%s api_key=%s",
+        _source_of("OPENAI_MODEL"),
+        _source_of("OPENAI_ENDPOINT"),
+        key_src,
+    )
+    if key_src != "config.json" and _source_of("OPENAI_ENDPOINT") == "config.json":
+        problem(
+            "OPENAI_API_KEY 环境变量压过了 config.json 里的钥匙，但端点还是 config.json 的（%s）："
+            "这把钥匙很可能不属于这个端点 —— 若报 401/403，先看这条。"
+            "要用配置里那把钥匙：启动前清掉 OPENAI_API_KEY；真要换端点，就把 OPENAI_ENDPOINT 一起设上。",
+            cfg.endpoint,
+        )
     note("ghostworld=%s dir=%r", cfg.ghostworld, cfg.ghostworld_dir)
 
 

@@ -1648,6 +1648,16 @@ follower 照常连上、`pos`/`say` 拿真 ack。（在 bash 里跑 python 永�
 **横幅**（每次运行一段）：版本 / python / 平台 / frozen / 根目录 / argv / config 路径与存在性 /
 模型与 endpoint / **api_key 有没有（绝不写它本身）** / ghostworld 开关与目录。
 
+**三个字段各自的来源也写出来**（2026-09-25 补）：`load_config` 允许三个**通用名字**压过 config.json
+（`OPENAI_API_KEY` / `OPENAI_ENDPOINT` / `OPENAI_MODEL`），而**一把钥匙属于它的端点**。那天这台机器
+就是被咬在这种错配上：User 级的 `OPENAI_API_KEY` 是别的 agent 用来接小米 MiMo 的钥匙，它顶掉了
+config.json 里配好的 DeepSeek 钥匙，端点却仍是 config.json 的 → 拿别人的钥匙敲自己的端点，
+回一句 `401 … your api key: ****sovy is invalid`（那把钥匙根本不在 config.json 里）。当时的横幅只写
+`api_key=True`，日志里**看不出钥匙是从哪儿来的**，于是那句报错只能靠猜。
+现在横幅多一行 `来源: model=… endpoint=… api_key=env:OPENAI_API_KEY|config.json`，并且**只在**
+「钥匙来自环境变量、端点来自 config.json」时当场喊一句 WARNING（说明那把钥匙很可能不属于这个端点、
+以及怎么退回配置里那把钥匙）。这不是行为改动：覆盖照旧生效，只是让它可诊断。
+
 **日志里不放凭据**：api_key 只写「有没有」；房间 token 一律不进文件——连「拿错 token 的敲门」那行也只记路径、不记 query（GET 的 query 就是 token），因为这个文件会被贴进公开仓库的 issue。
 
 **最值钱的一条**：`sys.excepthook` + `threading.excepthook` 的 traceback。窗口版 exe 崩掉是**无声**的，
