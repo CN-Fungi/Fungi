@@ -197,11 +197,11 @@ class ConfigPage(QWidget):
         pc_hint.setWordWrap(True)
         root.addWidget(pc_hint)
 
-        # BiXian 挑号（小标题）：intent= 的那一半——分不清该点哪个时，由这台机器配的本机
+        # Bixian（小标题）：intent= 的那一半——分不清该点哪个时，由这台机器配的本机
         # 决策服务读图挑编号（spec §63.1）。写的是 config.json 的 decider 段：整块原样
         # 读写，页面只碰地址与启动命令两格，手写的其它键（k/timeout/ask…）原样留着。
         root.addSpacing(10)
-        bixian_lbl = BodyLabel("BiXian 挑号")
+        bixian_lbl = BodyLabel("Bixian")
         bixian_lbl.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         root.addWidget(bixian_lbl)
         self.bixian_status = BodyLabel()
@@ -453,7 +453,7 @@ class ConfigPage(QWidget):
         self.endpoint_edit.setText(cfg.endpoint)
         self.model_edit.setText(cfg.model)
         self.key_edit.clear()  # 只有掩码在占位符里：真 key 从不上屏
-        # BiXian 两格同理：框里显示的就是盘里存的那份（argv 拼回一行）
+        # Bixian 两格同理：框里显示的就是盘里存的那份（argv 拼回一行）
         self.bixian_url.setText(str(cfg.decider.get("url") or ""))
         self.bixian_serve.setText(_join_command(cfg.decider.get("serve")))
         self._refresh_bixian()
@@ -516,7 +516,7 @@ class ConfigPage(QWidget):
         )
 
     def _write_bixian(self) -> bool:
-        """BiXian 两格写盘（回车与「保存并测试」共用）。False = 没写：命令读不出来。
+        """Bixian 两格写盘（回车与「保存并测试」共用）。False = 没写：命令读不出来。
 
         整块原样读写：这里只动 url 与 serve，手写进 decider 段的其它键（k / 超时 / ask /
         autostart…）一个不动——`Config.decider` 整个 dict 过，漏掉的键会随下一次保存消失。
@@ -554,9 +554,7 @@ class ConfigPage(QWidget):
         if not self._write_bixian():
             return
         self._refresh_bixian()
-        InfoBar.success(
-            "已保存", "BiXian 挑号已写入 config.json", duration=2500, parent=self.window_ref
-        )
+        InfoBar.success("已保存", "Bixian已写入 config.json", duration=2500, parent=self.window_ref)
 
     def _test_bixian(self) -> None:
         """保存并测试：先写盘，再按工具真正会用的那份配置问一次 /health（3 秒内回话）。"""

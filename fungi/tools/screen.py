@@ -1872,7 +1872,7 @@ def _decider_config() -> dict:
     Two sources, in this order, both the same JSON object:
       * `FUNGI_DECIDER` — for a caller that wants to point this box somewhere else for one run
       * `decider` inside `config.json` — where every other local setting already lives, and
-        what the settings page's 「BiXian 挑号」 row edits (spec §63.1)
+        what the settings page's 「Bixian」 row edits (spec §63.1)
 
     Keys: `url` (a resident service), `serve` (how to start it), `ask` (a one-shot process),
     `weights` (a path that must exist for the seam to be on at all), `k`, `timeout`, `wait`,
@@ -2168,7 +2168,7 @@ def _decider_pick(
     if not cfg:
         return None, (
             "ERROR: no decider is configured on this machine, so intent= cannot name a number. "
-            "Point one at a service — config.json's `decider` block (the settings page's BiXian "
+            "Point one at a service — config.json's `decider` block (the settings page's Bixian "
             "row) or FUNGI_DECIDER — with nothing configured, target= and name= still work."
         )
     weights = str(cfg.get("weights") or "")
@@ -4010,7 +4010,7 @@ SCHEMA = {
             "several controls share a name — `click`, `double_click`, `type` and `scroll` "
             "accept `intent=<what the gesture is for>` instead, and the number then comes from "
             "the decision service *this machine* has configured (config.json `decider`, "
-            "which the settings page's BiXian row edits, or FUNGI_DECIDER); with nothing "
+            "which the settings page's Bixian row edits, or FUNGI_DECIDER); with nothing "
             "configured, or the service not "
             "answering, the call comes back refused with the reason, and `target=`/`name=` keep "
             "working. Workflow: windows → targets(hwnd) → click/type on a number; "
@@ -4153,7 +4153,7 @@ SCHEMA = {
                         "confirm button'). click/double_click/type/scroll accept it instead of "
                         "target=/name=, and the number comes from the decision service this "
                         "machine has configured — the `decider` block in config.json (the "
-                        "settings page's BiXian row) or the FUNGI_DECIDER environment variable "
+                        "settings page's Bixian row) or the FUNGI_DECIDER environment variable "
                         "— never from a model inside this "
                         "tool. With nothing configured, or the service not answering, the call "
                         "comes back refused with the reason and target=/name= still work."

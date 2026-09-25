@@ -191,13 +191,22 @@ def _hermetic_gui_settings():
 
 @pytest.fixture(autouse=True)
 def _never_write_the_user_config(tmp_path, monkeypatch):
-    """Point the one config path at a throwaway copy.
+    """Point the one config path at a throwaway, always-present file.
 
     2026-09-10: the GUI tests patched `gui.load_config`/`gui.save_config`, which
     the split `fungi/gui/` package no longer reads — so a "save the courier
     memory" test wrote its own string into the user's real long-term memory
     (and the settings test wrote its key). Per-test patching is one rename away
     from missing again: redirect the path itself, here, for every test.
+
+    2026-09-23: seed `{}`, never the machine's real config.json. The old
+    copy-if-present made the suite's inputs depend on the machine running it:
+    a fresh clone has no config.json, so the sandbox file never appeared
+    (FileNotFoundError in the quotes-refusal test on the v0.9.0 Release
+    runner) and `/config-status` answered "unconfigured", raising the API-key
+    overlay that CI's click tests tripped over (test_webui_alerts). `{}` loads
+    exactly like an absent file — load_config falls back to defaults either
+    way — so every machine now runs the same suite.
     """
     from fungi import config as config_mod
 
@@ -205,8 +214,7 @@ def _never_write_the_user_config(tmp_path, monkeypatch):
     # directory (test_session's SESSIONS_DIR) glob it for *.json.
     target = tmp_path / "user-config" / "config.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    if config_mod.CONFIG_PATH.is_file():
-        target.write_text(config_mod.CONFIG_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    target.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(config_mod, "CONFIG_PATH", target)
 
 
