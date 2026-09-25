@@ -76,14 +76,16 @@ class ConfigPage(QWidget):
         root.addWidget(_row("接口地址", self.endpoint_edit))
 
         self.model_edit = LineEdit()
-        self.model_edit.setFixedWidth(240)
-        # 模型这一行（spec §66，用户 2026-09-25「添加模型下拉列表，下拉后选中哪个使用哪个 /
-        # 原先的输入框从覆盖变成添加」）：下拉列表 = 能用的模型，选中哪个就用哪个；右边那个
-        # 输入框是「添加」——回车把新名字加进列表并切过去，然后自动测一次调用。
+        self.model_edit.setFixedWidth(360)
+        # 模型这两行（spec §66，用户 2026-09-25「添加模型下拉列表，下拉后选中哪个使用哪个 /
+        # 原先的输入框从覆盖变成添加」）：上一行是下拉列表 = 能用的模型，选中哪个就用哪个；
+        # 下一行还是原来那个输入框，但它现在是「添加」——回车把新名字加进列表并切过去，然后自动测一次
+        # 调用。这一页每一行的控件都从第 90px 那一列起、宽 360：挤成一行会比其他行多探出去一截。
         self.model_combo = ComboBox()
-        self.model_combo.setFixedWidth(220)
+        self.model_combo.setFixedWidth(360)
         self.model_combo.currentIndexChanged.connect(self._pick_model)
-        root.addWidget(_row("模型", self.model_combo, self.model_edit))
+        root.addWidget(_row("模型", self.model_combo))
+        root.addWidget(_row("", self.model_edit))
         self.model_status = BodyLabel()
         self.model_status.setWordWrap(True)
         root.addWidget(self.model_status)
