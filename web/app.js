@@ -210,8 +210,8 @@ function renderSessionList() {
   const mutate = () => {
     const existing = {};
     list.querySelectorAll('.session-row').forEach(r => { existing[r.dataset.sid] = r; });
-    filtered.forEach(s => {
-      let row = existing[s.id];
+    const wanted = filtered.map(s => {
+      const row = existing[s.id];
       if (row) {
         delete existing[s.id];
         const titleEl = row.querySelector('.session-row-title');
@@ -225,46 +225,65 @@ function renderSessionList() {
         }
         paintAlert(row, s.alert);  // §61: reuse must refresh the dot too
         row.classList.toggle('active', s.id === currentSessionId);
-        list.appendChild(row); // moves the row into filtered order
-      } else {
-        row = document.createElement('div');
-        row.dataset.sid = s.id;
-        // The transfer session (§53/§54) is a channel between two devices, not a
-        // chat: pinned, iconned, styled apart, and it has no rename/delete pair.
-        row.className = 'session-row' + (s.shuttle ? ' shuttle' : '')
-          + (s.id === currentSessionId ? ' active' : '');
-        if (s.shuttle) row.title = '文件传输助手：两台设备之间只搬文件，不会改名也不会被删除';
-        row.innerHTML = (s.shuttle ? '<span class="session-row-icon">&#x1F4C1;</span>' : '')
-          + '<span class="session-row-title">' + escapeHtml(s.title || 'Untitled') + '</span>'
-          + '<span class="session-row-meta">' + (s.shuttle ? '只搬文件' : fmtDate(s.created))
-          + (s.running ? ' \u25cf' : '') + '</span>'
-          + (s.shuttle ? ''
-            : '<span class="session-row-actions"><button class="session-row-act" title="Rename">&#9998;</button>'
-              + '<button class="session-row-act del" title="Delete">&#10005;</button></span>');
-        if (!s.shuttle) {
-          row.querySelector('.session-row-act.del').addEventListener('click', e => {
-            e.stopPropagation();
-            const cur = sessionById(row.dataset.sid);
-            showConfirm({
-              title: 'Delete session',
-              message: '"' + ((cur && cur.title) || 'Untitled') + '" will be permanently removed. This cannot be undone.',
-              confirmText: 'Delete',
-              danger: true,
-              onConfirm: () => deleteSession(row.dataset.sid)
-            });
-          });
-          row.querySelector('.session-row-act:not(.del)').addEventListener('click', e => { e.stopPropagation(); startRename(row); });
-        }
-        paintAlert(row, s.alert);
-        row.addEventListener('click', () => switchSession(s.id));
-        list.appendChild(row);
+        return row;
       }
+      const fresh = document.createElement('div');
+      fresh.dataset.sid = s.id;
+      // The transfer session (§53/§54) is a channel between two devices, not a
+      // chat: pinned, iconned, styled apart, and it has no rename/delete pair.
+      fresh.className = 'session-row' + (s.shuttle ? ' shuttle' : '')
+        + (s.id === currentSessionId ? ' active' : '');
+      if (s.shuttle) fresh.title = '文件传输助手：两台设备之间只搬文件，不会改名也不会被删除';
+      fresh.innerHTML = (s.shuttle ? '<span class="session-row-icon">&#x1F4C1;</span>' : '')
+        + '<span class="session-row-title">' + escapeHtml(s.title || 'Untitled') + '</span>'
+        + '<span class="session-row-meta">' + (s.shuttle ? '只搬文件' : fmtDate(s.created))
+        + (s.running ? ' \u25cf' : '') + '</span>'
+        + (s.shuttle ? ''
+          : '<span class="session-row-actions"><button class="session-row-act" title="Rename">&#9998;</button>'
+            + '<button class="session-row-act del" title="Delete">&#10005;</button></span>');
+      if (!s.shuttle) {
+        fresh.querySelector('.session-row-act.del').addEventListener('click', e => {
+          e.stopPropagation();
+          const cur = sessionById(fresh.dataset.sid);
+          showConfirm({
+            title: 'Delete session',
+            message: '"' + ((cur && cur.title) || 'Untitled') + '" will be permanently removed. This cannot be undone.',
+            confirmText: 'Delete',
+            danger: true,
+            onConfirm: () => deleteSession(fresh.dataset.sid)
+          });
+        });
+        fresh.querySelector('.session-row-act:not(.del)').addEventListener('click', e => { e.stopPropagation(); startRename(fresh); });
+      }
+      paintAlert(fresh, s.alert);
+      fresh.addEventListener('click', () => switchSession(s.id));
+      return fresh;
     });
     Object.values(existing).forEach(r => r.remove());
+    // 只搬**位置不对**的那几行（2026-09-25 用户报告：切换会话/停止会话都像在「视图重排」）。
+    // 以前每行无条件 `list.appendChild(row)`：一次重绘就是 N 次 DOM 搬动（21 行 = 130 次
+    // childList 变更），既让 Flip 每次都算一遍移动，也在滚动容器上把滚动位置顶掉。
+    // 从后往前放，锚点就是「下一个该在它后面的行」——已经在位的行一个指头都不碰。
+    let anchor = null;
+    for (let i = wanted.length - 1; i >= 0; i--) {
+      const row = wanted[i];
+      // A row built above is still detached, and a detached node reports
+      // nextElementSibling === null — so "not attached" is its own reason to insert.
+      if (row.parentNode !== list || row.nextElementSibling !== anchor) list.insertBefore(row, anchor);
+      anchor = row;
+    }
     if (filtered.length === 0) { empty.style.display = ''; empty.textContent = filter ? 'No matches.' : 'No sessions yet.'; }
     else empty.style.display = 'none';
   };
-  if (window.fungiMotion && !window.fungiMotion.reduced && window.fungiMotion.listFlip) window.fungiMotion.listFlip(list, mutate);
+  // 顺序没变就别进动画（2026-09-25 用户：「切换会话也好，停止会话也好，就会触发视图重排」）。
+  // 一次纯重绘（切会话只改 `.active`、停一轮只改那个圆点）以前也会跑一遍 Flip：GSAP 为了
+  // 量每一行，会把测量代理 `<div>` 往列表里插一遍再拔掉（5 行 = 24 次 childList 变更），
+  // 再开一个 340ms 什么也不动的动画。进这里之前先比顺序：一样就原地更新，一个节点都不碰。
+  const ids = filtered.map(s => s.id);
+  const painted = Array.from(list.querySelectorAll('.session-row'), r => r.dataset.sid);
+  const moved = ids.length !== painted.length || ids.some((id, i) => id !== painted[i]);
+  if (moved && window.fungiMotion && !window.fungiMotion.reduced && window.fungiMotion.listFlip)
+    window.fungiMotion.listFlip(list, mutate);
   else mutate();
 }
 const fmtDate = d => FC.fmtDate(d, 'en-US');

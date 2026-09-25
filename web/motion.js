@@ -93,8 +93,18 @@
     if (typeof Flip === 'undefined') { mutate(); return; }
     var state = Flip.getState(container.children);
     mutate();
+    /* 没有 `absolute: true`（2026-09-25 用户报告，两处症状同一个根）：
+       - 它把要移动的行在动画期间`position:absolute`拿出文档流，于是列表的**内容高度
+         当场塌掉**，`#session-list` 是个滚动容器 —— 浏览器把 scrollTop 夹回去，
+         动画结束行回到流里，滚动位置却留在顶上：用户看到的就是「切一下会话，视图重排」。
+       - 而且绝对定位的行不再被 `#session-list{overflow:auto}` 裁剪（它的包含块跑到外面
+         去了），动画期间会画到下面的好友列表上。
+       - 第三处：muta 里**新插入**的那一行不在 `state` 里（Flip 从没移动过它），
+         它就在塌掉的流里排版 —— 新建会话时会**正好画在「文件传输助手」那一格上**，
+         等动画把别人挪走才落到自己的位置（用户：「会话会短暂停留在文件传输助手，然后再下移」）。
+       这个列表的行尺寸不变，所以 transform 就够了：行的包含块还在列表里，被照常裁剪。 */
     Flip.from(state, {
-      duration: 0.34, ease: 'expo.out', absolute: true,
+      duration: 0.34, ease: 'expo.out',
       onEnter: function (els) {
         gsap.fromTo(els, { opacity: 0, y: -6 }, { opacity: 1, y: 0, duration: 0.24 });
       }
