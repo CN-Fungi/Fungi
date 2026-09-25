@@ -3203,10 +3203,12 @@ token数得到。」
 - **这棵树上的一份打包件不算数**：用户桌面上那份 `Fungi.exe`（`_internal\web\common.js` 里
   `mountModelPicker` 出现 0 次）里没有 §64/§65/§66 和远端 v0.9.0 —— 换 exe 之前他在启动器与 WebUI 里
   都看不到下拉列表。
-- 门禁（最终树）：`PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **776 passed**（298s）；
-  `python -m ruff check .`、`python -m ruff format --check .` 全绿；工作区除用户自己的 `shots/` 外干净。
-  这一轮之后只动过 §66.2 那个布局（下拉列表独占一行、输入框保持 360 的宽度）：`tests/test_gui.py`
-  整文件重跑 **79 passed**，ruff 仍全绿。
+- 门禁（最终树，含同日的 §66.7 自绘下拉与 §68 端点记忆）：`PYTHONIOENCODING=utf-8 python -m pytest tests -q`
+  → **784 passed**（305s）；`python -m ruff check .`、`python -m ruff format --check .` 全绿；
+  工作区除用户自己的 `shots/` 外干净。
+  §66 那批单独数过两次：改 §66.2 布局后 `tests/test_gui.py` 整文件 79 passed；§66.7/§68 落地后
+  `test_config.py + test_gui.py + test_webui_models.py + test_webui_list_reflow.py` 共 **108 passed**（28s，
+  没有一条浏览器用例再落在超时上）。
 
 ### 66.7 自绘下拉（同日第二次报告：「风格和原来的不搭，没有动画效果」）
 
