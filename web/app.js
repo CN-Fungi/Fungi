@@ -32,6 +32,8 @@ document.getElementById('scroll-bottom').addEventListener('click', () => { msgs.
 msgs.addEventListener('scroll', updateScrollBtn);
 
 const getSessionTitle = list => FC.getSessionTitle(list, 55, 52);
+/* 输出速率（§64）：喂它的只有本页自己那条流的 text/reasoning chunk */
+const rateTok = FC.tokenRate(document.getElementById('tok-rate'));
 
 /* ---------- confirm modal (shared impl in common.js) ---------- */
 FC.initConfirmModal({ keyboard: 'desktop' });
@@ -567,6 +569,7 @@ function handleTurnEvent(obj) {
       if (last && last.kind === 'text') last.content += obj.content;
       else t.entries.push({ kind: 'text', content: obj.content });
       status.textContent = 'Writing...';
+      rateTok();
       if (visible) updateLastText();
       break;
     }
@@ -577,6 +580,7 @@ function handleTurnEvent(obj) {
     case 'reasoning': {
       const last = t.entries[t.entries.length - 1];
       if (last && last.kind === 'reasoning') last.content += obj.content;
+      rateTok();
       if (visible) updateLastReasoning();
       break;
     }

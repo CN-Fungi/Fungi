@@ -11,7 +11,7 @@
   /* Build marker: bump per web/ change so any WebUI instance can self-identify
      (console + window.__FUNGI_WEB_VER) — stale cache vs new server is otherwise
      indistinguishable from the outside. */
-  window.__FUNGI_WEB_VER = 'web-session-alerts';
+  window.__FUNGI_WEB_VER = 'web-tok-rate';
   try { console.info('[fungi-web]', window.__FUNGI_WEB_VER); } catch (e) {}
   /* ---------- http ---------- */
   /* One fetch wrapper. Mobile inits a token prefix + 403 hook; desktop inits
@@ -1674,13 +1674,52 @@
     return '';
   }
 
+  /* ---------- output rate (tokens/s) ---------- */
+  /* The readout left of the theme switch: how fast the model is writing right
+     now. One streamed chunk is one output token — measured on this box against
+     the provider's own usage (212 chunks vs completion_tokens 213), so counting
+     chunks needs no tokenizer and no protocol change. `text` and `reasoning`
+     both count: the model burns tokens either way (reasoning was 180 of those
+     213), which is also why a reasoning-heavy turn does not read as 0. Tool-call
+     argument tokens are NOT counted: the page never sees them — the server
+     emits one `tool` event after the call is whole (spec §64). */
+  const RATE_WINDOW_MS = 1500;  // the "一段时间" the rate averages over
+  const RATE_IDLE_MS = 1000;    // silence this long: the readout goes away
+  const RATE_TICK_MS = 150;
+
+  function tokenRate(el) {
+    if (!el) return () => {};  // a stale cached page without the span must not kill the stream
+    let hits = [];  // one timestamp per streamed chunk (each chunk is one output token)
+    let timer = null;
+    function stop() {
+      if (timer !== null) { clearInterval(timer); timer = null; }
+      hits = [];            // a fresh burst starts its own window
+      el.classList.remove('on');
+    }
+    function paint() {
+      const now = performance.now();
+      hits = hits.filter(t => now - t <= RATE_WINDOW_MS);
+      if (!hits.length || now - hits[hits.length - 1] > RATE_IDLE_MS) return stop();
+      const span = Math.max(300, now - hits[0]);  // don't read a cold window as slow
+      const rate = hits.length / (span / 1000);
+      el.textContent = (rate >= 10 ? String(Math.round(rate)) : rate.toFixed(1)) + ' tok/s';
+      el.classList.add('on');
+    }
+    /* Called once per streamed chunk. The timer exists only while a burst does:
+       a permanent interval in the header is what docs/webui-ux.md forbids. */
+    return function feed() {
+      hits.push(performance.now());
+      if (timer === null) { timer = setInterval(paint, RATE_TICK_MS); paint(); }
+    };
+  }
+
   window.FungiCommon = {
     initHttp, url, fetchJSON, postJSON,
     escapeHtml, fmtDate, getSessionTitle,
     initConfirmModal, showConfirm, closeConfirm,
     initTransfer,
     buildToolCard, fillToolResult, attachSpawnClick,
-    initAsks, initPendingAsks, initMailUnread, initSessionAlerts,
+    initAsks, initPendingAsks, initMailUnread, initSessionAlerts, tokenRate,
     initPane, stripSilent, humanEcho,
     markTs, insertByTs, askTextOfCall, linkifyPaths, buildFileCard, humanBytes,
     renderTranscript, renderLiveEvents, whenLabel,

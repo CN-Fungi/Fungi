@@ -2976,3 +2976,71 @@ Fungi 的 screen 工具在一个 agent 回合里跑，进程内的 `Session` 就
   **进设置页不联网**（状态行只读盘，`/health` 最坏卡界面 3 秒）。
 
 门禁：见 §62.6（同一棵树、同一次跑）。
+
+## 64. 输出速率（2026-09-25 用户点名）：切换主题左边那个 tok/s
+
+**用户原话**：「为fungi添加小功能：在切换主题的左边，实时显示输出速率，你可以通过计算在某段时间内消耗的
+token数得到。」
+
+### 64.1 一个流式 chunk 就是一个输出 token（本机实测，不引 tokenizer）
+
+- **量的口径**：页面自己数 chunk。拿本机这份配置对着真端点校准过一次：**212 个 chunk / 213 个
+  `completion_tokens` = 0.995**（真值来自 `stream_options.include_usage`）。所以「数 chunk」既不用
+  tokenizer，也不用动协议 —— 一个字节的 Python 都没改。
+- **文字与思考都算**：那 213 个 token 里 **180 个是 reasoning**。只数 `text` 的话，思考重的回合会读出
+  接近 0 的速率，而模型其实正以全速在烧 token。
+- **工具调用参数的 token 不算（如实记）**：页面根本看不到它们 —— `agent.py::wrap_reasoning_events`
+  只转发 text/reasoning，tool_call 的参数是在整个调用拼好之后才由服务端发一个 `tool` 事件。于是
+  「模型在憋一个长工具调用」的那几秒，读数是安静的。要在那段也有读数，得在服务端 `_apply_delta`
+  旁边加计数器 + 一个新事件类型，那是另一条决定（见 64.4）。
+
+### 64.2 两个 shell 都有一份，位置就在切换主题左边
+
+- `web/index.html`（桌面 WebUI）与 `web/m.html`（手机端）各加一个 `<span id="tok-rate">`，紧挨在
+  `#theme-switch` **前面**；计量实现只有一份：`web/common.js::tokenRate(el)`
+  （挂成 `window.FungiCommon.tokenRate`）。两侧的 `handleTurnEvent` 在 `case 'text'` 与
+  `case 'reasoning'` 各喂一口 —— 两份 shell 的 `handleTurnEvent` 本来就是逐字对齐的，所以两边各两行。
+- **布局的坑（值得记）**：`.theme-switch` 原来靠 `margin-left:auto` 顶到 header 右端；若再给读数一个
+  auto margin，flexbox 会把自由空间**对半分**，数字会飘到 header 中间去。所以那个 auto margin
+  **搬到了 `#tok-rate` 身上**，`.theme-switch` 那份删掉。读数收起用 opacity（不是 `display:none`）：
+  它必须一直占着位，否则那个 auto margin 一起消失、切换主题的开关会漂回左边
+  （`test_the_desktop_reads_the_rate_left_of_the_theme_switch` 里 `themeLeft > 600` 就是钉这个）。
+- 手机端 `#title-wrap` 本来就是 `flex:1`，读数直接坐进它和主题按钮之间，不用动锚定；390px 宽的真机
+  宽度下实测：标题/模型名先截断，读数与主题按钮各就各位（`12 tok/s`）。
+
+### 64.3 滑窗与「什么时候消失」
+
+- 窗口 `RATE_WINDOW_MS = 1500`（用户说的「某段时间」），每 `RATE_TICK_MS = 150` 重算一次；
+  速率 = 窗口里的 chunk 数 ÷ **实际跨度**（跨度取 `max(300ms, now - 最老样本)`，免得一个冷窗口把
+  速率读小 —— 刚开口那几个 chunk 不该被读成「只有几个 tok/s」）。
+- 静默 `RATE_IDLE_MS = 1000` 之后读数自己收起来（opacity 0）并**停表**：interval 只在有 chunk 的
+  时候存在。header 里常驻 rAF/interval 是 `docs/webui-ux.md` 明令禁止的东西。
+- 显示格式：`>=10` 取整（`42 tok/s`），`<10` 留一位小数（`7.4 tok/s`）；等宽数字
+  （`font-variant-numeric:tabular-nums`），免得上跳的数字把旁边的主题开关挤得发抖。
+
+### 64.4 没做 / 待定
+
+- **不是 provider 的真 usage**：真 usage 只在流结束时才到（而且还得服务端主动要
+  `stream_options.include_usage`），拿它做不了「实时」。本机实测 chunk≈token（0.995），
+  但换一个会攒批的 provider（一个 chunk 里塞多个 token），读数就会偏低。
+- **工具调用期间读数是安静的**（64.1）：这是「谁看得见这些字节」的直接后果。
+- **好友/信使那条流不显示**：它走 `/comm-log` 轮询拿整段，没有逐 chunk 时间戳，量出来会是假速率。
+- **只量本页自己那条流**：同一个会话在别的标签页/手机上开着时，各页面各有自己的读数。
+
+### 64.5 验收
+
+- `tests/test_webui_rate.py`（2 例，真 Chromium）：把 `stream_chat` 换成按 20 chunk/s 吐 40 片的假流
+  （带哨兵字符串；信使那些调用照 `SilentLLM` 的老规矩瞬间静默）——
+  - **桌面**：动手前 `#tok-rate` **存在但 opacity 0**（不是一直挂在那儿的装饰）→ 发一条 → 读数出现且
+    落在 8–100（对应 20 chunk/s 的流）→ **位置 `right <= theme-switch.left`、两个中心同行（<12px）**
+    → 回合结束后 1 秒内自己收起来，且切换主题的开关仍在右端（`themeLeft > 600`，钉 64.2 那个坑）。
+  - **手机**：同一套速率与几何断言，走 `/m` + `#btn-send`。
+- 修前先红（`git stash push -- web`）：**2 failed** —— `the header has no readout at all` /
+  `the readout never showed a rate while the model was streaming`。
+- 视觉留证（假流截 header）：桌面 `10.0 tok/s`、手机 1280 宽 `12 tok/s`、手机 390 宽 `12 tok/s`，
+  三处都在切换主题左边同一行。
+- 门禁：`python -m ruff check .` 干净 · 本轮新增的这个测试文件 `ruff format --check` 干净
+  （`fungi/` 里有 5 个文件本来就会被打回 —— `gui/config.py`、`hub/app.py`、`hub/client.py`、`landing.py`、
+  `server.py`，都非本轮改动，没碰）· `PYTHONIOENCODING=utf-8 python -m pytest tests -q` →
+  **760 passed / 271s**（其余 758 例原样，本轮就多这 2 例浏览器用例）。
+

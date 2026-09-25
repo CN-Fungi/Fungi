@@ -52,6 +52,8 @@ function msgIn(node, kind) {
   gsap.from(node, { opacity: 0, y: kind === 'user' ? 14 : 18, scale: 0.96, duration: 0.4, ease: 'power3.out', clearProps: 'all' });
 }
 const getSessionTitle = list => FC.getSessionTitle(list, 40, 38);
+/* 输出速率（§64）：喂它的只有本页自己那条流的 text/reasoning chunk */
+const rateTok = FC.tokenRate(document.getElementById('tok-rate'));
 
 /* ---------- sessions ---------- */
 let _sessionsSeq = 0;
@@ -448,6 +450,7 @@ function handleTurnEvent(obj) {
       if (last && last.kind === 'text') last.content += obj.content;
       else t.entries.push({ kind: 'text', content: obj.content });
       status.textContent = 'Writing...';
+      rateTok();
       if (visible) updateLastText();
       break;
     }
@@ -458,6 +461,7 @@ function handleTurnEvent(obj) {
     case 'reasoning': {
       const last = t.entries[t.entries.length - 1];
       if (last && last.kind === 'reasoning') last.content += obj.content;
+      rateTok();
       if (visible) updateLastReasoning();
       break;
     }

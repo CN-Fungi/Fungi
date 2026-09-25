@@ -290,8 +290,17 @@ html,body{font-family:var(--font);font-size:var(--fs-md);line-height:1.6;color:v
 .consent-slider[data-mode="ask"] .consent-opt[data-v="ask"]{color:#b45309}
 .ask-hint{font-size:0.72rem;color:var(--dim);margin-top:0.4rem;padding-left:0.25rem}
 
+/* ---- output rate (tok/s): the readout left of the theme switch ---- */
+/* The auto margin that holds the right edge moved here from .theme-switch, so
+   the pair sits together at the end of the header (a second auto margin would
+   split the free space and float the number into the middle). The element keeps
+   its place while hidden (opacity, not display) — otherwise nothing would hold
+   the theme switch to the right any more. */
+#tok-rate{margin-left:auto;font-family:var(--mono);font-size:var(--fs-xs);color:var(--dim);font-variant-numeric:tabular-nums;white-space:nowrap;opacity:0;transition:opacity var(--t-med)}
+#tok-rate.on{opacity:1}
+
 /* ---- theme switch (light default; sun = left, moon = right) ---- */
-.theme-switch{margin-left:auto;display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+.theme-switch{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
 .theme-ic{width:15px;height:15px;stroke:var(--dim);fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;transition:stroke var(--t-med)}
 .theme-track{position:relative;width:34px;height:18px;background:var(--bg);border:1px solid var(--border);border-radius:9px;transition:background var(--t-med),border-color var(--t-med)}
 .theme-knob{position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:var(--accent);transition:transform var(--t-med) var(--ease-spring)}

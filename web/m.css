@@ -212,6 +212,13 @@ main{position:relative}
 .motion-theme-wash{position:fixed;inset:0;z-index:300;pointer-events:none}
 .motion-theme-wash.light{background:radial-gradient(130% 130% at 50% 0%,#fdf2f8 0%,#f0f2f8 55%,#e8ebf5 100%)}
 .motion-theme-wash.dark{background:radial-gradient(130% 130% at 50% 0%,#1a3a37 0%,#12141c 60%)}
+/* ---- output rate (tok/s): the readout left of the theme button ---- */
+/* #title-wrap takes the free space (flex:1), so this sits where the number
+   belongs without touching the switch's own anchoring. Hidden by opacity, not
+   display: the row's spacing must not move when it fades. */
+#tok-rate{font-family:var(--mono);font-size:0.7rem;color:var(--dim);font-variant-numeric:tabular-nums;white-space:nowrap;opacity:0;transition:opacity 200ms}
+#tok-rate.on{opacity:1}
+
 /* ---- theme switch icons (sun visible in dark = go light, moon in light = go dark) ---- */
 #theme-switch{width:40px;height:40px;display:flex;align-items:center;justify-content:center}
 .theme-ic{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;display:none}
