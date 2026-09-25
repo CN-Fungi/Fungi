@@ -62,7 +62,7 @@ jobs:
         run: |
           Copy-Item README.md dist/Fungi/
           New-Item -ItemType Directory -Force dist/Fungi/docs | Out-Null
-          Copy-Item "docs/测试人员必看！.docx" dist/Fungi/docs/
+          Copy-Item "docs/项目说明书.docx" dist/Fungi/docs/
           Copy-Item -Recurse docs/readme dist/Fungi/docs/
           Compress-Archive -Path dist/Fungi -DestinationPath "fungi-$($env:GITHUB_REF_NAME)-windows-x64.zip"
 
