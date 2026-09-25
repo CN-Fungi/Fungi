@@ -242,6 +242,33 @@ def test_a_hand_edited_list_does_not_get_two_identical_rows(tmp_path):
     assert cfg.model_list == ["m1", "m2"]
 
 
+def test_forgetting_a_model_drops_it_and_its_pair(tmp_path):
+    """§69：明确删掉的名字不留记录 —— 与 §68「离开列表也留着」相反的那一半，因为删除就是
+    用户说「这个不会再用」（他手写的密钥记录也该跟着走）。"""
+    cfg = config.Config(api_key="k", endpoint="e", model="m1")
+    cfg.model_list = ["m1", "m2", "m3"]
+    config.remember_provider(cfg, "m2", "https://m2.example/v1", "sk-m2")
+    assert config.forget_model(cfg, "m2") is True
+    assert cfg.model_list == ["m1", "m3"] and cfg.model_providers == {}
+    assert config.forget_model(cfg, "m2") is False, "已经不在列表里了"
+    assert config.forget_model(cfg, "  ") is False, "空名字不干活"
+    assert config.forget_model(cfg, "m1") is True, "在用的那个也删得掉（调用方先切）"
+    assert cfg.model == "m1", "这一步不碰 model：切是调用方的事"
+    assert cfg.model_list == ["m3"]
+
+
+def test_a_deleted_name_does_not_come_back_on_load(tmp_path):
+    """删完落盘再读回来：列表里没有它、记忆里也没有它（不会被谁顺手补回去）。"""
+    p = tmp_path / "config.json"
+    cfg = config.Config(api_key="k", endpoint="e", model="m1")
+    cfg.model_list = ["m1", "m2"]
+    config.remember_provider(cfg, "m2", "https://m2.example/v1", "sk-m2")
+    config.forget_model(cfg, "m2")
+    config.save_config(cfg, p)
+    back = config.load_config(p)
+    assert back.model_list == ["m1"] and back.model_providers == {}
+
+
 def test_a_model_remembers_the_endpoint_and_key_it_answered_on(tmp_path):
     """§68（用户 2026-09-25「每次调用 200 以后，之后切换模型应该随之切换 url 和 key」）：
     一个列表里可以住两家——每个名字记着自己那套端点+密钥，切换时整套跟着走。"""

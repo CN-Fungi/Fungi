@@ -312,13 +312,12 @@ def test_switching_a_model_brings_its_own_endpoint_and_key(page, asked):
     saved = json.loads(config_mod.CONFIG_PATH.read_text(encoding="utf-8"))
     assert saved["endpoint"] == "https://other.example/v1/chat/completions", "端点跟着模型换了"
     assert saved["api_key"] == "sk-other", "密钥也跟着换了"
-    shown = _picker(page)
-    assert "other.example" in shown["title"] or "other.example" in shown["status"], (
+    # 等那句结果：POST 还没回来时状态行上是「Switching to m2…」，读到它就把话说早了（曾经偶发红）
+    assert _wait(lambda: "other.example" in _picker(page)["title"], 6.0), (
         "结果里报出落在哪台主机上：换没换 url，界面自己说得清"
     )
 
     # 切回去：上一次那套（m1 在 asked 里种的那套）也得回得来——它被学过一次
-    assert _wait(lambda: "other.example" in _picker(page)["title"], 4.0)
     _pick(page, "m1")
     assert _wait(
         lambda: json.loads(config_mod.CONFIG_PATH.read_text(encoding="utf-8"))["model"] == "m1"

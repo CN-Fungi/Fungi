@@ -220,6 +220,25 @@ def switch_model(cfg: Config, model: str) -> bool:
     return fresh
 
 
+def forget_model(cfg: Config, model: str) -> bool:
+    """Drop a name from the pickable list, and forget its endpoint+key. False = not there.
+
+    spec §69 (user, 2026-09-25: the launcher's list needs a delete). Only an explicit
+    delete forgets the pairing: `save_config` otherwise keeps names that left the list
+    on purpose (§68 - typing an old name back then works on the first try). Deleting is
+    the user saying "this one is not coming back", so the key goes with it.
+
+    The model in use is *not* touched here - the caller switches first. A config whose
+    `model` is not in `model_list` would open the dropdown with nothing selected.
+    """
+    name = model.strip()
+    if not name or name not in cfg.model_list:
+        return False
+    cfg.model_list = [m for m in cfg.model_list if m != name]
+    cfg.model_providers.pop(name, None)
+    return True
+
+
 # Explorer's "Copy as path" hands over `C:\Users\me\GhostWorld`, and a lone
 # backslash is not a legal JSON escape — so a config edited that way failed to
 # parse whole, taking the api key and every switch down with it.

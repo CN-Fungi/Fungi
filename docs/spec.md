@@ -3203,12 +3203,13 @@ token数得到。」
 - **这棵树上的一份打包件不算数**：用户桌面上那份 `Fungi.exe`（`_internal\web\common.js` 里
   `mountModelPicker` 出现 0 次）里没有 §64/§65/§66 和远端 v0.9.0 —— 换 exe 之前他在启动器与 WebUI 里
   都看不到下拉列表。
-- 门禁（最终树，含同日的 §66.7 自绘下拉与 §68 端点记忆）：`PYTHONIOENCODING=utf-8 python -m pytest tests -q`
-  → **784 passed**（305s）；`python -m ruff check .`、`python -m ruff format --check .` 全绿；
+- 门禁（最终树，含同日的 §66.7 自绘下拉、§68 端点记忆与 §69 启动器删模型）：
+  `PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **791 passed**（303s）；`python -m ruff check .`、`python -m ruff format --check .` 全绿；
   工作区除用户自己的 `shots/` 外干净。
   §66 那批单独数过两次：改 §66.2 布局后 `tests/test_gui.py` 整文件 79 passed；§66.7/§68 落地后
   `test_config.py + test_gui.py + test_webui_models.py + test_webui_list_reflow.py` 共 **108 passed**（28s，
-  没有一条浏览器用例再落在超时上）。
+  没有一条浏览器用例再落在超时上）。§69 落地后（含「选中删除先收下拉」那条修正、以及把一条
+  偶发红的 webui 断言改成等结果）全量 **791 passed**。
 
 ### 66.7 自绘下拉（同日第二次报告：「风格和原来的不搭，没有动画效果」）
 
@@ -3343,4 +3344,58 @@ token数得到。」
   经 Fungi 自己的代码跑通文本/工具/视觉三样（`收到`；`get_time` 被调用；读出手写数字 `7341`）；
   `deepseek-v4-flash-vision-exp` 那套留在记忆里，切换即回到 DeepSeek。探针实测两条都 `reachable`，
   `detail` 与配置名一致。
+- 门禁：见 §66.6。
+
+## 69. 启动器能删模型了（2026-09-25 用户点名）：右键菜单 → 确认 → 从列表里拿掉
+
+**用户原话**：「启动器补一个模型的删除，和会话列表那样，悬停显示，点击删除弹出确认」；
+试到一半时放宽口径：「没事，你也可以选择别的实现方式，比如右键菜单？」
+
+### 69.1 为什么最后是右键，不是悬停
+
+「悬停显示一个删除钮」这种交互天生属于**常驻列表**（会话列表就是），而 §66 那个模型下拉的
+弹出层是**瞬时**的：qfluentwidgets 每次打开都新建一份 `ComboBoxMenu`（`QMenu` + 一堆 `QAction`），
+鼠标一离开就没了，在里头做悬停钮既别扭也不好按。右键菜单则正好——弹出层已经是"列表摊开"的状态，
+右键那一行、点「删除」、确认，全程不离开那份列表。所以：**一份列表既管切换也管管理**，不新增第二种视图。
+
+### 69.2 怎么接上去（`fungi/gui/config.py::_ModelComboBox`）
+
+- `ComboBox._createComboMenu()` 是**每次打开**都走的钩子 → 在它返回的菜单的 `view` 上装
+  `customContextMenuRequested`。那个 view 是 `QListWidget`（实测：`MenuActionListWidget` 就是它），
+  行的**序号**正好等于这个 combo 的 item 序号（`_showComboMenu` 按 items 顺序 `addAction`），
+  于是 `view.row(item)` → `self.itemText(index)` 就是模型名，不用去猜行上的文字。
+- 空白处右键不给菜单（`itemAt(pos)` 为 None 直接返回）——菜单底部有留白，那儿点出来一个"删除"
+  只会让人以为删的是别人。
+- 菜单只放一条：`删除 <名字>`（`FluentIcon.DELETE`）→ **先把下拉收起来**（`_closeComboMenu()`）再发
+  `delete_requested(str)`。这一步是用户实测出来的：「弹出对话框时下拉列表未收回，导致遮挡住了对话框」
+  —— 右键是在弹出层里发生的，弹出层这会儿正开着，不收它就压在随后弹出的确认框上。用例钉住
+  trigger 之后 `model_combo.dropMenu is None`。
+- `_row_menu()`（真正弹菜单那一层）与 `_on_row_menu()`（把坐标解析成名字那一层）分成两个方法：
+  模态菜单在用例里不能真弹，测试只打桩前者就能走完"右键 → 菜单 → 删除"整条线（和 `_DayDialog`
+  一个路子）；确认框同理，`_ask_delete(body)` 是单独的方法。
+
+### 69.3 删的时候发生什么
+
+- `config.forget_model(cfg, name)`：从 `model_list` 去掉**且**丢掉 `model_providers[name]` ——
+  与 §68「离开列表也留着记录」相反的那一半：切换走掉只是不用了，**明确删除是说"这个不会再用"**，
+  他手写的那把 key 也该跟着走。
+- **在用的那个删得掉**，但确认框先把话说清（「它正在使用，删掉会切到 X」），删完 `switch_model`
+  切过去并照常探一次。不让人删自己正在用的东西，只会逼他先切一次再回来删。
+- **列表里只剩一个时拒绝**（InfoBar 说明理由，连确认框都不弹）：`cfg.model` 必须留在
+  `model_list` 里（§66 的不变式），删空 = 把程序配成没有模型可用。
+- 删完重画 `_load_fields()`（下拉 + 端点/密钥那两格；切过模型的话 §68 会连带换 url+key）并刷状态行。
+
+### 69.4 验收
+
+- `tests/test_config.py`（2 条）：`forget_model` 从列表与记忆里一起拿掉（空名字/不在列表里返回
+  False）、删完落盘再读回来它不会自己回来。
+- `tests/test_gui.py`（5 条）：
+  ① **真**弹出层（`_showComboMenu()` 建的那份，只把模态 `exec` 打桩）里右键第二行 → 菜单里就一条
+  「删除 m2」→ trigger 它 → **下拉先收起来**、`config.json` 里 m2 连同它的端点+密钥记录一起没了，
+  在用的 m1 不动；
+  右键落在行外的留白上不给菜单；② 确认框说「算了」就什么都不发生；③ 删在用的那个会先切到剩下的
+  并自动测一次；④ 只剩一个时直接拒绝（不弹确认）；⑤ 手改 config.json 后右键一个不在列表里的名字：
+  什么也不做。
+- WebUI 那侧没动：它读的是同一份 `config.json`，启动器删完，头部的下拉下次 `load()` 就是新的
+  （用户点名的是启动器）。
 - 门禁：见 §66.6。

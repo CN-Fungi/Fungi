@@ -7,7 +7,7 @@ import subprocess
 import sys
 import threading
 
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QSizePolicy,
@@ -15,12 +15,15 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
+    Action,
     BodyLabel,
     ComboBox,
     FluentIcon,
     InfoBar,
     LineEdit,
+    MessageBox,
     PushButton,
+    RoundMenu,
     SubtitleLabel,
     SwitchButton,
 )
@@ -49,6 +52,61 @@ def _join_command(argv) -> str:
     if not isinstance(argv, list):
         return ""
     return " ".join(f'"{word}"' if " " in str(word) else str(word) for word in argv)
+
+
+class _ModelComboBox(ComboBox):
+    """The model dropdown, with "delete this one" on a row's right-click (spec §69).
+
+    User 2026-09-25: "启动器补一个模型的删除，和会话列表那样，悬停显示，点击删除弹出确认"
+    -- and, when the hover-revealed button turned out to belong to a *transient* popup
+    (where a hover affordance is a bad fit anyway): "你也可以选择别的实现方式，比如右键菜单".
+
+    So: open the dropdown, right-click the row you want gone, pick 删除, confirm. The
+    rows are the same list the switch uses -- one list to switch and to manage, and
+    nothing new to learn. qfluentwidgets builds the popup menu fresh on every open
+    (`_showComboMenu` -> `_createComboMenu`), so the hook goes on each new menu's view;
+    that view is a QListWidget, whose row index is exactly this combo's item index.
+    """
+
+    delete_requested = pyqtSignal(str)  # 右键菜单里选了「删除」：把模型名发出去
+
+    def _createComboMenu(self):  # noqa: N802 (Qt naming)
+        menu = super()._createComboMenu()
+        view = menu.view
+        view.setContextMenuPolicy(Qt.CustomContextMenu)
+        view.customContextMenuRequested.connect(lambda pos: self._on_row_menu(view, pos))
+        return menu
+
+    def _on_row_menu(self, view, pos) -> None:
+        """Right-clicked at `pos` in the popup: which model, and offer to delete it."""
+        item = view.itemAt(pos)
+        if item is None:
+            return  # 空白处（菜单底部的留白）：不给菜单
+        index = view.row(item)
+        name = self.itemText(index) if 0 <= index < self.count() else ""
+        if not name:
+            return
+        self._row_menu(view.mapToGlobal(pos), name)
+
+    def _row_menu(self, global_pos, name: str) -> None:
+        """The one-item context menu. Split from `_on_row_menu` so a test can drive the
+        name resolution without a modal menu on screen (same seam as `_ask_delete`)."""
+
+        def chosen() -> None:
+            # 先把下拉收起来再问（用户 2026-09-25 实测：不收的话那个弹出层就压在对
+            # 话框上，把它挡掉一半）——右键是在弹出层里发生的，所以它这会儿正开着。
+            self._closeComboMenu()  # qfluentwidgets 自己的收法（ComboBoxBase 的那个）
+            self.delete_requested.emit(name)
+
+        menu = RoundMenu(parent=self)
+        menu.addAction(
+            Action(
+                FluentIcon.DELETE,
+                f"删除 {name}",
+                triggered=chosen,
+            )
+        )
+        menu.exec(global_pos)
 
 
 class ConfigPage(QWidget):
@@ -81,9 +139,10 @@ class ConfigPage(QWidget):
         # 原先的输入框从覆盖变成添加」）：上一行是下拉列表 = 能用的模型，选中哪个就用哪个；
         # 下一行还是原来那个输入框，但它现在是「添加」——回车把新名字加进列表并切过去，然后自动测一次
         # 调用。这一页每一行的控件都从第 90px 那一列起、宽 360：挤成一行会比其他行多探出去一截。
-        self.model_combo = ComboBox()
+        self.model_combo = _ModelComboBox()
         self.model_combo.setFixedWidth(360)
         self.model_combo.currentIndexChanged.connect(self._pick_model)
+        self.model_combo.delete_requested.connect(self._delete_model)  # §69: 右键删一个
         root.addWidget(_row("模型", self.model_combo))
         root.addWidget(_row("", self.model_edit))
         self.model_status = BodyLabel()
@@ -567,6 +626,56 @@ class ConfigPage(QWidget):
         self._show_provider(cfg)  # §68: 换了模型就换了 url+key，框里得跟着变
         self._refresh_status()
         self._probe(name, "已切换到")
+
+    def _delete_model(self, name: str) -> None:
+        """把某个模型从列表里拿掉（spec §69，右键 → 菜单 → 确认）。
+
+        正在用的那个**可以**删：确认框先把话说清（删掉会切到哪个），删完就切过去 —— 不让人删
+        自己正在用的东西，只会逼着他先切一次再回来删。列表里只剩一个时才拒绝：`cfg.model`
+        必须留在 `model_list` 里（§66 的不变式），没有模型可切就等于把程序配空了。
+        """
+        cfg = config_mod.load_config()
+        name = name.strip()
+        if name not in cfg.model_list:
+            return
+        others = [m for m in cfg.model_list if m != name]
+        if not others:
+            InfoBar.warning(
+                "不能删",
+                f"{name} 是列表里最后一个：先加一个别的模型（或把接口那两格填好再添加），再来删它",
+                duration=6000,
+                parent=self.window_ref,
+            )
+            return
+        used = name == cfg.model
+        body = f"把 {name} 从模型列表里拿掉？"
+        if used:
+            body += f"它正在使用，删掉会切到 {others[0]}。"
+        body += "它记着的接口地址与密钥记录也一并删掉。"
+        if not self._ask_delete(body):
+            return
+        config_mod.forget_model(cfg, name)
+        if used:
+            config_mod.switch_model(cfg, others[0])
+        config_mod.save_config(cfg)
+        self._load_fields()  # 重画下拉；切过模型的话端点/密钥那两格也跟着换（§68）
+        self._refresh_status()
+        InfoBar.success(
+            "已删除",
+            f"{name} 已从列表里拿掉" + (f"，现在用 {others[0]}" if used else ""),
+            duration=2500,
+            parent=self.window_ref,
+        )
+        if used:
+            self._probe(others[0], "已切换到")
+
+    def _ask_delete(self, body: str) -> bool:
+        """删除前的确认。单独一个方法，测试把它打桩掉：模态框不该在用例里弹出来
+        （和 `_DayDialog` 一个路子）。"""
+        box = MessageBox("删除模型", body, self.window_ref)
+        box.yesButton.setText("删除")
+        box.cancelButton.setText("算了")
+        return bool(box.exec_())
 
     def _add_model(self) -> None:
         """输入框回车 = 添加，不是覆盖（spec §66）：「如果与之前模型不一样就新添」。

@@ -1853,6 +1853,147 @@ def test_picking_a_model_brings_its_own_endpoint_and_key(window, monkeypatch):
     assert data["model"] == "deepseek-x"
 
 
+class _FakeMenu:
+    """替掉右键菜单：模态菜单不该在用例里弹出来（和 `_DayDialog` 一个路子）。
+
+    记下加了哪些 action，测试自己 trigger 那一个 —— 于是「右键 → 菜单 → 删除」这条线
+    在没有真菜单的情况下也能走完。
+    """
+
+    last: "_FakeMenu | None" = None
+
+    def __init__(self, parent=None):
+        self.actions = []
+        _FakeMenu.last = self
+
+    def addAction(self, action):  # noqa: N802 (mirrors the Qt/qfluentwidgets name it stands in for)
+        self.actions.append(action)
+        return action
+
+    def exec(self, pos):
+        return None
+
+
+def _delete_setup(window, monkeypatch, names=("m1", "m2"), current="m1", confirm=True):
+    """种一份带两家记录的配置，并把确认框 / 探针 / 右键菜单都换成可控的替身。"""
+    from fungi.gui import config as page_mod
+
+    cfg = page_mod.config_mod.load_config()
+    cfg.api_key, cfg.endpoint, cfg.model = "sk-a", "https://a.example/v1", current
+    cfg.model_list = list(names)
+    cfg.model_providers = {
+        n: {"endpoint": f"https://{n}.example/v1", "api_key": f"sk-{n}"} for n in names
+    }
+    page_mod.config_mod.save_config(cfg)
+
+    monkeypatch.setattr(page_mod, "RoundMenu", _FakeMenu)
+    _FakeMenu.last = None
+    asked = _stub_probe(monkeypatch)
+    page = window.cfg_page
+    monkeypatch.setattr(page, "_ask_delete", lambda body: confirm)
+    return page, asked
+
+
+def test_right_clicking_a_dropdown_row_offers_to_delete_that_model(window, monkeypatch):
+    """§69（用户 2026-09-25「启动器补一个模型的删除…点击删除弹出确认」，随后指定「比如右键菜单」）：
+    弹出层里右键一行 → 菜单里就那一个「删除 <名字>」 → 确认 → 从 config.json 里真的消失。"""
+    from PyQt5.QtGui import QShowEvent
+
+    from fungi.gui import config as page_mod
+
+    page, _ = _delete_setup(window, monkeypatch)
+    # 真弹出层要 exec（模态）——只有这一下被桩掉，菜单本身还是 qfluentwidgets 建的那份
+    monkeypatch.setattr(
+        __import__("qfluentwidgets").RoundMenu, "exec", lambda self, *a, **k: None, raising=True
+    )
+    page.showEvent(QShowEvent())
+    page.model_combo._showComboMenu()
+    view = page.model_combo.dropMenu.view
+    assert view.count() == 2, "弹出层就是那份列表"
+
+    page.model_combo._on_row_menu(view, view.visualItemRect(view.item(1)).center())
+    assert _FakeMenu.last is not None, "右键落在行上：给出菜单"
+    assert len(_FakeMenu.last.actions) == 1
+    assert "m2" in _FakeMenu.last.actions[0].text(), "菜单里就那一条，而且说的是哪一行"
+
+    _FakeMenu.last.actions[0].trigger()
+    assert page.model_combo.dropMenu is None, (
+        "选了「删除」先把下拉收起来：不收就压在确认框上（实测）"
+    )
+    after = page_mod.config_mod.load_config()  # 只剩一个名字时 model_list 这个键根本不写（§66）
+    assert after.model_list == ["m1"], "删掉了"
+    assert "m2" not in after.model_providers, "它记着的端点+密钥也一并删掉"
+    assert after.model_providers["m1"]["api_key"] == "sk-m1", "留下那个的记录不动"
+    assert after.model == "m1", "删的不是在用的那个：选择不动"
+
+    # 空白处右键（菜单底部的留白）：不给菜单
+    _FakeMenu.last = None
+    page.model_combo._showComboMenu()
+    view = page.model_combo.dropMenu.view
+    rect = view.visualItemRect(view.item(1))
+    page.model_combo._on_row_menu(view, rect.bottomLeft())
+    assert _FakeMenu.last is None, "没落在行上就不给菜单"
+
+
+def test_deleting_is_refused_when_the_confirm_is_dismissed(window, monkeypatch):
+    """确认框说「算了」= 什么都不发生（用户点错了不该掉东西）。"""
+    from PyQt5.QtGui import QShowEvent
+
+    from fungi.gui import config as page_mod
+
+    page, _ = _delete_setup(window, monkeypatch, confirm=False)
+    page.showEvent(QShowEvent())
+    page._delete_model("m2")
+    after = page_mod.config_mod.load_config()
+    assert after.model_list == ["m1", "m2"], "列表没动"
+    assert after.model_providers["m2"]["api_key"] == "sk-m2", "记录也没动"
+
+
+def test_deleting_the_model_in_use_switches_first(window, monkeypatch):
+    """删掉正在用的那个：照删，但先切到别人（`model` 必须留在列表里，§66 的不变式）。"""
+    from PyQt5.QtGui import QShowEvent
+
+    from fungi.gui import config as page_mod
+
+    page, asked = _delete_setup(window, monkeypatch, current="m1")
+    page.showEvent(QShowEvent())
+    page._delete_model("m1")
+
+    after = page_mod.config_mod.load_config()
+    assert after.model_list == ["m2"], "在用的那个也删掉了"
+    assert after.model == "m2", "切到剩下的那个"
+    assert after.endpoint == "https://m2.example/v1", "连带它那套端点+密钥（§68）"
+    assert _wait_ui(lambda: asked == ["m2"]), "切完照样自动测一次调用"
+
+
+def test_the_last_model_cannot_be_deleted(window, monkeypatch):
+    """只剩一个时拒绝：删空了就没有模型可用了（连确认框都不该弹）。"""
+    from PyQt5.QtGui import QShowEvent
+
+    from fungi.gui import config as page_mod
+
+    page, _ = _delete_setup(window, monkeypatch, names=("m1",), current="m1")
+    called = []
+    monkeypatch.setattr(page, "_ask_delete", lambda body: called.append(body) or True)
+    page.showEvent(QShowEvent())
+    page._delete_model("m1")
+
+    assert called == [], "直接拒绝，不弹确认"
+    assert page_mod.config_mod.load_config().model_list == ["m1"]
+
+
+def test_a_hand_typed_name_in_the_popup_is_not_deletable(window, monkeypatch):
+    """右键落在弹出层里但名字已经不在列表里（手改过 config.json）：什么也不做。"""
+    from PyQt5.QtGui import QShowEvent
+
+    from fungi.gui import config as page_mod
+
+    page, _ = _delete_setup(window, monkeypatch)
+    page.showEvent(QShowEvent())
+    page._delete_model("never-in-the-list")
+    assert page_mod.config_mod.load_config().model_list == ["m1", "m2"]
+
+
 def test_a_probe_that_answers_teaches_the_pair(window, monkeypatch):
     """§68 的「学」那一半：这一次调用回 200，就把它用的 url+key 记在这个名字上；
     答不上来则什么都不记（没证据的配对不该写进 config.json）。"""
