@@ -164,6 +164,7 @@ const FRIEND_SIDE = { user: ' friend-peer', agent: ' friend-mine' }; // peer lef
 const MY_SIDE = 'computer';
 
 async function newSession() {
+  rateTok.clear();  // 新对话从零开始：速率读数只在“有输出/刚输出过”时才有意义
   leaveFriendView();
   // Any untouched "(new session)" on disk? Focus it instead of creating
   // another one — repeated clicks and switches must not litter the list.
@@ -569,7 +570,7 @@ function handleTurnEvent(obj) {
       if (last && last.kind === 'text') last.content += obj.content;
       else t.entries.push({ kind: 'text', content: obj.content });
       status.textContent = 'Writing...';
-      rateTok();
+      rateTok.feed();
       if (visible) updateLastText();
       break;
     }
@@ -580,7 +581,7 @@ function handleTurnEvent(obj) {
     case 'reasoning': {
       const last = t.entries[t.entries.length - 1];
       if (last && last.kind === 'reasoning') last.content += obj.content;
-      rateTok();
+      rateTok.feed();
       if (visible) updateLastReasoning();
       break;
     }

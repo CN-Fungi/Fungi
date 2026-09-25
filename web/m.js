@@ -128,6 +128,7 @@ async function switchSession(id) {
   closeDrawer();
 }
 async function newSession() {
+  rateTok.clear();  // 新对话从零开始（桌面同款）
   // Focus any untouched "(new session)" instead of littering the list.
   const empty = allSessions.find(s => s.title === '(new session)' && (s.msgCount || 0) <= 1 && !s.running);
   leaveFriendView();
@@ -450,7 +451,7 @@ function handleTurnEvent(obj) {
       if (last && last.kind === 'text') last.content += obj.content;
       else t.entries.push({ kind: 'text', content: obj.content });
       status.textContent = 'Writing...';
-      rateTok();
+      rateTok.feed();
       if (visible) updateLastText();
       break;
     }
@@ -461,7 +462,7 @@ function handleTurnEvent(obj) {
     case 'reasoning': {
       const last = t.entries[t.entries.length - 1];
       if (last && last.kind === 'reasoning') last.content += obj.content;
-      rateTok();
+      rateTok.feed();
       if (visible) updateLastReasoning();
       break;
     }

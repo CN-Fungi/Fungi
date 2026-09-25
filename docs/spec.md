@@ -3008,13 +3008,22 @@ token数得到。」
 - 手机端 `#title-wrap` 本来就是 `flex:1`，读数直接坐进它和主题按钮之间，不用动锚定；390px 宽的真机
   宽度下实测：标题/模型名先截断，读数与主题按钮各就各位（`12 tok/s`）。
 
-### 64.3 滑窗与「什么时候消失」
+### 64.3 滑窗与生命周期（停笔停在最后一个数，只有新建对话才清空）
 
 - 窗口 `RATE_WINDOW_MS = 1500`（用户说的「某段时间」），每 `RATE_TICK_MS = 150` 重算一次；
-  速率 = 窗口里的 chunk 数 ÷ **实际跨度**（跨度取 `max(300ms, now - 最老样本)`，免得一个冷窗口把
-  速率读小 —— 刚开口那几个 chunk 不该被读成「只有几个 tok/s」）。
-- 静默 `RATE_IDLE_MS = 1000` 之后读数自己收起来（opacity 0）并**停表**：interval 只在有 chunk 的
-  时候存在。header 里常驻 rAF/interval 是 `docs/webui-ux.md` 明令禁止的东西。
+  速率 = 窗口里的 chunk 数 ÷ **样本自身的跨度**（`最后一个 chunk - 第一个`，没有地板）。
+  - **分母不能用「最老样本到现在的年龄」**：那会把停笔之后的空档一起算进去，数字越等越低 ——
+    2026-09-25 改成「停住」之后这条立刻现形（冻结值是 `8.8` 而不是 `20`，被新加的断言当场抓住）。
+  - **样本太少的窗口干脆不报**（`RATE_MIN_SPAN_MS = 250` 之前只留上一个数）。原先用「300ms 地板」
+    兜冷窗口，看着聪明，其实是**报一个假的低值**：开口第一个 chunk 会算成 `3.3 tok/s`。
+    数字留住之后这一下会真的被眼睛看见（`21 → 3.3 → 10 → 20`），所以地板换成「先不说」——
+    真出现掉坑时，逐帧记录的那条断言会在 `window.__rates` 里抓到 `3.3 tok/s`（实测过）。
+- **生命周期（用户 2026-09-25 原话：「那个速率应该一直显示，对话结束时显示最后一次更新的速率，
+  只有新建对话才不显示」）**：静默 `RATE_IDLE_MS = 1000` 之后**只停表**（`clearInterval` + 丢掉窗口），
+  数字与 `on` 都留在屏上 —— 那就是「最后一次更新的速率」；**唯一的清空点是 `clear()`**，由两个 shell
+  的 `newSession()` 调（桌面「+ New Session」/ 手机抽屉「＋ 新会话」）。**换会话不动它**（规矩就是
+  「只有新建对话才不显示」）。interval 仍只在有 chunk 的时候存在 —— header 里常驻 rAF/interval 是
+  `docs/webui-ux.md` 明令禁止的东西。
 - 显示格式：`>=10` 取整（`42 tok/s`），`<10` 留一位小数（`7.4 tok/s`）；等宽数字
   （`font-variant-numeric:tabular-nums`），免得上跳的数字把旁边的主题开关挤得发抖。
 
@@ -3029,16 +3038,22 @@ token数得到。」
 
 ### 64.5 验收
 
-- `tests/test_webui_rate.py`（2 例，真 Chromium）：把 `stream_chat` 换成按 20 chunk/s 吐 40 片的假流
+- `tests/test_webui_rate.py`（**3 例**，真 Chromium）：把 `stream_chat` 换成按 20 chunk/s 吐 40 片的假流
   （带哨兵字符串；信使那些调用照 `SilentLLM` 的老规矩瞬间静默）——
   - **桌面**：动手前 `#tok-rate` **存在但 opacity 0**（不是一直挂在那儿的装饰）→ 发一条 → 读数出现且
     落在 8–100（对应 20 chunk/s 的流）→ **位置 `right <= theme-switch.left`、两个中心同行（<12px）**
-    → 回合结束后 1 秒内自己收起来，且切换主题的开关仍在右端（`themeLeft > 600`，钉 64.2 那个坑）。
-  - **手机**：同一套速率与几何断言，走 `/m` + `#btn-send`。
-- 修前先红（`git stash push -- web`）：**2 failed** —— `the header has no readout at all` /
-  `the readout never showed a rate while the model was streaming`。
-- 视觉留证（假流截 header）：桌面 `10.0 tok/s`、手机 1280 宽 `12 tok/s`、手机 390 宽 `12 tok/s`，
-  三处都在切换主题左边同一行。
+    → 停笔满 1 秒后数字**留在屏上**（`on` + opacity 1）且再等 1.2 秒**还是那几个字**（停住了，
+    不是慢慢淡出）→ 切换主题的开关仍在右端（`themeLeft > 600`，钉 64.2 那个坑）。
+  - **冷启动不许报假的低值**：桌面这条用 `MutationObserver` 逐帧把每一次改写记进 `window.__rates`
+    （掉坑只持续一两帧，采样抓不住），断言最小值 ≥ 8。
+  - **只有新建对话才清空**：停笔后的数字**换会话也不动**，点「+ New Session」才清空并收起；
+    清空之后切换主题仍在右端（那个 auto margin 长在读数身上）。
+  - **手机**：同一套速率/几何断言 + 停笔留存；抽屉里的「＋ 新会话」同样能清空（`#btn-menu` 先开抽屉）。
+- 修前先红（`git stash push -- web`）：**3 failed** —— `停笔后读数不见了` / `停笔后手机上的读数没了` /
+  `新建对话没有把读数清掉`。另单独验过「假低值」那条有牙：把 300ms 地板装回 `span` 一行，
+  它当场抓到 `['3.3 tok/s', '10 tok/s']`。
+- 视觉留证（假流截 header）：桌面上流中是 `10.0 tok/s`、手机 1280 宽 `12 tok/s`、手机 390 宽 `12 tok/s`，
+  三处都在切换主题左边同一行；**停笔之后同一位是 `21 tok/s`**（5 秒采样不再变），点新建对话才消失。
 - 门禁：`python -m ruff check .` 干净 · 本轮新增的这个测试文件 `ruff format --check` 干净
   （`fungi/` 里有 5 个文件本来就会被打回 —— `gui/config.py`、`hub/app.py`、`hub/client.py`、`landing.py`、
   `server.py`，都非本轮改动，没碰）· `PYTHONIOENCODING=utf-8 python -m pytest tests -q` →
@@ -3082,7 +3097,7 @@ token数得到。」
 - 桌面那份打包版（0.8.0，冻结于 2026-09-21）里仍是老逻辑，**要重打包才吃到这条**；
   在那之前用 `C:\Users\37549\Tools\fungi-clean-env.cmd` 起 exe（脚本头里写着原因）。
 - 门禁（都在这棵最终树上跑的）：`python -m ruff check .` 干净 · `python -m ruff format --check .` 干净 ·
-  `PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **761 passed / 271s**。
+  `PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **762 passed / 282s**（64.5 那三条浏览器用例在内）。
 - 顺手把 ruff 的历史漂移也收干净（用户：「那几个 ruff 也顺手改了」）：`ruff format --check .` 曾点出
   **7 个**文件（`gui/config.py` / `hub/app.py` / `hub/client.py` / `landing.py` / `server.py` /
   `scripts/make_ringtones.py` / `tests/test_hub_app.py`，共 112+/49-，全是手写换行与内联 dict 的旧形态），

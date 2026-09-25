@@ -1682,34 +1682,51 @@
      both count: the model burns tokens either way (reasoning was 180 of those
      213), which is also why a reasoning-heavy turn does not read as 0. Tool-call
      argument tokens are NOT counted: the page never sees them — the server
-     emits one `tool` event after the call is whole (spec §64). */
-  const RATE_WINDOW_MS = 1500;  // the "一段时间" the rate averages over
-  const RATE_IDLE_MS = 1000;    // silence this long: the readout goes away
+     emits one `tool` event after the call is whole (spec §64).
+
+     Life cycle (用户 2026-09-25 点名): 停笔时**数字留在屏幕上**（最后一次更新的速率），
+     只有新建对话才收起来 —— 所以空闲只停表，不动 display；`clear()` 是那个唯一的清空点。 */
+  const RATE_WINDOW_MS = 1500;   // the "一段时间" the rate averages over
+  const RATE_IDLE_MS = 1000;     // silence this long: the count freezes as it is
   const RATE_TICK_MS = 150;
+  const RATE_MIN_SPAN_MS = 250;  // shorter than this, a window cannot measure a rate
 
   function tokenRate(el) {
-    if (!el) return () => {};  // a stale cached page without the span must not kill the stream
-    let hits = [];  // one timestamp per streamed chunk (each chunk is one output token)
+    if (!el) return { feed() {}, clear() {} };  // a stale cached page must not kill the stream
+    let hits = [];  // streamed chunks inside the window (each one is an output token)
     let timer = null;
     function stop() {
       if (timer !== null) { clearInterval(timer); timer = null; }
-      hits = [];            // a fresh burst starts its own window
+      hits = [];  // a fresh burst starts its own window
+    }
+    function clear() {
+      stop();
       el.classList.remove('on');
+      el.textContent = '';
     }
     function paint() {
       const now = performance.now();
       hits = hits.filter(t => now - t <= RATE_WINDOW_MS);
       if (!hits.length || now - hits[hits.length - 1] > RATE_IDLE_MS) return stop();
-      const span = Math.max(300, now - hits[0]);  // don't read a cold window as slow
+      // 分母是**样本自身的跨度**（最后一个 chunk - 第一个），不是「最老样本到现在的年龄」：
+      // 后者会把停笔之后的空档也算进去，数字越等越低 —— 那个数现在会停在屏幕上
+      // （用户 2026-09-25 的规矩），所以必须是对的。
+      const span = hits[hits.length - 1] - hits[0];
+      // 样本太少的窗口量不出速率：**先留着上一个数**。没有一个「地板」的话，开口第一个 chunk
+      // 会算成 3.3 tok/s 挂在屏上，看着就像掉坑（数字留住之后这条才变得看得见）。
+      if (span < RATE_MIN_SPAN_MS) return;
       const rate = hits.length / (span / 1000);
       el.textContent = (rate >= 10 ? String(Math.round(rate)) : rate.toFixed(1)) + ' tok/s';
       el.classList.add('on');
     }
-    /* Called once per streamed chunk. The timer exists only while a burst does:
-       a permanent interval in the header is what docs/webui-ux.md forbids. */
-    return function feed() {
-      hits.push(performance.now());
-      if (timer === null) { timer = setInterval(paint, RATE_TICK_MS); paint(); }
+    return {
+      /* Once per streamed chunk. The timer lives only while a burst does — a
+         permanent interval in the header is what docs/webui-ux.md forbids. */
+      feed() {
+        hits.push(performance.now());
+        if (timer === null) { timer = setInterval(paint, RATE_TICK_MS); paint(); }
+      },
+      clear,  // 新建对话：清空并收起来（唯一的清空点）
     };
   }
 
