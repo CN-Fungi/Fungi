@@ -8,7 +8,7 @@ from fungi.trilayer import TriLayer
 def run_single_shot(query: str) -> int:
     cfg = load_config()
     if not cfg.configured:
-        print("ERROR: API key not configured. Edit config.json or set OPENAI_API_KEY.")
+        print("ERROR: API key not configured. Edit config.json (GUI: 设置 page).")
         return 1
     sink = ConsoleSink()
     trilayer = TriLayer(cfg, sink)

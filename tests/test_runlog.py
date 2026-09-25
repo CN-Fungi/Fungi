@@ -88,50 +88,6 @@ def test_the_banner_records_the_switches_but_never_the_key(log_file, tmp_path, m
     assert "mode=gui" in text
 
 
-def test_the_banner_says_where_the_key_came_from_and_flags_a_shadowed_one(
-    log_file, tmp_path, monkeypatch
-):
-    """2026-09-25 用户报的那次 401：这台机器的 User 级 `OPENAI_API_KEY` 是别的 agent 用来接
-    小米 MiMo 的通用名字，`load_config` 让它顶掉了 config.json 里的 DeepSeek 钥匙，而端点仍是
-    config.json 的 —— 「拿别人的钥匙敲自己的端点」。当时横幅只写 `api_key=True`，日志里看不出
-    钥匙是从哪儿来的，于是那句报错只能靠猜。
-
-    现在：三个字段各自说清来源，且在这种「钥匙与端点不同源」时当场喊一句。
-    """
-    from fungi import config as config_mod
-
-    cfg = tmp_path / "config.json"
-    cfg.write_text(
-        json.dumps(
-            {
-                "api_key": "sk-config-key",
-                "endpoint": "https://api.deepseek.com/chat/completions",
-                "model": "deepseek-v4-pro",
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(config_mod, "CONFIG_PATH", cfg)
-    for name in ("OPENAI_API_KEY", "OPENAI_ENDPOINT", "OPENAI_MODEL"):
-        monkeypatch.delenv(name, raising=False)  # 这台机器默认就有，得先摆平
-
-    runlog.environment("gui", ["Fungi.exe"])
-    assert "来源: model=config.json endpoint=config.json api_key=config.json" in log_file.read_text(
-        encoding="utf-8"
-    )
-    assert not _containing(log_file, "压过了 config.json 里的钥匙"), "干净的机器上不该喊"
-
-    # 把那把通用钥匙放回环境（本机真实情形）：钥匙换了，端点没换。
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-mimo-key-somewhere-else")
-    runlog.environment("gui", ["Fungi.exe"])
-    text = log_file.read_text(encoding="utf-8")
-    assert "来源: model=config.json endpoint=config.json api_key=env:OPENAI_API_KEY" in text
-    shadow = _containing(log_file, "OPENAI_API_KEY 环境变量压过了 config.json 里的钥匙")
-    assert len(shadow) == 1, shadow
-    assert "https://api.deepseek.com/chat/completions" in shadow[0], "得说清端点是谁"
-    assert "sk-mimo-key-somewhere-else" not in text, "the log gets handed to other people"
-
-
 def test_an_uncaught_exception_lands_in_the_file(log_file, capsys):
     try:
         raise RuntimeError("ghostworld watcher blew up")

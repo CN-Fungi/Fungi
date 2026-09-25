@@ -1,4 +1,6 @@
-"""Configuration loading: config.json first, environment variables override."""
+"""Configuration loading: config.json is the one source for the model trio
+(api_key / endpoint / model). Fungi's own environment hooks all carry the FUNGI_
+prefix; the generic OPENAI_* names deliberately override nothing (spec §65)."""
 
 import json
 import os
@@ -244,7 +246,7 @@ def repair_config_file(path: Path | None = None) -> str | None:
 
 
 def load_config(path: Path | None = None) -> Config:
-    """Load config from JSON file, then apply env overrides."""
+    """Load config from the JSON file — and only from there (spec §65)."""
     cfg = Config()
     source = path if path is not None else CONFIG_PATH
     if source.is_file():
@@ -293,9 +295,12 @@ def load_config(path: Path | None = None) -> Config:
         cfg.ghostworld_dir = str(data.get("ghostworld_dir") or "")
         if isinstance(data.get("decider"), dict):
             cfg.decider = {str(k): v for k, v in data["decider"].items()}
-    cfg.api_key = os.environ.get("OPENAI_API_KEY") or cfg.api_key
-    cfg.endpoint = os.environ.get("OPENAI_ENDPOINT") or cfg.endpoint
-    cfg.model = os.environ.get("OPENAI_MODEL") or cfg.model
+    # 2026-09-25 用户裁决 ("为啥不能模型配置只读, 非要去读环境变量?"): 三个通用名字的覆盖删掉。
+    # They are ambient names - on this box they belong to Goose / strands (Xiaomi MiMo), so
+    # Fungi handed somebody else's key to its own configured endpoint: 401 "your api key:
+    # ****sovy is invalid", a key that is in no config.json and was invisible in the log.
+    # Fungi's own env hooks all carry the FUNGI_ prefix (FUNGI_DECIDER / FUNGI_GUI_SCALE /
+    # FUNGI_SELFTEST); a future hook goes there, never under a generic name. spec §65.
     return cfg
 
 

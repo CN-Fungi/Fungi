@@ -1648,16 +1648,6 @@ follower 照常连上、`pos`/`say` 拿真 ack。（在 bash 里跑 python 永�
 **横幅**（每次运行一段）：版本 / python / 平台 / frozen / 根目录 / argv / config 路径与存在性 /
 模型与 endpoint / **api_key 有没有（绝不写它本身）** / ghostworld 开关与目录。
 
-**三个字段各自的来源也写出来**（2026-09-25 补）：`load_config` 允许三个**通用名字**压过 config.json
-（`OPENAI_API_KEY` / `OPENAI_ENDPOINT` / `OPENAI_MODEL`），而**一把钥匙属于它的端点**。那天这台机器
-就是被咬在这种错配上：User 级的 `OPENAI_API_KEY` 是别的 agent 用来接小米 MiMo 的钥匙，它顶掉了
-config.json 里配好的 DeepSeek 钥匙，端点却仍是 config.json 的 → 拿别人的钥匙敲自己的端点，
-回一句 `401 … your api key: ****sovy is invalid`（那把钥匙根本不在 config.json 里）。当时的横幅只写
-`api_key=True`，日志里**看不出钥匙是从哪儿来的**，于是那句报错只能靠猜。
-现在横幅多一行 `来源: model=… endpoint=… api_key=env:OPENAI_API_KEY|config.json`，并且**只在**
-「钥匙来自环境变量、端点来自 config.json」时当场喊一句 WARNING（说明那把钥匙很可能不属于这个端点、
-以及怎么退回配置里那把钥匙）。这不是行为改动：覆盖照旧生效，只是让它可诊断。
-
 **日志里不放凭据**：api_key 只写「有没有」；房间 token 一律不进文件——连「拿错 token 的敲门」那行也只记路径、不记 query（GET 的 query 就是 token），因为这个文件会被贴进公开仓库的 issue。
 
 **最值钱的一条**：`sys.excepthook` + `threading.excepthook` 的 traceback。窗口版 exe 崩掉是**无声**的，
@@ -3054,3 +3044,47 @@ token数得到。」
   `server.py`，都非本轮改动，没碰）· `PYTHONIOENCODING=utf-8 python -m pytest tests -q` →
   **760 passed / 271s**（其余 758 例原样，本轮就多这 2 例浏览器用例）。
 
+## 65. 模型三件套只读 `config.json`（2026-09-25 用户点名）：不再认 `OPENAI_*` 通用名字
+
+**用户原话**：「不是啊，为啥不能模型配置只读，非要去读环境变量？」
+
+### 65.1 那次 401 的完整因果（留档）
+
+- 报错：`⚠ (LLM error: HTTP 401 … "Authentication Fails, Your api key: ****sovy is invalid")`。
+- 这台机器上**两份** `config.json`（仓库版 / 桌面安装版）里的钥匙都是 `…a5f4`（`api.deepseek.com`）——
+  `sovy` 那把钥匙**根本不在任何配置里**。
+- `HKCU:\Environment` 里躺着通用名字：`OPENAI_API_KEY = sk-cwgn…sovy`(51 字符) 与
+  `OPENAI_BASE_URL = https://api.xiaomimimo.com/v1` —— 是给 Goose / strands 接**小米 MiMo** 的一对
+  （`GOOSE_PROVIDER=openai` 也在）。
+- 老规矩是 `OPENAI_API_KEY` / `OPENAI_ENDPOINT` / `OPENAI_MODEL` 三个通用名字**压过** config.json；
+  环境里只设了钥匙、没设端点 → 端点仍是 config.json 的 DeepSeek：**拿别人的钥匙敲自己的端点**。
+- 当时的日志只写 `api_key=True`（`logs/fungi-20260925.log`）—— 钥匙从哪儿来一个字都没有，
+  于是那句报错只能靠猜。
+
+### 65.2 裁决与实现
+
+- `fungi/config.py::load_config` 里那三行覆盖**删掉**：模型三件套（api_key / endpoint / model）只有一个
+  来源 = `config.json`。文件里没有就是没有，不去问环境。
+- 仓库里**没有任何消费者**论证过那三行：`ci.yml` / `release.yml` 不用它，测试里没有一条用例钉它
+  （所以删掉不红），发版与冻结包冒烟也不用它；`cli.py` 那句「Edit config.json or set OPENAI_API_KEY」
+  跟着改成只提配置文件（GUI 设置页写的也是 config.json，用户有门可走）。
+- **Fungi 自己的环境钩子一律带项目前缀**：`FUNGI_DECIDER`（§63）、`FUNGI_GUI_SCALE`（`gui/const.py`）、
+  `FUNGI_SELFTEST`（`__main__.py`）。要再开口子照这个规矩来；通用名字不再认 —— ambient 环境里它们
+  随时可能属于别的工具（这次就是）。
+- 为这件事临时加的「横幅写来源 + 错配告警」**一并撤掉**：覆盖没了，诊断也就没必要了；横幅照旧只写
+  「api_key 有没有」（§45）。
+
+### 65.3 验收
+
+- `tests/test_config.py::test_the_model_trio_comes_from_the_file_and_never_from_the_environment`：
+  环境里塞满 `OPENAI_API_KEY` / `OPENAI_ENDPOINT` / `OPENAI_MODEL`，`load_config` 仍只认文件里那三样。
+- 真机：清不清那两个变量**都一样**（源码版现在不装启动器也能连通）。
+- 桌面那份打包版（0.8.0，冻结于 2026-09-21）里仍是老逻辑，**要重打包才吃到这条**；
+  在那之前用 `C:\Users\37549\Tools\fungi-clean-env.cmd` 起 exe（脚本头里写着原因）。
+- 门禁（都在这棵最终树上跑的）：`python -m ruff check .` 干净 · `python -m ruff format --check .` 干净 ·
+  `PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **761 passed / 271s**。
+- 顺手把 ruff 的历史漂移也收干净（用户：「那几个 ruff 也顺手改了」）：`ruff format --check .` 曾点出
+  **7 个**文件（`gui/config.py` / `hub/app.py` / `hub/client.py` / `landing.py` / `server.py` /
+  `scripts/make_ringtones.py` / `tests/test_hub_app.py`，共 112+/49-，全是手写换行与内联 dict 的旧形态），
+  单独落一个纯格式提交 `254d8fd`，与本节的改动互不掺和。`scripts/check.ps1` 那一步**本来就是** `--check`
+  （它头部注释也写着"改写无关文件不是门禁该干的事"）—— 漂移是树没跟上钉死的 `ruff==0.13.0`，不是脚本的错。

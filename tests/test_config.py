@@ -155,3 +155,35 @@ def test_the_retired_max_file_mb_key_is_reported_not_swallowed(tmp_path, capsys)
     capsys.readouterr()  # drain: the next load must be quiet
     config.load_config(p)
     assert capsys.readouterr().err == "", "a warning per load would be noise"
+
+
+def test_the_model_trio_comes_from_the_file_and_never_from_the_environment(tmp_path, monkeypatch):
+    """Spec §65, 用户 2026-09-25 的裁决：模型三件套只读 config.json。
+
+    这台机器的 User 级 `OPENAI_API_KEY` / `OPENAI_BASE_URL` 是别的 agent 接小米 MiMo 的
+    **通用名字**；以前 `load_config` 让 `OPENAI_API_KEY` 压过文件，于是 Fungi 拿别人的钥匙去敲
+    config.json 里的 DeepSeek 端点 —— 401 里那把钥匙（`****sovy`）根本不在任何 config.json 里。
+    现在：环境里有什么都不算数，配置只有一个来源。
+    """
+    p = tmp_path / "config.json"
+    p.write_text(
+        json.dumps(
+            {
+                "api_key": "sk-file-key",
+                "endpoint": "https://file.example/v1",
+                "model": "file-model",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-somebody-elses-key")
+    monkeypatch.setenv("OPENAI_ENDPOINT", "https://somebody-elses.example/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "somebody-elses-model")
+
+    cfg = config.load_config(p)
+
+    assert (cfg.api_key, cfg.endpoint, cfg.model) == (
+        "sk-file-key",
+        "https://file.example/v1",
+        "file-model",
+    )

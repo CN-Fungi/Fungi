@@ -77,10 +77,6 @@ testpaths = ["tests"]
 "fungi/tools/ghostworld.py" = ["RUF001", "RUF002", "RUF003"]
 # …and the warning a hand-edited config.json gets when it does not parse
 "fungi/config.py" = ["RUF001"]
-# …and the one warning a shadowed api key gets (spec §45 2026-09-25: the banner
-# says where model/endpoint/key each came from, and shouts when a generic
-# OPENAI_API_KEY overrode the file's key while the endpoint stayed the file's)
-"fungi/runlog.py" = ["RUF001"]
 # …and the rows the file-transfer session writes (what was sent, how big, where
 # it landed — spec §53), which are Chinese UI text like the tray's
 "fungi/server.py" = ["RUF001"]
