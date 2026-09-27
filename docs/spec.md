@@ -3440,3 +3440,53 @@ token数得到。」
 - 门禁（这棵最终树）：`PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **791 passed**（321s，未新增
   用例）；`python -m ruff check .`、`python -m ruff format --check .` 全绿；工作区除用户自己的 `shots/`
   外干净。
+
+
+## 71. 搜索换腿（2026-09-28 用户点名）：ddg 打头、bing 兜底，外加「别信陌生页面」
+
+**用户原话**：「你先给我改改fungi的搜索吧」。起因是宿主 agent 自己的联网搜索后端集体失效
+（zai 余额耗尽、startpage / duckduckgo / google / mojeek 全不可达），改用 Fungi 的抓取顶班；
+顺着这条线把 Fungi 自己这条腿也实测了一遍，毛病比预想的多。
+
+### 71.1 原来的样子，与实测出来的三类毛病
+
+- `fungi/tools/webtools.py` 一共两条腿：`_search_bing`（解析 `li.b_algo`）→ `_search_brave`（整页去标签兜底）。
+- 本机实测（2026-09-28，直连与走 Clash 7897 都试过）：
+  - **Bing 会节流**：能直连（200 / 100 KB），但几分钟内约 20 次查询后，连 `vLLM` 都返回 Bing 的
+    "There are no results" 页；同一出口 IP 换代理也一样。
+  - **Bing 会返回诱饵页**：一次 AI 智能体的查询返回整屏美国高中（Reynolds High School）链接。
+    静默错答比空结果危险得多 —— 老 `tool_web_search` 见结果非空就 `return`，这种页会直接被当成答案。
+  - **其它引擎全不可用**：Brave 只剩 429；`lite.duckduckgo.com` / `search.brave.com` / `startpage` /
+    `google` 超时，`mojeek` 403。
+  - **`html.duckduckgo.com` 可用，但挑 UA**：走系统代理（`_proxies()` 从注册表拿到的 Clash 7897）时，
+    Fungi 原来的 `Mozilla/5.0 … Safari/537.36` 只换回 14 KB 空壳；换成带 Chrome 的 UA 才是 43 KB 真页面、
+    11 条可解析结果、2.7 s。
+
+### 71.2 改法
+
+- 新增 `_search_ddg`：`html.duckduckgo.com/html/?q=` + `SEARCH_UA`（Chrome）。按 `class="result__a"`
+  标题锚点切分而不是按结果容器 —— 容器 class 会变（`result` / `web-result` / `result--ad`），锚点不变；
+  跳过赞助行（href 里有 `y.js` / `ad_domain`），`//duckduckgo.com/l/?uddg=` 用 `_ddg_target` 还原成真 URL。
+- `_fetch` 多一个 `ua=USER_AGENT` 形参，只有 ddg 那条腿传 `SEARCH_UA`。
+- `tool_web_search` 从「两腿顺序试」改成**引擎链 + 三道闸**：
+  1. **顺序看代理**：`_proxies()` 有代理 → `ddg, bing, brave`；没有 → `bing, ddg, brave`
+     （没代理的机器上 ddg 只会白等一个超时）。
+  2. **重试**：空页/节流页算「可重试的失败」，每腿 `SEARCH_ATTEMPTS = 2` 次，间隔 `SEARCH_RETRY_PAUSE = 0.5s`。
+  3. **相关性闸** `_relevant`：结果里必须出现查询中的某个实词（≥4 字符、不在 `NOISE_WORDS` 里），
+     否则判为诱饵页，**不返回**。
+- 返回口径照旧（`1. 标题 / URL / 摘要`）：全空时报 `(no results for '…')`（与老行为一致）；
+  有硬失败时报 `ERROR: Search failed (duckduckgo HTTP 429; bing returned unrelated hits)` —— 哪条腿怎么坏的
+  写进错误里，模型下一步才知道是该重试、改词还是换 `web` 去读具体页面。
+- `tools/__init__.py` 里那句工具描述「Search the web via Brave Search」是旧的，改成 ddg→bing，
+  并把 `ERROR:` 与 `(no results …)` 两种口径写明。
+
+### 71.3 验收
+
+- `tests/test_tools.py` 新增 **6 例**，全离线（`_fetch` / `_proxies` 都换成假的，CI 上不开 socket）：
+  ddg 在有代理时优先、带浏览器 UA、跳过赞助行并还原 `uddg`；无代理时 bing 优先；节流页重试一次后拿到结果；
+  诱饵页被拒（`ERROR` 里带 `unrelated` 且不回正文）；三腿都答空时给 `(no results …)`；三腿全 429 时
+  错误里列全三条腿的名字。
+- 真机（`python`，本机注册表代理 = Clash 7897）：`tool_web_search('vLLM PagedAttention paper')` →
+  **2.2 s**，走 ddg，返回 arxiv 2309.06180 等真命中；无需任何额外配置，代理仍是原来那套 `_proxies()`。
+- 门禁（这棵最终树）：`python -m ruff check fungi tests` 干净 · 三个改动文件 `ruff format --check` 干净 ·
+  `PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **797 passed**（410 s；本轮 +6 例）。
