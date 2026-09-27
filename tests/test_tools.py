@@ -5,15 +5,17 @@ import io
 import json
 import threading
 import time
+import urllib.error
 
 from PIL import Image
 
 import fungi.tools.shell as shell_mod
 from fungi.tools import BASE_TOOL_NAMES, dispatch, tool_defs
+from fungi.tools import webtools as webtools_mod
 from fungi.tools.files import ImageRead, tool_edit, tool_read, tool_write
 from fungi.tools.search import tool_glob, tool_grep
 from fungi.tools.shell import tool_bash
-from fungi.tools.webtools import tool_web  # noqa: F401 (exercises import wiring)
+from fungi.tools.webtools import tool_web, tool_web_search  # noqa: F401 (import wiring)
 
 
 def test_read_numbered_lines(tmp_path):
@@ -334,3 +336,130 @@ def test_read_truncates_large_files_with_head_and_tail(tmp_path):
     assert "line 000000" in out  # head kept
     assert "line 002999" in out  # tail kept
     assert len(out) < TRUNCATE_READ * 2
+
+
+# --- web_search engine chain (offline: _fetch is faked, no socket is opened) ---
+
+BING_HITS = (
+    '<ol id="b_results">'
+    '<li class="b_algo"><h2><a href="https://www.bing.com/ck/a?u=a1aHR0cHM6Ly9hcnhpdi5vcmcvYWJzLzIzMDkuMDYxODA">'
+    "vLLM paper</a></h2><p>PagedAttention serving</p></li>"
+    "</ol>"
+)
+BING_THROTTLED = '<ol id="b_results"><li class="b_no">There are no results</li></ol>'
+BING_DECOY = (
+    '<ol id="b_results">'
+    '<li class="b_algo"><h2><a href="https://example.com/rhs">Reynolds High School</a></h2>'
+    "<p>Tickets at the main office</p></li></ol>"
+)
+DDG_HITS = (
+    '<div class="result result--ad"><a class="result__a" '
+    'href="//duckduckgo.com/y.js?ad_domain=launchdarkly.com">LaunchDarkly</a></div>'
+    '<div class="result"><a rel="nofollow" class="result__a" '
+    'href="//duckduckgo.com/l/?uddg=https%3A%2F%2Farxiv.org%2Fabs%2F2309.06180&amp;rut=abc">'
+    "vLLM: PagedAttention</a>"
+    '<a class="result__snippet">Efficient memory management for LLM serving</a></div>'
+)
+
+
+def _fake_fetch(pages, calls=None):
+    """pages: {url substring: html}. Raises KeyError-free OSError for the rest."""
+
+    def fetch(url, timeout, ua=None):
+        if calls is not None:
+            calls.append(url)
+        for needle, page in pages.items():
+            if needle in url:
+                if isinstance(page, Exception):
+                    raise page
+                return page
+        raise urllib.error.URLError("no route to host")
+
+    return fetch
+
+
+def test_web_search_uses_duckduckgo_first_when_a_proxy_exists(monkeypatch):
+    """DuckDuckGo is the richer engine, but it only answers through a proxy --
+    so with one configured it must run first, with the browser UA, and its
+    sponsored rows must be dropped and its /l/?uddg= redirects unwrapped."""
+    calls = []
+    monkeypatch.setattr(webtools_mod, "_proxies", lambda: {"https": "http://127.0.0.1:7897"})
+    monkeypatch.setattr(webtools_mod, "_fetch", _fake_fetch({"duckduckgo": DDG_HITS}, calls))
+    out = tool_web_search("vLLM PagedAttention")
+
+    assert "https://arxiv.org/abs/2309.06180" in out
+    assert "uddg" not in out
+    assert "LaunchDarkly" not in out  # sponsored row
+    assert calls and "duckduckgo" in calls[0]
+    assert calls[0].endswith("q=vLLM%20PagedAttention")
+
+
+def test_web_search_falls_back_to_bing_without_a_proxy(monkeypatch):
+    """No proxy: DuckDuckGo is unreachable from mainland networks, so Bing goes
+    first and the returned snippet is the bing one."""
+    calls = []
+    monkeypatch.setattr(webtools_mod, "_proxies", dict)
+    monkeypatch.setattr(webtools_mod, "_fetch", _fake_fetch({"bing.com": BING_HITS}, calls))
+
+    out = tool_web_search("vLLM paper")
+
+    assert "vLLM paper" in out
+    assert "PagedAttention serving" in out
+    assert calls == [c for c in calls if "bing.com" in c]
+
+
+def test_web_search_retries_a_throttled_page_then_serves(monkeypatch):
+    """Bing's 'There are no results' page is a throttle artefact, not an empty
+    result set (2026-09-28: the same query answered on a later attempt)."""
+    pages = {"bing.com": BING_THROTTLED}
+    monkeypatch.setattr(webtools_mod, "_proxies", dict)
+    monkeypatch.setattr(webtools_mod, "SEARCH_RETRY_PAUSE", 0)
+
+    def fetch(url, timeout, ua=None):
+        first = pages["bing.com"]
+        pages["bing.com"] = BING_HITS  # the retry lands
+        return first
+
+    monkeypatch.setattr(webtools_mod, "_fetch", fetch)
+    assert "vLLM paper" in tool_web_search("vLLM paper")
+
+
+def test_web_search_refuses_a_page_about_something_else(monkeypatch):
+    """Bing once answered an AI-agents query with US high-school links. Silent
+    wrong hits are worse than an error, so they must not be returned."""
+    monkeypatch.setattr(webtools_mod, "_proxies", dict)
+    monkeypatch.setattr(webtools_mod, "_fetch", _fake_fetch({"bing.com": BING_DECOY}))
+    out = tool_web_search("anthropic multi-agent research system")
+    assert out.startswith("ERROR: Search failed")
+    assert "unrelated" in out
+
+
+def test_web_search_reports_no_results_when_engines_answer_empty(monkeypatch):
+    """Every engine answered, none of them with a hit: that is a real empty
+    result set, not a failure."""
+    monkeypatch.setattr(webtools_mod, "_proxies", lambda: {"https": "http://127.0.0.1:7897"})
+    monkeypatch.setattr(
+        webtools_mod,
+        "_fetch",
+        _fake_fetch({"duckduckgo": "<html></html>", "bing.com": BING_THROTTLED, "brave": "x"}),
+    )
+    assert tool_web_search("qwertyuiopasdfgh") == "(no results for 'qwertyuiopasdfgh')"
+
+
+def test_web_search_names_every_engine_that_failed(monkeypatch):
+    monkeypatch.setattr(webtools_mod, "_proxies", lambda: {"https": "http://127.0.0.1:7897"})
+    monkeypatch.setattr(
+        webtools_mod,
+        "_fetch",
+        _fake_fetch(
+            {
+                "duckduckgo": urllib.error.HTTPError("u", 429, "Too Many Requests", {}, None),
+                "bing.com": urllib.error.HTTPError("u", 429, "Too Many Requests", {}, None),
+                "brave": urllib.error.HTTPError("u", 429, "Too Many Requests", {}, None),
+            }
+        ),
+    )
+    out = tool_web_search("vLLM paper")
+    assert out.startswith("ERROR: Search failed")
+    for engine in ("duckduckgo", "bing", "brave"):
+        assert engine in out

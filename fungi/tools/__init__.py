@@ -187,7 +187,9 @@ TOOLS: dict[str, dict] = {
     "web_search": {
         "schema": _schema(
             "web_search",
-            "Search the web via Brave Search. Returns titles, URLs, and snippets.",
+            "Search the web (DuckDuckGo, then Bing). Returns numbered titles, URLs and snippets. "
+            "ERROR: means every engine was throttled or unreachable - retry later or rephrase; "
+            "(no results ...) means the engines answered and found nothing.",
             {"query": {"type": "string"}},
             ["query"],
         ),
