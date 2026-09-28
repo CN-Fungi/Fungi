@@ -3490,3 +3490,45 @@ token数得到。」
   **2.2 s**，走 ddg，返回 arxiv 2309.06180 等真命中；无需任何额外配置，代理仍是原来那套 `_proxies()`。
 - 门禁（这棵最终树）：`python -m ruff check fungi tests` 干净 · 三个改动文件 `ruff format --check` 干净 ·
   `PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **797 passed**（410 s；本轮 +6 例）。
+
+## 72. 状态行的等待波贯穿工具阶段（2026-09-28 用户点名）：只有 thinking 有动效，工具没有
+
+**用户原话**：「我想给fungi的工具（现在只有thinking）也增加等待动效」。
+
+### 72.1 根因：一次 `textContent =` 就把波从状态行里连根拔掉
+
+思考波（`motion.js` 的 `waveOn`）是 `#status` 的**元素子节点**（`.motion-wave`，
+三根弹性条），而状态行的文字历来全部走 `status.textContent = '...'` —— 这个赋值
+**替换掉全部子节点**，包括那组条。于是：
+
+- `send()` 里 `setStatus('Thinking...')` 之后紧跟着 `waveOn(status)`，波活着；
+- 但回合中**第一个事件**一到（`text` → `Writing...`、`tool` → `Running X...`、
+  `tool_result` → `Thinking...`、服务端 `status` 注记），文字一写，波就被摘掉；
+- `waveOff` 随后淡出的是一个已经脱离文档的节点，动画也不可见。
+
+所以「只有最初 Thinking 那一段有动效」，工具阶段（用户点名的那一刻）光秃秃 —— 实测
+复现：`[['Running no-such-tool...', False]]`（状态行写着 Running，波已不在）。
+
+### 72.2 改法：文字与元素分家，`setStatus()` 只换文本节点
+
+- `web/app.js` 新增 `setStatus(t)`：删掉 `#status` 里的**非元素**子节点再 `append`
+  新文本，**元素子节点（波）原地不动**。16 处 `status.textContent = ...` 全部改走它。
+- 不动 `motion.js`：波的生命周期仍是 `waveOn`（回合开始）/`waveOff`（流结束），
+  `window.fungiMotion?.x?.()` 的可选调用契约不变。
+- 为什么不「写完文字再把波插回来」：`insertBefore` 同步搬动已连接的节点虽不重排文档，
+  但**把波摘下再插回会让 CSS 动画从 0 重启**——流式期间状态行每个事件都重写，波会一直
+  在起步帧抖。让元素**从不脱离文档**才是一次动画跑全程的做法。
+- 移动端 `web/m.js` 不改：`m.html` 根本不加载 `motion.js`，那里没有波可保，
+  16 处 `status.textContent` 是无害的纯文本写法。
+
+### 72.3 验收
+
+- 新增 `tests/test_webui_wave.py`（真 Chromium，脚本化 LLM 先发一次工具调用）：
+  `MutationObserver` 盯 `#status` 的 childList，断言 ①状态行确实被工具事件改写成
+  `Running ...`，②改写那一刻 `.motion-wave` 还在，③整个回合里波**只许**
+  `waveOff` 摘（`__gone` 为空）。修前该用例红在 ②：`[['Running no-such-tool...', False]]`。
+- 门禁（本轮）：`python -m ruff check fungi tests` 与 `ruff format --check fungi tests`
+  全绿；`PYTHONIOENCODING=utf-8 python -m pytest tests -q` → **797 passed, 1 failed** ——
+  那 1 条是 `test_screen.py::test_a_screen_that_cannot_be_read_names_the_machine_not_the_tool`，
+  跑全量时机器进了锁屏（`Screen-saver` 桌面），单跑立刻绿；它不碰 web，与本轮改动无关。
+  连它一起算，本树 **798 passed**。

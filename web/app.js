@@ -31,6 +31,20 @@ function updateScrollBtn() {
 document.getElementById('scroll-bottom').addEventListener('click', () => { msgs.scrollTop = msgs.scrollHeight; updateScrollBtn(); });
 msgs.addEventListener('scroll', updateScrollBtn);
 
+/* #status carries motion.js's wave bars as an element child beside its text,
+   so the text is never assigned with `textContent =` — that takes every child
+   with it, and the wave died at the first event of the turn (only the opening
+   "Thinking..." ever animated — 2026-09-28). Swap the text nodes and leave the
+   elements connected: detaching the wave would restart its CSS animation on
+   every rewritten line. Without motion.js there are no element children and
+   this is plain textContent. */
+function setStatus(t) {
+  for (const n of Array.from(status.childNodes)) {
+    if (n.nodeType !== Node.ELEMENT_NODE) n.remove();
+  }
+  status.append(t);
+}
+
 const getSessionTitle = list => FC.getSessionTitle(list, 55, 52);
 /* 输出速率（§64）：喂它的只有本页自己那条流的 text/reasoning chunk */
 const rateTok = FC.tokenRate(document.getElementById('tok-rate'));
@@ -453,7 +467,7 @@ async function send() {
   rawMessages.push({ role: 'user', content: text });
   sessionDirty = true;
   turn.userText = text;
-  input.value = ''; btn.disabled = true; status.textContent = 'Thinking...';
+  input.value = ''; btn.disabled = true; setStatus('Thinking...');
   _liveCount = 0; window.fungiMotion?.waveOn?.(status);
   renderTurnLive();
   await pumpStream('/chat', { message: text, sessionId: sid, side: MY_SIDE });
@@ -470,7 +484,7 @@ async function retryTurn() {
   turn = { sessionId: sid, entries: [] };
   sessionDirty = true;
   btn.disabled = true;
-  status.textContent = 'Retrying...';
+  setStatus('Retrying...');
   _liveCount = 0; window.fungiMotion?.waveOn?.(status);
   renderTurnLive();
   await pumpStream('/retry', { sessionId: sid });
@@ -491,7 +505,7 @@ async function resumeIfPending() {
     turn = { sessionId: currentSessionId, entries: [] };
     sessionDirty = true;
     btn.disabled = true;
-    status.textContent = 'Background task finished - continuing...';
+    setStatus('Background task finished - continuing...');
     _liveCount = 0; window.fungiMotion?.waveOn?.(status);
     renderTurnLive();
     await pumpStream('/resume', { sessionId: currentSessionId });
@@ -507,7 +521,7 @@ function reattachIfRunning(sid) {
   processing = true;
   abortCtrl = new AbortController(); stopRequested = false;
   turn = { sessionId: sid, entries: [] };
-  btn.disabled = true; status.textContent = 'Turn still running on the server...';
+  btn.disabled = true; setStatus('Turn still running on the server...');
   _liveCount = 0; window.fungiMotion?.waveOn?.(status);
   renderTurnLive();
   pumpStream('/events?sessionId=' + encodeURIComponent(sid), null, 'GET');
@@ -539,7 +553,7 @@ async function pumpStream(url, body, method = 'POST') {
     if (!resp.ok) {
       // No early return: skipping the tail would leave the send button
       // disabled forever and the next send dead (no stream, no recovery).
-      status.textContent = 'Error: ' + resp.status; turn = null;
+      setStatus('Error: ' + resp.status); turn = null;
     } else {
       const reader = resp.body.getReader();
       const dec = new TextDecoder();
@@ -559,15 +573,15 @@ async function pumpStream(url, body, method = 'POST') {
       }
     }
   } catch (e) {
-    if (e.name === 'AbortError') status.textContent = 'Aborted.';
-    else status.textContent = 'Error: ' + e.message;
+    if (e.name === 'AbortError') setStatus('Aborted.');
+    else setStatus('Error: ' + e.message);
     turn = null;
     recoverAfterDrop(sid);
   }
   if (turn) {
     // Stream ended without a done event (server died mid-turn): the UI used
     // to stay stuck on "Writing..." with a phantom live turn.
-    status.textContent = 'Connection lost. Press Alt+R to retry.';
+    setStatus('Connection lost. Press Alt+R to retry.');
     turn = null;
     recoverAfterDrop(sid);
   }
@@ -588,7 +602,7 @@ function handleTurnEvent(obj) {
       const last = t.entries[t.entries.length - 1];
       if (last && last.kind === 'text') last.content += obj.content;
       else t.entries.push({ kind: 'text', content: obj.content });
-      status.textContent = 'Writing...';
+      setStatus('Writing...');
       rateTok.feed();
       if (visible) updateLastText();
       break;
@@ -613,13 +627,13 @@ function handleTurnEvent(obj) {
     case 'tool':
       t.entries.push({ kind: 'tool', id: obj.content.id, name: obj.content.name, args: obj.content.args, result: '' });
       // A long tool used to leave a stale "Writing..." on the status bar.
-      if (visible) { status.textContent = 'Running ' + (obj.content.name || 'tool') + '...'; renderTurnLive(); }
+      if (visible) { setStatus('Running ' + (obj.content.name || 'tool') + '...'); renderTurnLive(); }
       break;
     case 'tool_result': {
       const rec = t.entries.find(x => x.kind === 'tool' && x.id === obj.content.id)
         || [...t.entries].reverse().find(x => x.kind === 'tool' && !x.result);
       if (rec) rec.result = obj.content.content;
-      if (visible) { status.textContent = 'Thinking...'; const block = document.getElementById('tool-' + obj.content.id); if (block) FC.fillToolResult(block, obj.content.content); else renderTurnLive(); }
+      if (visible) { setStatus('Thinking...'); const block = document.getElementById('tool-' + obj.content.id); if (block) FC.fillToolResult(block, obj.content.content); else renderTurnLive(); }
       break;
     }
     case 'agent_spawn':
@@ -644,7 +658,7 @@ function handleTurnEvent(obj) {
       break;
     case 'status':
       // Server-side progress notes (e.g. "queued behind a still-running turn").
-      if (visible) status.textContent = obj.content;
+      if (visible) setStatus(obj.content);
       break;
     case 'error':
       if (obj.content === 'Aborted by user') t.aborted = true;
@@ -673,7 +687,7 @@ function handleTurnEvent(obj) {
       // to clear it: nothing else does, and a session that never wrote a word
       // (the transfer session: one row, no model — §53) left "Thinking..." on
       // screen for good.
-      status.textContent = t.aborted ? 'Aborted.' : (failed ? 'Turn failed.' : '');
+      setStatus(t.aborted ? 'Aborted.' : (failed ? 'Turn failed.' : ''));
       if (viewing) reloadSessionFromServer();
       else loadSessions(); // the finished turn landed in a background session
       break;
@@ -763,7 +777,7 @@ input.addEventListener('keydown', e => {
       // First Esc: ask the server to stop the turn and keep the stream open —
       // the persisted partial reply comes back via done -> reload.
       stopRequested = true;
-      status.textContent = 'Stopping...';
+      setStatus('Stopping...');
       if (sid) fetch('/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId: sid }) }).catch(() => {});
       stopTimer = setTimeout(() => { if (abortCtrl) { abortCtrl.abort(); abortCtrl = null; } }, 15000);
@@ -772,7 +786,7 @@ input.addEventListener('keydown', e => {
       if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
       stopRequested = false;
       abortCtrl.abort(); abortCtrl = null;
-      status.textContent = 'Aborted.';
+      setStatus('Aborted.');
     }
   }
 });
@@ -796,7 +810,7 @@ document.getElementById('btn-browse').addEventListener('click', async () => {
    switch on the status line — which the next turn overwrites, hence the colour
    the picker keeps on itself. */
 const modelPicker = FC.mountModelPicker({
-  note: t => { status.textContent = t; },
+  note: t => { setStatus(t); },
   labels: { switching: 'Switching to', ok: 'answers', bad: 'did not answer', served: 'served as' },
 });
 loadSessions().then(() => {
