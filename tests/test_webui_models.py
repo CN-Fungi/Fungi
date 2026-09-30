@@ -354,6 +354,11 @@ def test_the_mobile_topbar_picks_models_the_same_way(mobile_page, asked):
 
     _pick(mobile_page, "m2")
 
+    # `asked.calls` is the *server-side* probe firing — the POST response may
+    # still be in flight, and `use()` only repaints the trigger label after it
+    # lands (observed 2026-09-30: response sent at t=1.484, browser received
+    # t=1.497, the old straight assert sat in between and read 'm1'). Wait for
+    # what the *page* says, same as the desktop sibling does for its colour.
     assert _wait(lambda: asked.calls == ["m2"])
-    assert _picker(mobile_page)["label"] == "m2"
+    assert _wait(lambda: _picker(mobile_page)["label"] == "m2")
     assert json.loads(config_mod.CONFIG_PATH.read_text(encoding="utf-8"))["model"] == "m2"
