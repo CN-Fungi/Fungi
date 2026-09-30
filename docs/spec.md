@@ -3532,3 +3532,73 @@ token数得到。」
   那 1 条是 `test_screen.py::test_a_screen_that_cannot_be_read_names_the_machine_not_the_tool`，
   跑全量时机器进了锁屏（`Screen-saver` 桌面），单跑立刻绿；它不碰 web，与本轮改动无关。
   连它一起算，本树 **798 passed**。
+
+## 73. 卡片点一下就打开，另外给一个「打开所在目录」（2026-09-30 用户点名）
+
+**用户原话**：「我想给fungi添加功能：在文件卡片中（无论是文件传输助手还是普通会话）放置按钮"打开所在目录"，
+而直接点击文件卡片本身则使用系统默认方式打开该文件」。
+
+### 73.1 两次点击变成两条路：`POST /open`
+
+- 页面在浏览器里，**launch 不了任何东西**，所以点击变成一个请求：`POST /open`，体 `{path, action}`，
+  `action` ∈ `open`（系统默认方式打开，缺省）｜`reveal`（打开所在目录并把文件选中）。
+- 落地在 `fungi/openfile.py`：`open_with_default()` 走 `os.startfile`；`reveal_in_folder()` 走
+  `explorer.exe /select, <path>`（`/select,` 与路径是**两个参数**，实测能选中，见 73.5 的截图判据）。
+  两者都回 `{"raised": bool}`。
+- 校验：缺 `path` → 400；`action` 不认识 → 400；相对路径按 `/download` 同一条规则落到 `PROJECT_ROOT`；
+  **路径不存在 → 404**。卡片比文件活得久是常态，**任何情况下都不去 launch 一个不存在的路径**。
+- 信任面与 `/download` 同一条：WebUI token =「机主自己的设备」（扫过二维码的那台），拿得到它的调用方
+  本来就能让本地 agent 跑 shell —— 这条路由只是把那条路变短，不是开了一类新权限。
+
+### 73.2 前台锁：不管它，窗口只会闪任务栏（本机实测）
+
+| 发起方 / 当时的前台 | 动作 | 结果 |
+|---|---|---|
+| 有前台权限（终端里的子进程），前台 = 终端 | `explorer /select,` | 弹到前台 |
+| **没有**前台权限（计划任务启的 pythonw，无控制台），前台 = Notepad | `explorer /select,`（裸调） | **不动**：前台仍是 Notepad，窗口只在任务栏闪一下 |
+| 同上，再补 `AttachThreadInput` + `SetForegroundWindow` | 同上 | **抢到了**（`GetForegroundWindow` 从 Notepad 变成 `CabinetWClass`） |
+| 同上，前台 = 文件资源管理器 | `os.startfile`（裸调） | **不动**（新窗口开在后面） |
+| 无前台权限，真跑 `fungi/openfile.py` | `reveal_in_folder` / `open_with_default` | 都到前台：资源管理器**选中**该文件、Notepad 载入该文件（73.5） |
+
+所以两个动作都带抢前台：先找到自己刚制造的那个窗口（`reveal` 按文件夹名找 `CabinetWClass`；`open` 用
+「启动前后可见顶层窗口做差」，抓不到就退回「前台有没有动过」），再
+`ShowWindow(SW_RESTORE)` + `BringWindowToTop` + `SetForegroundWindow`，**最后读回 `GetForegroundWindow` 才敢说成功** ——
+拒绝是静默的，只有前台本身能作证。响应里的 `raised` 就是它：没抢到也算打开了（在任务栏），但文案别撒谎。
+真机上亲眼见过一次 `raised=false`：发起时前台被一个系统弹窗（Windows 防火墙询问）占着，两个动作都把窗口开出来了、
+就是抬不到最前 —— 这正是读回值存在的意义。
+
+### 73.3 两个 shell 的分工（用户裁决）
+
+- 按钮「打开所在目录」**两个 shell 都给**（手机上点它，弹出来的是**电脑**的资源管理器）；
+- **点卡片本身 = 打开**只在**电脑端**：桌面 `renderOpts` 传 `canOpen: true`，手机端不传 —— 手机上点卡片
+  什么也不做（文件在电脑上，手机点不出本地动作）。
+- 电脑端整张卡是热区（`fc-openable`：`cursor:pointer` + hover 描边），但**拖动选中路径文本不算点击**
+  （`getSelection()` 非折叠就跳过）—— 否则卡片上那条路径就没法复制了。
+- 卡片只有一个渲染器（`common.js::buildFileCard`，两个 shell 共用）。今天只有传输助手会写出带 `file` 字段的行，
+  所以「无论哪个会话」是靠**渲染器共用**来保证的：普通会话将来有卡片，按钮自动就带上（本轮用户裁决：
+  不为了这个功能去给普通会话造卡片）。
+- 按钮排成一行（`.fc-actions`）：手机端「下载到手机」+「打开所在目录」，电脑端只有后者。手机上的按钮
+  一律 `stopPropagation`，不会顺带触发卡片那一次。
+
+### 73.4 失败必须当场说出来
+
+- 卡片在、文件没了 → 服务端 404 → 页面把原因写进**这张卡**（`.fc-error`，6 秒后自己消失），正好落在手指
+  刚才的位置；不为此新造一套 toast 基建。
+- 老规矩「把状态藏起来 = 用户认为功能不存在」在这里的具体形态：点了没反应 = 用户以为功能坏了。
+
+### 73.5 验收
+
+- 路由（`tests/test_open_route.py`，7 例，无浏览器）：两个动作各派发一次、参数正确；缺 `path` / 怪 `action`
+  各 400；路径不存在 404 且**什么都没启动**；相对路径按 `/download` 解析；`/open` 对局域网要 token
+  （加在 `tests/test_webui_gate.py`）。
+- 真 Chromium（`tests/test_webui_open.py`，3 例）：电脑端**普通会话**里的一张卡 —— 点卡片发 `{action:"open"}`、
+  点按钮发 `{action:"reveal"}`，且按钮**不会**顺带触发卡片那一次（一次手势一个请求）；手机端（传输助手那张卡）
+  点卡片**一个请求都不发**、点按钮发 `reveal`，卡片上没有 `fc-openable`；文件不在的卡片点一下，原因出现在卡里。
+  请求一律 `page.route` 拦下 —— 套件绝不会真开窗口。
+- 真机（计划任务启动，无前台权限）：`reveal_in_folder` 把资源管理器拉到前台且**选中**目标文件
+  （截图状态栏「2 个项目　选中 1 个项目　7 字节」）；`open_with_default` 把 Notepad 拉到前台并载入 `target.txt`。
+- 门禁：`uvx ruff@0.13.0 check` 全绿 · `ruff format --check fungi tests` 全绿 · `pytest tests -q` →
+  **808 passed, 2 failed**，两条都不是本轮的：`test_webui_models.py::test_the_mobile_topbar_picks_models_the_same_way`
+  在 **HEAD（ac0f5ce）上就红**（另拉一个 `git worktree` 在原地跑过、复现一致）；
+  `test_session_alerts.py::test_a_turn_that_ends_with_an_unanswered_ask_says_ask` 是本机已知的整轮
+  socket flake（`WinError 10053`），单跑 9 passed。本轮自己那 3 个文件单跑 22 passed。

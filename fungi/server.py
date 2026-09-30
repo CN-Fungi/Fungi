@@ -33,6 +33,7 @@ from fungi.config import (
 from fungi.events import Sink
 from fungi.hub.app import RangeNotSatisfiableError, range_window, safe_name
 from fungi.llm import probe_model
+from fungi.openfile import open_with_default, reveal_in_folder
 from fungi.tools.ask import resolve_ask
 from fungi.tools.mcp import mcp_extra_tools
 from fungi.trilayer import TriLayer
@@ -1089,6 +1090,8 @@ class YesSirHandler(BaseHTTPRequestHandler):
             self._handle_upload(url)
         elif url.path == "/pickfile":
             self._handle_pickfile()
+        elif url.path == "/open":
+            self._handle_open()
         elif url.path == "/comm-send":
             self._send_json(self.runtime.comm_send(self._read_body()))
         elif url.path == "/comm-note":
@@ -1636,6 +1639,39 @@ class YesSirHandler(BaseHTTPRequestHandler):
                     sent += len(chunk)
         except OSError:
             pass  # the phone stopped asking (it closed the tab); nothing to repair
+
+    def _handle_open(self) -> None:
+        """A card's two actions (spec §73): open the file, or show it in its folder.
+
+        The page lives in a browser and cannot launch anything, so a click
+        travels here and this host does what a double-click would. The standing
+        is /download's: the WebUI token means "the owner's own device" (the
+        phone that scanned the QR), and a caller holding it can already drive
+        the agent, whose local tools run shell commands — so this adds a shorter
+        path to that, not a new kind of access. What it must not do is launch a
+        path that is not there: a stale card is a 404, never an attempt.
+        """
+        data = self._read_body()
+        raw = str(data.get("path") or "")
+        action = str(data.get("action") or "open")
+        if not raw:
+            self._send_json({"error": "missing path"}, status=400)
+            return
+        if action not in ("open", "reveal"):
+            self._send_json({"error": f"unknown action: {action}"}, status=400)
+            return
+        target = Path(raw)
+        if not target.is_absolute():
+            target = PROJECT_ROOT / target  # same rule as /download
+        if not target.exists():
+            self._send_json({"error": f"no such file: {raw}"}, status=404)
+            return
+        launcher = reveal_in_folder if action == "reveal" else open_with_default
+        result = launcher(target)
+        # The log is where "点了没反应" gets diagnosed: raised=False is the
+        # honest answer for a window that only reached the taskbar.
+        runlog.note("webui %s %s (raised=%s)", action, target, result.get("raised"))
+        self._send_json({"ok": True, "action": action, **result})
 
     def _handle_pickfile(self) -> None:
         try:

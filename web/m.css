@@ -85,8 +85,14 @@ html,body{font-family:var(--font);font-size:16px;line-height:1.6;color:var(--tex
 .msg.file-card .fc-size{color:var(--text2);font-size:12px;white-space:nowrap}
 .msg.file-card .fc-where{color:var(--dim);font-size:11px;margin-top:3px}
 .msg.file-card .fc-path{font-family:var(--mono);font-size:11px;color:var(--text2);word-break:break-all;margin-top:6px}
-.msg.file-card .fc-pull{margin-top:9px;border:none;border-radius:var(--radius-xs);padding:8px 16px;cursor:pointer;background:var(--accent);color:var(--on-accent);font-size:12px}
+.msg.file-card .fc-actions{display:flex;gap:8px;margin-top:9px;flex-wrap:wrap}
+.msg.file-card .fc-pull{border:none;border-radius:var(--radius-xs);padding:8px 16px;cursor:pointer;background:var(--accent);color:var(--on-accent);font-size:12px}
 .msg.file-card .fc-pull:hover{background:var(--accent-hover)}
+/* 「打开所在目录」（§73）在手机上也给：动作发生在电脑上，手机上只有一个按钮。
+   手机端卡片本身不可点（点卡片=打开只在电脑端），所以没有 fc-openable 的样式。 */
+.msg.file-card .fc-reveal{border:1px solid var(--border);border-radius:var(--radius-xs);padding:8px 16px;cursor:pointer;background:transparent;color:var(--text2);font-size:12px}
+.msg.file-card .fc-reveal:hover{border-color:var(--accent);color:var(--text)}
+.msg.file-card .fc-error{margin-top:8px;font-size:11px;color:var(--error-text);word-break:break-all}
 /* 可点的绝对路径（§52）：点一下把这个文件从电脑取到手机。虚线表明它是动作，
    不是普通的 markdown 链接；长路径要能在窄屏上折行。 */
 .file-link{color:var(--accent2);text-decoration:underline dotted;text-underline-offset:2px;word-break:break-all;cursor:pointer}

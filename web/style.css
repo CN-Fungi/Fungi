@@ -59,8 +59,16 @@ html,body{font-family:var(--font);font-size:var(--fs-md);line-height:1.6;color:v
 .msg.file-card .fc-size{color:var(--text2);font-size:12px;white-space:nowrap}
 .msg.file-card .fc-where{color:var(--dim);font-size:11px;margin-top:3px}
 .msg.file-card .fc-path{font-family:var(--mono);font-size:11px;color:var(--text2);word-break:break-all;margin-top:6px;user-select:text}
-.msg.file-card .fc-pull{margin-top:9px;border:none;border-radius:var(--radius-xs);padding:6px 14px;cursor:pointer;background:var(--accent);color:var(--on-accent);font-size:12px}
+.msg.file-card .fc-actions{display:flex;gap:8px;margin-top:9px;flex-wrap:wrap}
+.msg.file-card .fc-pull{border:none;border-radius:var(--radius-xs);padding:6px 14px;cursor:pointer;background:var(--accent);color:var(--on-accent);font-size:12px}
 .msg.file-card .fc-pull:hover{background:var(--accent-hover)}
+/* 打开所在目录 / 点卡片打开（§73）：第二动作做成描边按钮，别和「下载到手机」抢主角；
+   失败原因写在卡片里，正好落在手指刚才的位置。 */
+.msg.file-card .fc-reveal{border:1px solid var(--border);border-radius:var(--radius-xs);padding:6px 14px;cursor:pointer;background:transparent;color:var(--text2);font-size:12px}
+.msg.file-card .fc-reveal:hover{border-color:var(--accent);color:var(--text)}
+.msg.file-card .fc-error{margin-top:8px;font-size:11px;color:var(--error-text);word-break:break-all}
+.msg.file-card.fc-openable{cursor:pointer}
+.msg.file-card.fc-openable:hover{border-color:var(--accent)}
 .session-row-act.del:hover{color:#ef4444;background:rgba(239,68,68,0.08)}
 .session-row input.rename-input{flex:1;background:var(--bg);border:1px solid var(--accent);border-radius:var(--radius-xs);color:var(--text);font-family:var(--font);font-size:12px;padding:4px 10px;outline:none;min-width:0}
 #session-list-empty{padding:44px 16px;text-align:center;color:var(--dim);font-size:var(--fs-sm);line-height:1.9}
