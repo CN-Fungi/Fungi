@@ -625,6 +625,87 @@ def test_the_phone_sees_a_file_the_computer_dropped(mobile_page, rooms, tmp_path
     assert _bubble("电脑那头的一句话") == "flex-start", "the computer's line belongs on the left"
 
 
+def test_the_transfer_channel_never_offers_a_retry(mobile_page, rooms):
+    """§54 (2026-10-11 用户点名): inside the transfer channel the send key is
+    always ↑ — text lands a row, an empty box does nothing. The empty-press ↻
+    retry posts /retry, which would run a real model turn over rows that are
+    nothing but files; the key is retired here and nowhere else."""
+    server, _client = rooms
+    runtime = server.webui_runtime()
+    webui_server.shuttle_ensure(runtime)
+    mobile_page.evaluate("async () => { await loadSessions(); }")
+    assert _wait(lambda: mobile_page.evaluate("() => allSessions.some(s => s.shuttle)")), (
+        "the transfer session never showed up in the list"
+    )
+    shuttle_id = mobile_page.evaluate("() => allSessions.find(s => s.shuttle).id")
+
+    def _key() -> dict:
+        return mobile_page.evaluate(
+            """() => ({
+              icon: document.getElementById('btn-send').innerHTML,
+              title: document.getElementById('btn-send').title,
+              busy: processing,
+            })"""
+        )
+
+    # A fresh page with no session open still offers the retry: the change lives
+    # in the channel, it is not a rewrite of the mobile send key.
+    idle = _key()
+    assert idle == {"icon": "↻", "title": "重试上一回合", "busy": False}, idle
+
+    mobile_page.evaluate("(id) => switchSession(id)", shuttle_id)
+    assert _wait(lambda: mobile_page.evaluate("() => currentSessionId") == shuttle_id), (
+        "never landed in the transfer session"
+    )
+    assert _wait(lambda: _key()["busy"] is False), "the transfer session never settled"
+    in_channel = _key()
+    assert in_channel == {"icon": "↑", "title": "发送", "busy": False}, in_channel
+
+    # An empty press must not reach the server. The 3 s shuttle poll only ever
+    # asks for new rows, so counting /retry and /chat is the whole question.
+    mobile_page.evaluate(
+        """() => {
+          window.__retry = 0; window.__chat = 0;
+          const of = window.fetch;
+          window.fetch = function (u) {
+            const s = String(u);
+            if (s.indexOf('/retry') >= 0) window.__retry++;
+            if (s.indexOf('/chat') >= 0) window.__chat++;
+            return of.apply(this, arguments);
+          };
+        }"""
+    )
+    rows = mobile_page.evaluate("() => document.querySelectorAll('#messages .msg').length")
+    mobile_page.click("#btn-send")
+    time.sleep(0.5)  # a retry turn would have been on the wire by now
+    quiet = mobile_page.evaluate(
+        """() => ({
+          retry: window.__retry, chat: window.__chat, busy: processing,
+          rows: document.querySelectorAll('#messages .msg').length,
+          icon: document.getElementById('btn-send').innerHTML,
+        })"""
+    )
+    assert quiet["retry"] == 0 and quiet["chat"] == 0, f"the empty press hit the server: {quiet}"
+    assert quiet["busy"] is False and quiet["rows"] == rows, (
+        f"the empty press did something: {quiet}"
+    )
+    assert quiet["icon"] == "↑", quiet
+
+    # With something to say it is a plain send: the row lands (§53), no /retry.
+    mobile_page.fill("#input", "通道里的一句话")
+    mobile_page.click("#btn-send")
+
+    def _said() -> bool:
+        return mobile_page.evaluate(
+            """() => Array.from(document.querySelectorAll('#messages .msg.user'))"""
+            """.some(e => e.textContent.trim() === '通道里的一句话')"""
+        )
+
+    assert _wait(_said, timeout_s=12), "the row never showed up in the channel"
+    sent = mobile_page.evaluate("() => ({ retry: window.__retry, busy: processing })")
+    assert sent == {"retry": 0, "busy": False}, sent
+
+
 def test_a_sent_path_arrives_as_a_card_that_pulls(mobile_page, rooms, tmp_path):
     """§56: the computer hands the phone a file by sending its path, and what the
     phone gets is a card — name, size, where it is, and the button that fetches

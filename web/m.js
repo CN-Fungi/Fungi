@@ -26,6 +26,7 @@ const api = FC.url, fetchJSON = FC.fetchJSON;
 function setCurrentSession(id) {
   currentSessionId = id;
   try { if (id) localStorage.setItem('fungi-session-m', id); else localStorage.removeItem('fungi-session-m'); } catch (e) {}
+  if (!processing) setBusy(false); // ↻/↑ 依着「开着哪个会话」算：通道里只有 ↑（§54）
 }
 const escapeHtml = FC.escapeHtml;
 /* #messages 一次只有一个主人（桌面同款，见 common.js 的 initPane）：所有重绘都经
@@ -282,13 +283,22 @@ let stopRequested = false;
 let stopTimer = null;
 let turn = null; // {sessionId, entries, userText, userRendered, aborted}
 
+/* 文件传输助手（§53）不是聊天：它里面没有「上一回合」可重试 —— 空输入点发送键
+   走的是桌面 Alt+R（POST /retry），在通道里那样点等于拿几行文件记录当上下文
+   **真跑一轮模型**。所以通道里发送键永远是 ↑：有内容就发（服务端只落一行），
+   空着点就什么都不发生（2026-10-11 用户点名）。 */
+function inShuttle() {
+  const open = (allSessions || []).find(s => s.id === currentSessionId);
+  return !!(open && open.shuttle);
+}
 function setBusy(busy, stopping) {
   btn.classList.toggle('stopping', !!stopping);
   // Empty input = retry the last turn (↻); typed text = send (↑); running = stop (■).
-  const has = !!input.value.trim();
-  btn.innerHTML = busy ? '&#x25A0;' : (has ? '&#x2191;' : '&#x21BB;');
+  // …except in the transfer channel, where the key is always send (↑).
+  const sendMode = inShuttle() || !!input.value.trim();
+  btn.innerHTML = busy ? '&#x25A0;' : (sendMode ? '&#x2191;' : '&#x21BB;');
   btn.disabled = false;
-  btn.title = busy ? (stopping ? '再点一次强制断开' : '停止') : (has ? '发送' : '重试上一回合');
+  btn.title = busy ? (stopping ? '再点一次强制断开' : '停止') : (sendMode ? '发送' : '重试上一回合');
 }
 async function send() {
   if (processing && turn) { // running: button = stop (graceful, then hard)
@@ -307,7 +317,10 @@ async function send() {
     return;
   }
   const text = input.value.trim();
-  if (!text) return retryTurn(); // empty box: the button is the retry icon
+  if (!text) {
+    if (inShuttle()) return; // 通道里没有可重试的回合：空按一下就是什么都不发生
+    return retryTurn(); // otherwise the button is the retry icon
+  }
   processing = true;
   abortCtrl = new AbortController(); stopRequested = false;
   setBusy(true);
