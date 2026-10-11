@@ -11,7 +11,7 @@
   /* Build marker: bump per web/ change so any WebUI instance can self-identify
      (console + window.__FUNGI_WEB_VER) — stale cache vs new server is otherwise
      indistinguishable from the outside. */
-  window.__FUNGI_WEB_VER = 'web-model-picker';
+  window.__FUNGI_WEB_VER = 'web-card-open';
   try { console.info('[fungi-web]', window.__FUNGI_WEB_VER); } catch (e) {}
   /* ---------- http ---------- */
   /* One fetch wrapper. Mobile inits a token prefix + 403 hook; desktop inits
@@ -1484,6 +1484,32 @@
     return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
   }
 
+  /* The card's two actions on this machine (§73). The page cannot launch
+     anything, so a click becomes a POST and the host that owns the file does
+     what a double-click would: `open` = the file's own association, `reveal` =
+     its folder, file selected. A refusal has to be said out loud — a card that
+     silently does nothing after a click is indistinguishable from a bug
+     ("把状态藏起来 = 用户认为功能不存在") — so the reason lands inside the card,
+     right under the finger, for a few seconds. */
+  function cardComplain(card, msg) {
+    let line = card.querySelector('.fc-error');
+    if (!line) {
+      line = document.createElement('div');
+      line.className = 'fc-error';
+      card.appendChild(line);
+    }
+    line.textContent = msg;
+    clearTimeout(line._fade);
+    line._fade = setTimeout(() => { if (line.parentNode) line.remove(); }, 6000);
+  }
+
+  function openOnHost(card, path, action) {
+    postJSON('/open', { path: path, action: action })
+      .then(r => (r.ok ? null : r.json().catch(() => ({})).then(d => d.error || ('HTTP ' + r.status))))
+      .then(err => { if (err) cardComplain(card, err); })
+      .catch(e => { if (e.message !== 'unauthorized') cardComplain(card, e.message || String(e)); });
+  }
+
   /* The card wears the side it is handed (§59): "which device is mine" is the
      shell's question, not the row's, so `renderTranscript` picks between `mine`
      and `peer` — this function only draws. */
@@ -1498,16 +1524,44 @@
       + '<div class="fc-where">' + who + '</div>'
       + '<div class="fc-path"></div>';
     d.querySelector('.fc-path').textContent = file.path || '';
-    if (opts && opts.canPull && file.path) {
+    const path = file.path || '';
+    const acts = document.createElement('div');
+    acts.className = 'fc-actions';
+    if (path && opts && opts.canPull) {
       const btn = document.createElement('button');
       btn.className = 'fc-pull';
       btn.textContent = '下载到手机';
       btn.addEventListener('click', e => {
         e.preventDefault();
         e.stopPropagation();
-        opts.canPull(file.path);
+        opts.canPull(path);
       });
-      d.appendChild(btn);
+      acts.appendChild(btn);
+    }
+    if (path) {
+      const show = document.createElement('button');
+      show.className = 'fc-reveal';
+      show.textContent = '打开所在目录';
+      show.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        openOnHost(d, path, 'reveal');
+      });
+      acts.appendChild(show);
+    }
+    if (acts.children.length) d.appendChild(acts);
+    /* A shell that answers "yes, this is the machine with the file" (desktop)
+       makes the whole card the way in (§73); the phone passes nothing, because
+       opening it there would pop a window on someone else's desk. Selecting the
+       path text is not a click-to-open — that would make the path uncopyable. */
+    if (path && opts && opts.canOpen) {
+      d.classList.add('fc-openable');
+      d.addEventListener('click', e => {
+        if (e.target.closest('button')) return;
+        const sel = window.getSelection();
+        if (sel && !sel.isCollapsed) return;
+        openOnHost(d, path, 'open');
+      });
     }
     return d;
   }
@@ -1535,7 +1589,7 @@
         const side = opts.my && dir ? (dir === opts.my ? ' mine' : ' peer') : '';
         if (m.file) {
           // A transfer (§53/§56): the card IS the row.
-          p.append(markTs(buildFileCard(m.file, { canPull: opts.fileLink, side }), m.ts));
+          p.append(markTs(buildFileCard(m.file, { canPull: opts.fileLink, canOpen: opts.canOpen, side }), m.ts));
           continue;
         }
         const c = String(m.content || '');

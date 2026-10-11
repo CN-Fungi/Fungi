@@ -57,6 +57,13 @@ def test_upload_endpoint_is_token_gated():
     )
 
 
+def test_open_endpoint_is_token_gated():
+    """/open launches programs on the PC (§73): the token is the door here too,
+    exactly as for the bytes /download hands out."""
+    assert YesSirHandler._authorized(_fake_handler("192.168.1.7", "/open")) is False
+    assert YesSirHandler._authorized(_fake_handler("192.168.1.7", f"/open?t={WEBUI_TOKEN}")) is True
+
+
 def test_lan_payload_hides_token_from_lan_callers():
     loopback = lan_payload(8900, loopback=True)
     assert loopback["port"] == 8900

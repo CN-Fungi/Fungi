@@ -168,6 +168,7 @@ const renderOpts = extra => Object.assign({
   spawnLookup: callId => specByCall[callId] || archivedByCall[callId],
   argsMax: 80,
   my: MY_SIDE,   // a row sits on the side of the device it came from (§59)
+  canOpen: true, // §73: this shell *is* the machine the card's file lives on
   reasoningHtml: t => '<div style="white-space:pre-wrap;max-height:200px;overflow-y:auto">' + escapeHtml(t) + '</div>',
   liveText: r => { const text = FC.stripSilent(r.text); return text ? marked.parse(text) : ''; },
 }, extra || {});
