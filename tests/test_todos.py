@@ -50,15 +50,13 @@ def test_todo_tool_add_list_remove(tmp_path, monkeypatch):
     monkeypatch.setattr(todos, "TODOS_PATH", p)
     orig = todos.load
     monkeypatch.setattr(todos, "load", lambda path=None: orig(p))
-    assert "added" in todos.todo_tool({"action": "add", "date": "2026-09-12", "text": "去看牙"})
+    # A real upcoming day: "list" shows the future, so a hardcoded date rots.
+    day = (dt.date.today() + dt.timedelta(days=3)).isoformat()
+    assert "added" in todos.todo_tool({"action": "add", "date": day, "text": "去看牙"})
     assert "error" in todos.todo_tool({"action": "add", "date": "not-a-date", "text": "x"})
-    assert "2026-09-12" in todos.todo_tool({"action": "list"})
-    assert "removed" in todos.todo_tool(
-        {"action": "remove", "date": "2026-09-12", "text": "去看牙"}
-    )
-    assert "no items" in todos.todo_tool(
-        {"action": "remove", "date": "2026-09-12", "text": "去看牙"}
-    )
+    assert day in todos.todo_tool({"action": "list"})
+    assert "removed" in todos.todo_tool({"action": "remove", "date": day, "text": "去看牙"})
+    assert "no items" in todos.todo_tool({"action": "remove", "date": day, "text": "去看牙"})
     assert todos.load(p) == {}
 
 

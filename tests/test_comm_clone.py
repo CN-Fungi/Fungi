@@ -1,5 +1,6 @@
 """Comm clone contract tests: FakeLLM drives task/chat/consent flows over a real hub."""
 
+import datetime as dt
 import json
 import threading
 import time
@@ -311,7 +312,13 @@ def test_courier_calendar_injected(monkeypatch):
     class FakeStore(dict):
         pass
 
-    store = {"2026-09-10": ["下午上课"], "2026-09-24": ["面基"]}
+    # Relative dates: the prompt carries overdue + the next 21 days, so fixed
+    # calendar dates turn this red as soon as they fall behind (2026-10-21).
+    today = dt.date.today()
+    store = {
+        (today - dt.timedelta(days=30)).isoformat(): ["下午上课"],
+        (today + dt.timedelta(days=7)).isoformat(): ["面基"],
+    }
     monkeypatch.setattr(todos_mod, "load", lambda path=None: store)
     clone = build_comm_clone("beta", "alpha", transport=None, cfg=CFG, sink=NullSink())
     prompt = clone.resolved_prompt()
