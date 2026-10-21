@@ -702,6 +702,12 @@ def test_the_transfer_channel_never_offers_a_retry(mobile_page, rooms):
         )
 
     assert _wait(_said, timeout_s=12), "the row never showed up in the channel"
+    # The row is painted by the reload that `done` triggers; `processing` flips
+    # just after that, so reading it once right here raced CI into "busy": True
+    # (2026-10-11 and 2026-10-21 runs, same line).
+    assert _wait(lambda: mobile_page.evaluate("() => !processing"), timeout_s=12), (
+        "the shuttle turn never finished"
+    )
     sent = mobile_page.evaluate("() => ({ retry: window.__retry, busy: processing })")
     assert sent == {"retry": 0, "busy": False}, sent
 
