@@ -99,8 +99,10 @@ def _drop_silent(msgs: list[dict]) -> list[dict]:
     `<>`, because HTML throws the unknown tag away (2026-09-10 user report).
 
     Both sides of `merge_comm_history` go through this, so a stripped stored row
-    still lines up with the clone's copy of it; a row whose only content was the
-    marker keeps its reasoning/tool calls and loses the empty bubble.
+    still lines up with the clone's copy of it. A row whose only content was the
+    marker is KEPT as-is: the WebUI renders a bare marker as its silent line
+    (user rule, 2026-10-21), which is information the reader asked to see —
+    the marker itself is control text and never shown.
     """
     out = []
     for m in msgs:
@@ -110,7 +112,8 @@ def _drop_silent(msgs: list[dict]) -> list[dict]:
             continue
         stripped = content.replace(SILENT_REPLY, "").strip()
         if not stripped and not m.get("tool_calls") and not m.get("reasoning"):
-            continue  # a turn that only said "nothing" leaves no row at all
+            out.append(m)  # bare abstention: the renderer's line, not prose
+            continue
         out.append({**m, "content": stripped or None})
     return out
 

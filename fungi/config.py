@@ -2,10 +2,13 @@
 (api_key / endpoint / model). Fungi's own environment hooks all carry the FUNGI_
 prefix; the generic OPENAI_* names deliberately override nothing (spec §65)."""
 
+import contextlib
 import json
 import os
 import re
 import sys
+import threading
+import time
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +19,11 @@ if getattr(sys, "frozen", False):
 else:
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = PROJECT_ROOT / "config.json"
+# One lock for readers and writers (see save_config): the WebUI's /lang.js, the
+# model picker and the settings page read while a save may be renaming a file
+# into place, and on Windows that overlap surfaces as PermissionError — which
+# a reader would silently turn into "all defaults".
+_CONFIG_LOCK = threading.RLock()
 # Bundled read-only resources (web/); PyInstaller unpacks them to _MEIPASS.
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", PROJECT_ROOT))
 
@@ -57,6 +65,9 @@ def writable_dir(preferred: Path, name: str) -> Path:
 DEFAULT_API_KEY = "sk-your-key-here"
 DEFAULT_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 DEFAULT_MODEL = "deepseek-v4-pro"
+# WebUI display language (spec §74). Chosen in the launcher's settings page and
+# read by the pages through /lang.js; Chinese is the default.
+UI_LANGS = ("zh", "en")
 
 
 def _pyproject() -> Path:
@@ -78,6 +89,8 @@ class Config:
     api_key: str = DEFAULT_API_KEY
     endpoint: str = DEFAULT_ENDPOINT
     model: str = DEFAULT_MODEL
+    # WebUI language ("zh" | "en"), set in the launcher's settings page (§74).
+    ui_lang: str = "zh"
     # The pickable models, most recently used first, `model` always among them
     # (spec §66). The settings page and the WebUI header render this as a
     # dropdown, so moving between the two or three models somebody actually uses
@@ -349,6 +362,12 @@ def repair_config_file(path: Path | None = None) -> str | None:
 
 
 def load_config(path: Path | None = None) -> Config:
+    """The one config reader; serialized with save_config (see _CONFIG_LOCK)."""
+    with _CONFIG_LOCK:
+        return _load_config(path)
+
+
+def _load_config(path: Path | None = None) -> Config:
     """Load config from the JSON file — and only from there (spec §65)."""
     cfg = Config()
     source = path if path is not None else CONFIG_PATH
@@ -363,6 +382,8 @@ def load_config(path: Path | None = None) -> Config:
             cfg.endpoint = data["endpoint"]
         if data.get("model"):
             cfg.model = data["model"]
+        if data.get("ui_lang") in UI_LANGS:
+            cfg.ui_lang = data["ui_lang"]
         listed = data.get("model_list")
         if isinstance(listed, list):
             # dict.fromkeys: a hand-edited file with the same name twice must not
@@ -433,6 +454,12 @@ def load_config(path: Path | None = None) -> Config:
 
 
 def save_config(cfg: Config, path: Path | None = None) -> None:
+    """Persist the config; serialized with load_config (see _CONFIG_LOCK)."""
+    with _CONFIG_LOCK:
+        _save_config(cfg, path)
+
+
+def _save_config(cfg: Config, path: Path | None = None) -> None:
     """Persist api_key/endpoint/model (and system_prompt when set) to JSON."""
     target = path if path is not None else CONFIG_PATH
     data: dict[str, str | int] = {
@@ -440,6 +467,8 @@ def save_config(cfg: Config, path: Path | None = None) -> None:
         "endpoint": cfg.endpoint,
         "model": cfg.model,
     }
+    if cfg.ui_lang in UI_LANGS and cfg.ui_lang != "zh":
+        data["ui_lang"] = cfg.ui_lang
     if cfg.max_tokens:
         data["max_tokens"] = cfg.max_tokens
     # Only when there is something to switch to: a one-entry list is just `model`
@@ -480,4 +509,23 @@ def save_config(cfg: Config, path: Path | None = None) -> None:
         data["display"] = cfg.display
     if cfg.decider:
         data["decider"] = cfg.decider
-    target.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    # Temp + rename: /lang.js, the WebUI's model picker and the settings page all
+    # read this file while a save may be in flight. A plain write_text truncates
+    # first, so a reader could see "" and answer with defaults (a page briefly
+    # losing every setting). Same recipe as session._write_atomic, including the
+    # Windows retry: a reader holds the target open and refuses the rename.
+    tmp = target.with_name(target.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=4), encoding="utf-8")
+        for attempt in range(5):
+            try:
+                tmp.replace(target)  # same directory, same volume: atomic
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.02)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise

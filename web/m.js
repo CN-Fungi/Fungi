@@ -3,6 +3,7 @@
    Mobile-specific: right-swipe session drawer (2/3 width, GSAP drag), token gate. */
 marked.setOptions({ breaks: true, gfm: true });
 const FC = window.FungiCommon;
+const T = window.FungiI18N.t;
 const msgs = document.getElementById('messages'), input = document.getElementById('input'),
   btn = document.getElementById('btn-send'), status = document.getElementById('status'),
   banner = document.getElementById('asks-banner');
@@ -120,7 +121,9 @@ async function switchSession(id) {
     rawMessages = s.messages || [];
     S.clearMsgs();
     renderMessages(s);
-    document.getElementById('session-title').textContent = s.title || getSessionTitle(rawMessages) || 'Fungi';
+    document.getElementById('session-title').textContent = s.shuttle
+      ? T('shuttle.title')
+      : (s.title || getSessionTitle(rawMessages) || 'Fungi');
     S.stick(); updateScrollBtn();
     renderSessionList(); loadSessions();
     reattachIfRunning(s.id);
@@ -163,7 +166,7 @@ async function deleteSession(id) {
 }
 
 /* ---------- confirm modal (shared impl in common.js, mobile wiring) ---------- */
-FC.initConfirmModal({ title: '确认？', confirmText: '确定', cancelText: '取消' });
+FC.initConfirmModal({ title: T('confirm.title'), confirmText: T('confirm.ok'), cancelText: T('confirm.cancel') });
 const showConfirm = FC.showConfirm, closeConfirm = FC.closeConfirm;
 
 /* ---------- rename (desktop startRename/finishRename contract) ---------- */
@@ -206,14 +209,14 @@ function renderSessionList() {
     // 常驻置顶、带图标、样式不同，而且**没有改名/删除两个按钮**（服务端也拒绝）。
     row.className = 'session-row' + (s.shuttle ? ' shuttle' : '')
       + (s.id === currentSessionId ? ' active' : '');
-    if (s.shuttle) row.title = '文件传输助手：两台设备之间只搬文件，不会改名也不会被删除';
+    if (s.shuttle) row.title = T('desktop.shuttleTitle');
     row.innerHTML = (s.shuttle ? '<span class="session-row-icon">&#x1F4C1;</span>' : '')
-      + '<span class="session-row-title">' + escapeHtml(s.title || 'Untitled') + '</span>'
-      + '<span class="session-row-meta">' + (s.shuttle ? '只搬文件' : fmtDate(s.created))
+      + '<span class="session-row-title">' + escapeHtml(s.shuttle ? T('shuttle.title') : (s.title || T('session.untitled'))) + '</span>'
+      + '<span class="session-row-meta">' + (s.shuttle ? T('desktop.shuttleMeta') : fmtDate(s.created))
       + (s.running ? ' \u25cf' : '') + '</span>'
       + (s.shuttle ? ''
-        : '<button class="session-row-act ren" title="重命名">&#9998;</button>'
-          + '<button class="session-row-act del" title="删除">&#10005;</button>');
+        : '<button class="session-row-act ren" title="' + escapeHtml(T('desktop.rename')) + '">&#9998;</button>'
+          + '<button class="session-row-act del" title="' + escapeHtml(T('desktop.delete')) + '">&#10005;</button>');
     paintAlert(row, s.alert);  // §61：抽屉每 3 秒重建行，红点跟着最新状态走
     if (!s.shuttle) {
       row.querySelector('.session-row-act.ren').addEventListener('click', e => {
@@ -222,9 +225,9 @@ function renderSessionList() {
       row.querySelector('.session-row-act.del').addEventListener('click', e => {
         e.stopPropagation();
         showConfirm({
-          title: '删除会话',
-          message: '「' + (s.title || 'Untitled') + '」将被永久删除，不可恢复。',
-          confirmText: '删除',
+          title: T('desktop.deleteTitle'),
+          message: T('desktop.deleteMessage', { title: s.title || T('session.untitled') }),
+          confirmText: T('desktop.deleteConfirm'),
           danger: true,
           onConfirm: () => deleteSession(s.id)
         });
@@ -234,11 +237,11 @@ function renderSessionList() {
     list.appendChild(row);
     fresh.push(row);
   });
-  if (filtered.length === 0) { empty.style.display = ''; empty.textContent = filter ? '没有匹配的会话。' : '还没有会话。'; }
+  if (filtered.length === 0) { empty.style.display = ''; empty.textContent = filter ? T('desktop.noMatches') : T('mobile.sessionsEmptyPlain'); }
   else empty.style.display = 'none';
   if (motionOn()) gsap.from(fresh, { opacity: 0, x: -26, duration: 0.35, stagger: 0.04, ease: 'power3.out', clearProps: 'all' });
 }
-const fmtDate = d => FC.fmtDate(d, 'zh-CN');
+const fmtDate = d => FC.fmtDate(d);
 
 /* ---------- transcript render (full re-render = refresh-grade) ---------- */
 function renderMessages(s) {
@@ -264,9 +267,9 @@ const renderOpts = extra => Object.assign({
   asks: { buildAnsweredAskCard },
   spawnLookup: callId => specByCall[callId] || archivedByCall[callId],
   argsMax: 60,                       // 手机端工具卡参数更短
-  spawnTitle: '点按查看子代理详情',
+  spawnTitle: T('spawn.title'),
   reasoningHtml: t => '<div>' + escapeHtml(t) + '</div>',
-  liveText: r => { const text = FC.stripSilent(r.text); return text ? escapeHtml(text) : ''; },
+  liveText: r => { const text = FC.silentText(r.text); return text ? escapeHtml(text) : ''; },
   fileLink: path => pullFromPc(path),   // 手机：点路径就把文件取过来（§52）
   my: MY_SIDE,                          // 行站在「发它的那台设备」那边（§59）
 }, extra || {});
@@ -298,13 +301,13 @@ function setBusy(busy, stopping) {
   const sendMode = inShuttle() || !!input.value.trim();
   btn.innerHTML = busy ? '&#x25A0;' : (sendMode ? '&#x2191;' : '&#x21BB;');
   btn.disabled = false;
-  btn.title = busy ? (stopping ? '再点一次强制断开' : '停止') : (sendMode ? '发送' : '重试上一回合');
+  btn.title = busy ? (stopping ? T('mobile.stopForce') : T('mobile.stop')) : (sendMode ? T('ui.send') : T('mobile.retry'));
 }
 async function send() {
   if (processing && turn) { // running: button = stop (graceful, then hard)
     const sid = turn.sessionId || currentSessionId;
     if (!stopRequested) {
-      stopRequested = true; setBusy(true, true); status.textContent = '正在停止…';
+      stopRequested = true; setBusy(true, true); status.textContent = T('mobile.stopping');
       if (sid) fetch(api('/stop'), { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId: sid }) }).catch(() => {});
       stopTimer = setTimeout(() => { if (abortCtrl) { abortCtrl.abort(); abortCtrl = null; } }, 15000);
@@ -312,7 +315,7 @@ async function send() {
       if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
       stopRequested = false;
       abortCtrl.abort(); abortCtrl = null;
-      status.textContent = '已断开。';
+      status.textContent = T('mobile.disconnected');
     }
     return;
   }
@@ -336,7 +339,7 @@ async function send() {
   rawMessages.push({ role: 'user', content: text });
   sessionDirty = true;
   turn.userText = text;
-  input.value = ''; autoGrow(); status.textContent = 'Thinking...';
+  input.value = ''; autoGrow(); status.textContent = T('status.thinking');
   _liveCount = 0;
   renderTurnLive();
   await pumpStream(api('/chat'), { message: text, sessionId: sid, side: MY_SIDE });
@@ -353,7 +356,7 @@ async function retryTurn() {
   turn = { sessionId: sid, entries: [] };
   sessionDirty = true;
   setBusy(true);
-  status.textContent = '重试中...';
+  status.textContent = T('mobile.retrying');
   _liveCount = 0;
   renderTurnLive();
   await pumpStream(api('/retry'), { sessionId: sid });
@@ -372,7 +375,7 @@ async function resumeIfPending() {
     abortCtrl = new AbortController(); stopRequested = false;
     turn = { sessionId: currentSessionId, entries: [] };
     sessionDirty = true;
-    status.textContent = 'Background task finished - continuing...';
+    status.textContent = T('mobile.resuming');
     _liveCount = 0;
     renderTurnLive();
     await pumpStream(api('/resume'), { sessionId: currentSessionId });
@@ -388,7 +391,7 @@ function reattachIfRunning(sid) {
   abortCtrl = new AbortController(); stopRequested = false;
   turn = { sessionId: sid, entries: [] };
   setBusy(true);
-  status.textContent = '回合仍在服务器上运行，正在接续…';
+  status.textContent = T('mobile.reattaching');
   _liveCount = 0;
   renderTurnLive();
   pumpStream(api('/events?sessionId=' + encodeURIComponent(sid)), null, 'GET');
@@ -417,7 +420,7 @@ async function pumpStream(url, body, method = 'POST') {
     }
     const resp = await fetch(url, opts);
     if (resp.status === 403) { document.getElementById('rescan-overlay').classList.remove('hide'); turn = null; processing = false; setBusy(false); return; }
-    if (!resp.ok) { status.textContent = '错误：HTTP ' + resp.status; turn = null; }
+    if (!resp.ok) { status.textContent = T('mobile.errorHttp', { status: resp.status }); turn = null; }
     else {
       const reader = resp.body.getReader();
       const dec = new TextDecoder();
@@ -437,14 +440,14 @@ async function pumpStream(url, body, method = 'POST') {
       }
     }
   } catch (e) {
-    if (e.name === 'AbortError') status.textContent = '已中止。';
-    else status.textContent = '错误：' + e.message;
+    if (e.name === 'AbortError') status.textContent = T('mobile.aborted');
+    else status.textContent = T('mobile.errorMsg', { msg: e.message });
     turn = null;
     recoverAfterDrop(sid);
   }
   if (turn) {
     // Stream ended without a done event: never leave a phantom live turn.
-    status.textContent = '连接中断。';
+    status.textContent = T('mobile.connectionLost');
     turn = null;
     recoverAfterDrop(sid);
   }
@@ -463,7 +466,7 @@ function handleTurnEvent(obj) {
       const last = t.entries[t.entries.length - 1];
       if (last && last.kind === 'text') last.content += obj.content;
       else t.entries.push({ kind: 'text', content: obj.content });
-      status.textContent = 'Writing...';
+      status.textContent = T('status.writing');
       rateTok.feed();
       if (visible) updateLastText();
       break;
@@ -488,14 +491,14 @@ function handleTurnEvent(obj) {
     case 'tool':
       t.entries.push({ kind: 'tool', id: obj.content.id, name: obj.content.name, args: obj.content.args, result: '' });
       // A long tool used to leave a stale "Writing..." on the status bar.
-      if (visible) { status.textContent = '⚙ ' + (obj.content.name || 'tool') + '…'; renderTurnLive(); }
+      if (visible) { status.textContent = T('mobile.runningTool', { name: obj.content.name || 'tool' }); renderTurnLive(); }
       break;
     case 'tool_result': {
       const rec = t.entries.find(x => x.kind === 'tool' && x.id === obj.content.id)
         || [...t.entries].reverse().find(x => x.kind === 'tool' && !x.result);
       if (rec) rec.result = obj.content.content;
       if (visible) {
-        status.textContent = 'Thinking...'; // tool done: the next LLM round starts
+        status.textContent = T('status.thinking'); // tool done: the next LLM round starts
         const block = document.getElementById('tool-' + obj.content.id);
         if (block) FC.fillToolResult(block, obj.content.content, pullFromPc);
         else renderTurnLive();
@@ -545,8 +548,8 @@ function handleTurnEvent(obj) {
           if (agents[id].status === 'running') setAgentStatus(id, 'aborted');
         });
       }
-      status.textContent = t.aborted ? '已中止。'
-        : (failed ? '回合失败。' : '');
+      status.textContent = t.aborted ? T('mobile.aborted')
+        : (failed ? T('mobile.turnFailed') : '');
       if (viewing) reloadSessionFromServer();
       else loadSessions();
       break;
@@ -562,7 +565,7 @@ function updateLastText() {
   const el = document.getElementById('live-text-' + idx);
   if (el) {
     const stick = isNearBottom(msgs);
-    el.innerHTML = marked.parse(FC.stripSilent(t.entries[idx].content)) + '<span class="live-cursor"></span>';
+    el.innerHTML = marked.parse(FC.silentText(t.entries[idx].content)) + '<span class="live-cursor"></span>';
     FC.linkifyPaths(el, pullFromPc);
     if (stick) S.stick();
   }
@@ -591,14 +594,15 @@ function renderTurnLive() {
     if (e.kind === 'reasoning') {
       const det = document.createElement('details');
       det.className = 'msg reasoning live-node'; det.id = 'live-details-' + i; det.open = !e.closed;
-      det.innerHTML = '<summary>Thinking\u2026</summary><div id="live-reasoning-' + i + '"></div>';
+      det.innerHTML = '<summary>' + T('transcript.thinking') + '</summary><div id="live-reasoning-' + i + '"></div>';
       det.querySelector('#live-reasoning-' + i).textContent = e.content;
       S.append(det);
     } else if (e.kind === 'text') {
-      const text = FC.stripSilent(e.content);
-      if (!text) return; // the abstention marker alone leaves no bubble
+      const text = FC.silentText(e.content);
+      if (!text) return;
       const ad = document.createElement('div');
-      ad.className = 'msg assistant live-node'; ad.id = 'live-text-' + i;
+      ad.className = 'msg assistant live-node' + (FC.isSilentOnly(e.content) ? ' silent' : '');
+      ad.id = 'live-text-' + i;
       ad.innerHTML = marked.parse(text) + '<span class="live-cursor"></span>';
       FC.linkifyPaths(ad, pullFromPc);
       S.append(ad);
@@ -606,7 +610,7 @@ function renderTurnLive() {
       const d = FC.buildToolCard({ id: e.id, name: e.name, args: e.args, result: e.result }, { argsMax: 60 });
       d.classList.add('live-node');
       S.append(d);
-      if (e.name === 'spawn' || e.name === 'background') FC.attachSpawnClick(d, e.id, callId => specByCall[callId] || archivedByCall[callId], '点按查看子代理详情');
+      if (e.name === 'spawn' || e.name === 'background') FC.attachSpawnClick(d, e.id, callId => specByCall[callId] || archivedByCall[callId], T('spawn.title'));
     } else if (e.kind === 'ask') {
       const card = e.active ? buildActiveAskCard(e, saved) : buildAnsweredAskCard(e);
       card.classList.add('live-node');
@@ -633,7 +637,11 @@ function renderTurnLive() {
 const Asks = FC.initAsks({
   http: FC,
   getTurn: () => turn,
-  labels: { submit: '提交', required: '必填', customPlaceholder: '或者自己输入…', answerPlaceholder: '你的回答…', noAnswer: '\u23F3 未回答' },
+  labels: {
+    submit: T('ask.submit'), required: T('ask.required'),
+    customPlaceholder: T('ask.customPlaceholder'), answerPlaceholder: T('ask.answerPlaceholder'),
+    noAnswer: T('ask.noAnswer'),
+  },
 });
 const saveAskCardState = Asks.saveAskCardState;
 const buildActiveAskCard = Asks.buildActiveAskCard;
@@ -658,10 +666,11 @@ const PendingAsks = FC.initPendingAsks({
     },
   },
   labels: {
-    fromFallback: 'remote host',
-    consentPlaceholder: '自定义回复（可选）',
-    allow: '允许', deny: '禁止', consentSend: '发送', submit: '提交', required: '必填',
-    customPlaceholder: '或者自己输入…', answerPlaceholder: '你的回答…',
+    fromFallback: T('consent.fromFallback'),
+    consentPlaceholder: T('consent.placeholder'),
+    allow: T('consent.allow'), deny: T('consent.deny'), consentSend: T('consent.send'),
+    submit: T('ask.submit'), required: T('ask.required'),
+    customPlaceholder: T('ask.customPlaceholder'), answerPlaceholder: T('ask.answerPlaceholder'),
   },
 });
 const placeAskCards = PendingAsks.place, pollPendingAsks = PendingAsks.poll;
@@ -812,11 +821,11 @@ function renderFriendChat(d) {
   events.forEach(row => {
     let node = null;
     if (row.kind === 'transfer')
-      node = p.add('friend-event', '&#x1F4C4 ' + escapeHtml(row.text || 'file transfer'));
+      node = p.add('friend-event', '&#x1F4C4 ' + escapeHtml(row.text || T('friend.transfer')));
     else if (row.kind === 'task')
-      node = p.add('friend-event', '&#x1F4E5 delegated to ' + escapeHtml(row.dst || '?') + ': ' + escapeHtml((row.text || '').slice(0, 200)));
+      node = p.add('friend-event', '&#x1F4E5 ' + escapeHtml(T('friend.delegatedTo', { host: row.dst || '?' })) + ' ' + escapeHtml((row.text || '').slice(0, 200)));
     else if (row.kind === 'result')
-      node = p.add('friend-event', '&#x2714 ' + escapeHtml(row.src || '?') + ' replied: ' + escapeHtml((row.text || '').slice(0, 200)));
+      node = p.add('friend-event', '&#x2714 ' + escapeHtml(T('friend.replied', { host: row.src || '?' })) + ' ' + escapeHtml((row.text || '').slice(0, 200)));
     if (node) { FC.markTs(node, row.ts); FC.insertByTs(p, node, row.ts); }  // 信封自带 hub 时间戳
   });
   MailUnread.markPeerRead(friendView); // seeing the thread IS reading it
@@ -825,10 +834,10 @@ function renderFriendChat(d) {
     const subject = String(m.subject || '');
     const html = (subject && subject !== '(no subject)' && subject !== body
       ? '<strong>' + escapeHtml(subject) + '</strong><br>' : '') + marked.parse(body);
-    const who = m.mine ? '我'
+    const who = m.mine ? T('friend.me')
       : (String(m.from || '').endsWith(':human')
-        ? '来自 ' + displayOf(m.peer) + ' 的用户'
-        : displayOf(m.peer) + ' 的 Agent');
+        ? T('friend.userFrom', { host: displayOf(m.peer) })
+        : T('friend.agentOf', { host: displayOf(m.peer) }));
     const bubble = p.add('user' + (m.mine ? ' friend-mine' : ' friend-peer'), html);
     const lab = document.createElement('div');
     lab.className = 'human-label';
@@ -922,8 +931,8 @@ function openAgentModal(id) {
     + escapeHtml((a.tool === 'background' ? 'Bg' : 'L' + (a.layer || '?')) + ' · ' + String(a.goal || '').slice(0, 40))
     + '</h3><button id="agent-modal-close">\u2715</button></div>'
     + '<div class="am-goal">' + escapeHtml(a.goal) + '</div>'
-    + '<div class="am-status">' + escapeHtml(a.status) + (a.replyFormat ? ' · 回复格式: ' + escapeHtml(a.replyFormat) : '') + '</div>'
-    + (evs || '<div class="am-ev">（暂无事件）</div>') + '</div>';
+    + '<div class="am-status">' + escapeHtml(a.status) + (a.replyFormat ? ' · ' + escapeHtml(T('mobile.replyFormat', { fmt: a.replyFormat })) : '') + '</div>'
+    + (evs || '<div class="am-ev">' + escapeHtml(T('mobile.noEvents')) + '</div>') + '</div>';
   ov.classList.add('show');
   const close = () => { ov.classList.remove('show'); ov.innerHTML = ''; };
   ov.querySelector('#agent-modal-close').addEventListener('click', close);
@@ -1087,14 +1096,16 @@ function autoGrow() {
 input.addEventListener('input', autoGrow);
 /* ---------- file pull: a path on screen -> the phone (§52) ---------- */
 async function pullFromPc(path) {
-  const name = String(path).split(/[\\/]/).pop() || '文件';
-  if (!Xfer.open('从电脑取文件', ['下载到手机 · ' + name])) return;
-  Xfer.note(0, '正在取…');
+  const name = String(path).split(/[\\/]/).pop() || T('mobile.fileFallback');
+  if (!Xfer.open(T('mobile.pullTitle'), [T('mobile.pullStep', { name: name })])) return;
+  Xfer.note(0, T('mobile.pulling'));
   try {
     const saved = await Xfer.download(path, (done, total) => Xfer.progress(0, done, total));
-    Xfer.finish(saved === '交给浏览器下载' ? '大文件已交给浏览器下载' : '已保存到手机：' + saved);
+    Xfer.finish(saved === 'browser'
+      ? T('mobile.browserDownloaded')
+      : T('mobile.savedToPhone', { name: saved }));
   } catch (e) {
-    Xfer.fail('下载失败：' + (e.message || String(e)), 0);
+    Xfer.fail(T('mobile.pullFailed', { msg: e.message || String(e) }), 0);
   }
 }
 
@@ -1105,16 +1116,16 @@ fileInput.addEventListener('change', async () => {
   const files = Array.from(fileInput.files || []);
   fileInput.value = '';
   if (!files.length) return;
-  Xfer.open('上传文件到电脑', files.map(f => '上传到电脑 · ' + f.name));
+  Xfer.open(T('mobile.uploadTitle'), files.map(f => T('mobile.uploadStep', { name: f.name })));
   for (const [i, f] of files.entries()) {
-    Xfer.note(i, '正在上传…');
+    Xfer.note(i, T('mobile.uploading'));
     try {
       await Xfer.upload(f, (done, total) => Xfer.progress(i, done, total));
       // 文件已经在电脑上了：不往输入框里塞那条落点路径（用户 2026-09-19 点名）——
       // 想跟 agent 说这个文件，它自己在传输助手那张卡上看得见（§59）。
-      Xfer.finish('已保存到电脑'); // 完成后自动关闭
+      Xfer.finish(T('mobile.savedToPc')); // 完成后自动关闭
     } catch (e) {
-      Xfer.fail('上传失败：' + (e.message || f.name), i);
+      Xfer.fail(T('mobile.uploadFailed', { msg: e.message || f.name }), i);
       return;
     }
   }
@@ -1160,7 +1171,10 @@ else document.getElementById('rescan-overlay').classList.add('hide'); // valid t
 /* 头部那个模型（spec §66）：原来是印上去的字，现在是下拉列表，选中哪个就用哪个。 */
 FC.mountModelPicker({
   note: t => { status.textContent = t; },
-  labels: { switching: '正在切换到', ok: '可用', bad: '调不通', served: '实际是' },
+  labels: {
+    switching: T('model.switching'), ok: T('model.answers'),
+    bad: T('model.failed'), served: T('model.servedAs'),
+  },
 });
 
 loadSessions().then(() => {
@@ -1202,7 +1216,7 @@ setInterval(pollShuttle, 3000);
    一个会话在等用户（回合结束 / 出错 / 正在提问）会同时出现在两处：/sessions
    的 payload，以及 /session/seen 的回答（见 common.js 的 initSessionAlerts，
    它顺带告诉服务端「这一页正在看哪个会话」—— 红点掉下去、铃停下来的就是它）。 */
-const ALERT_LABEL = { ask: 'Agent 在等你回答', done: '回答完毕', error: '出错了' };
+const ALERT_LABEL = { ask: T('alert.ask'), done: T('alert.done'), error: T('alert.error') };
 
 function paintAlert(row, kind) {
   let dot = row.querySelector('.session-dot');
@@ -1212,7 +1226,7 @@ function paintAlert(row, kind) {
     dot.className = 'session-dot';
     row.querySelector('.session-row-meta').before(dot);
   }
-  dot.title = ALERT_LABEL[kind] || '有新消息';
+  dot.title = ALERT_LABEL[kind] || T('alert.new');
 }
 
 function applyAlerts(map) {
@@ -1270,7 +1284,7 @@ friendFileInput.addEventListener('change', async () => {
   for (const f of files) {
     try {
       // two hops on a phone: browser -> this host, then this host -> the peer
-      await Xfer.sendFromPhone('发送文件给 ' + displayOf(friendView), friendView, f);
+      await Xfer.sendFromPhone(T('xfer.sendToFriend', { name: displayOf(friendView) }), friendView, f);
     } catch (e) {
       return; // the modal carries the reason and stays open until it is closed
     }

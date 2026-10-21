@@ -3620,3 +3620,88 @@ token数得到。」
   在 **HEAD（ac0f5ce）上就红**（另拉一个 `git worktree` 在原地跑过、复现一致）；
   `test_session_alerts.py::test_a_turn_that_ends_with_an_unanswered_ask_says_ask` 是本机已知的整轮
   socket flake（`WinError 10053`），单跑 9 passed。本轮自己那 3 个文件单跑 22 passed。
+
+
+## 74. WebUI 中英双语（2026-10-21 用户点名）：默认中文，设置里能换
+
+**用户原话**：「帮我为fungi添加webUI的i18n，只需要中英文两种，并在设置中默认中文」。同日第二个需求：
+「改改深色模式下的允许询问字体颜色，让颜色浅一些，增加对比度」。
+
+### 74.1 形状：一份词典 + 一条启动器设置
+
+- 语言是**启动器设置页**的一项，存 `config.json` 的 `ui_lang`（`"zh"` | `"en"`，默认 `zh`）。
+  WebUI **没有**自己的语言开关：桌面页与手机页只能跟这份配置走，两边不会各说各话。
+- 设置页顶上一行「界面语言」下拉（中文 / English），选中即写盘，并提示「刷新页面生效」。
+- `/lang.js`：服务端按 `load_config()` **每次请求现生成** `window.FUNGI_LANG = "…";`
+  （`Cache-Control: no-store`），在两个 shell 里排在 `web/i18n.js` **之前**。改设置不需要重启房间。
+- `web/i18n.js`：`DICT = {zh, en}` 平铺 key；`t(key, vars)` 做 `{name}` 插值；缺 key 先退英文、
+  再退 key 本身。语言在脚本加载时读死（一次页面生命周期一种语言），不以任何浏览器存储为准。
+- 静态文案由标记承担：`data-i18n`（textContent）、`data-i18n-html`（只有带 `<br>` 的空状态）、
+  `data-i18n-placeholder`、`data-i18n-title`。`apply()` 在脚本加载时跑一次（脚本在 `</body>` 前，DOM 已就绪）。
+- JS 生成的每一行在**画的时候**调 `t()`；模块初始化时捕获的标签对象（ask 卡、传输弹窗、confirm 默认值）
+  同样走 `t()`。换语言就是刷新页面，不做热重绘。
+- `/i18n.js` 与 `/lang.js` 进服务端静态白名单（`_STATIC_ROUTES` 让无 token 的 shell 资源照常取；
+  `/lang.js` 在 `_get_routes` 里单独出，因为它是生成的）；两者都不带数据。
+- 这条「每次加载都读盘」的路径把配置读写的一致性也钉住了：`save_config` 改成**临时文件 + rename**，
+  并与 `load_config` 共用 `_CONFIG_LOCK`（Windows 上读与更名重叠会 `PermissionError`，读侧会把它
+  当成默认值；实测 1558 次并发读零撕裂）。
+
+### 74.2 翻译到什么程度
+
+- 两个 shell 的**壳**：侧栏/抽屉、输入区、主题与模型提示、consent 滑块、确认弹窗、传输进度弹窗、
+  ask 卡、会话列表（含文件传输助手的标题与 meta）、状态行、子代理卡、好友视图事件、手机取/传文件流程。
+- **不翻**：服务端写进会话里的内容（会话标题、`[来自 X 的用户]` 这种协议 echo、工具输出、模型回答）。
+  那是数据，不是 UI；翻它等于改用户的历史记录。例外是**固定常量**文件传输助手的标题（`shuttle.title`）
+  与「只搬文件」—— 它在列表里只是这一行的名字，所以按显示语言画，服务端存储不动。
+- 计时口径跟着语言：`fmtDate` 的 `now`/`刚刚`、星期名、今天/昨天/前天；`toLocaleDateString` 用
+  `zh-CN` / `en-US`。
+
+### 74.3 深色模式的「允许/询问」：字浅了，底也得深
+
+- 问题不是一处颜色：两个标签**压在彩色 knob 上**。原来深色是 `#fbbf24` 字 + `#f59e0b` 底（黄压黄），
+  未选中那侧是 `--dim:#6b7191`（暗灰压暗底）——两边都难读。
+- 修法（`web/style.css`）：
+  - 未选中：`var(--text2)`（深色下 `#a2a8c0`，与背景约 7:1），不再用 `--dim`；
+  - 选中：**把 knob 压深**再给近白字 —— allow `#15803d` + `#f0fdf4`，ask `#b45309` + `#fffbeb`
+    （约 5.5–6:1）。只把字调浅、底不动的话，黄字还是压在黄底上。
+- 手机端 `#consent-seg` 未选中项在深色下提到 `var(--text)`；选中项本来就是深字压 accent，不动。
+
+### 74.4 验收
+
+- `tests/test_webui_i18n.py`（真 Chromium，5 例）：`/i18n.js`、`/lang.js` 可取（`ui_lang` 缺省 → zh）；
+  桌面默认中文；把 `load_config()` 换成 `ui_lang="en"` 后同页变英文（`html lang=en`、按钮/占位符/滑块）；
+  深色下滑块两枚标签的 computed color；手机端默认中文。
+- `tests/test_gui.py::test_the_language_setting_writes_ui_lang_and_defaults_to_chinese`：设置页下拉选
+  English → 盘里 `ui_lang="en"`；选回中文 → 该键不写（默认值不落盘）。
+- 本机浏览器另跑了一组断言与截图：深色滑块、英文页面、手机抽屉（语言切换已从页面移除）。
+- 门禁：`ruff check fungi tests` / `ruff format --check fungi tests` 全绿；`pytest tests -q` → **818 passed**（两条按日历写死日期的老用例本轮改成相对日期，见下面的提交）。
+
+
+## 75. Agent 只说了 `<<SILENT>>` 时补一句（2026-10-21 用户点名）
+
+**用户原话**：「如果Agent发送<<SILENT>>，给他补上一句话：（Agent不说话）」。
+
+### 75.1 只补在「整条回复只有标记」时
+
+- `<<SILENT>>` 仍是控制标记（`clone/comm.py` 的 abstention）：正文里有真话时照旧只剥标记
+  （`好 <<SILENT>>` → `好`），不硬塞一句「不说话」自相矛盾。
+- 整条回复剥完为空 → 渲染成 **「（Agent不说话）」**（英文 `(Agent stays silent)`，key
+  `transcript.silent`），不再是空气泡、也不是什么都不显示。
+- 替换发生在**显示层**：`web/common.js` 的 `silentText` / `isSilentOnly`；两个 shell 的实时流
+  （`app.js` / `m.js` 的 `liveText`、`renderTurnLive`）与回放（`renderTranscript`）走同一对函数。
+- 样式 `.msg.assistant.silent`：居中、无气泡、`--text2` 斜体 —— 它是一条事实，不是一条消息。
+
+### 75.2 会话记录里也不再丢掉这一行
+
+- `fungi/room.py::_drop_silent` 原来把「只有标记」的行整行删掉；现在原样保留，浏览器负责显示成人话。
+  不保留的话，刷新或进好友视图就只剩空白，用户看不到「它选择了不说话」。
+- 它仍是控制标记、不是正文：`<>` 永远不会上屏（HTML 会把未知标签吃掉）。
+
+### 75.3 验收
+
+- `tests/test_room.py`：合并时保留裸标记行；带真话的标记仍只留真话（两条用例）。
+- `tests/test_webui_friend.py`：种子转录里的裸标记渲染成「（Agent不说话）」，屏幕上没有 `SILENT`/`<>`；
+  `好 <<SILENT>>` 仍显示「好」。
+- `tests/test_webui_i18n.py`：真发一轮、模型只回标记 → 会话里出现「（Agent不说话）」。
+- 本机深浅色截图确认样式；英文配置下同一行显示 `(Agent stays silent)`。
+- 门禁：同 §74.4（本轮 `pytest tests -q` → **818 passed**）。

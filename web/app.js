@@ -1,6 +1,7 @@
 /* Fungi web UI */
 marked.setOptions({ breaks: true, gfm: true });
 const FC = window.FungiCommon;
+const T = window.FungiI18N.t;
 const msgs = document.getElementById('messages'), input = document.getElementById('input'),
   btn = document.getElementById('send'), status = document.getElementById('status'),
   tray = document.getElementById('agent-tray');
@@ -170,7 +171,7 @@ const renderOpts = extra => Object.assign({
   my: MY_SIDE,   // a row sits on the side of the device it came from (§59)
   canOpen: true, // §73: this shell *is* the machine the card's file lives on
   reasoningHtml: t => '<div style="white-space:pre-wrap;max-height:200px;overflow-y:auto">' + escapeHtml(t) + '</div>',
-  liveText: r => { const text = FC.stripSilent(r.text); return text ? marked.parse(text) : ''; },
+  liveText: r => { const text = FC.silentText(r.text); return text ? marked.parse(text) : ''; },
 }, extra || {});
 const FRIEND_SIDE = { user: ' friend-peer', agent: ' friend-mine' }; // peer left, courier right (style.css)
 /* This shell *is* the computer: it renders its own rows on the right and the
@@ -230,8 +231,8 @@ function renderSessionList() {
       if (row) {
         delete existing[s.id];
         const titleEl = row.querySelector('.session-row-title');
-        if (titleEl && !row.querySelector('.rename-input') && titleEl.textContent !== (s.title || 'Untitled'))
-          titleEl.textContent = s.title || 'Untitled';
+        if (titleEl && !row.querySelector('.rename-input') && titleEl.textContent !== (s.title || T('session.untitled')))
+          titleEl.textContent = s.title || T('session.untitled');
         // The reuse path rewrites the row in place: the transfer session's own
         // meta ("只搬文件") must survive it, or it turns back into a date the
         // moment the list repaints (§54).
@@ -248,22 +249,22 @@ function renderSessionList() {
       // chat: pinned, iconned, styled apart, and it has no rename/delete pair.
       fresh.className = 'session-row' + (s.shuttle ? ' shuttle' : '')
         + (s.id === currentSessionId ? ' active' : '');
-      if (s.shuttle) fresh.title = '文件传输助手：两台设备之间只搬文件，不会改名也不会被删除';
+      if (s.shuttle) fresh.title = T('desktop.shuttleTitle');
       fresh.innerHTML = (s.shuttle ? '<span class="session-row-icon">&#x1F4C1;</span>' : '')
-        + '<span class="session-row-title">' + escapeHtml(s.title || 'Untitled') + '</span>'
-        + '<span class="session-row-meta">' + (s.shuttle ? '只搬文件' : fmtDate(s.created))
+        + '<span class="session-row-title">' + escapeHtml(s.shuttle ? T('shuttle.title') : (s.title || T('session.untitled'))) + '</span>'
+        + '<span class="session-row-meta">' + (s.shuttle ? T('desktop.shuttleMeta') : fmtDate(s.created))
         + (s.running ? ' \u25cf' : '') + '</span>'
         + (s.shuttle ? ''
-          : '<span class="session-row-actions"><button class="session-row-act" title="Rename">&#9998;</button>'
-            + '<button class="session-row-act del" title="Delete">&#10005;</button></span>');
+          : '<span class="session-row-actions"><button class="session-row-act" title="' + escapeHtml(T('desktop.rename')) + '">&#9998;</button>'
+            + '<button class="session-row-act del" title="' + escapeHtml(T('desktop.delete')) + '">&#10005;</button></span>');
       if (!s.shuttle) {
         fresh.querySelector('.session-row-act.del').addEventListener('click', e => {
           e.stopPropagation();
           const cur = sessionById(fresh.dataset.sid);
           showConfirm({
-            title: 'Delete session',
-            message: '"' + ((cur && cur.title) || 'Untitled') + '" will be permanently removed. This cannot be undone.',
-            confirmText: 'Delete',
+            title: T('desktop.deleteTitle'),
+            message: T('desktop.deleteMessage', { title: (cur && cur.title) || T('session.untitled') }),
+            confirmText: T('desktop.deleteConfirm'),
             danger: true,
             onConfirm: () => deleteSession(fresh.dataset.sid)
           });
@@ -287,7 +288,7 @@ function renderSessionList() {
       if (row.parentNode !== list || row.nextElementSibling !== anchor) list.insertBefore(row, anchor);
       anchor = row;
     }
-    if (filtered.length === 0) { empty.style.display = ''; empty.textContent = filter ? 'No matches.' : 'No sessions yet.'; }
+    if (filtered.length === 0) { empty.style.display = ''; empty.textContent = filter ? T('desktop.noMatches') : T('desktop.noSessions'); }
     else empty.style.display = 'none';
   };
   // 顺序没变就别进动画（2026-09-25 用户：「切换会话也好，停止会话也好，就会触发视图重排」）。
@@ -301,7 +302,7 @@ function renderSessionList() {
     window.fungiMotion.listFlip(list, mutate);
   else mutate();
 }
-const fmtDate = d => FC.fmtDate(d, 'en-US');
+const fmtDate = d => FC.fmtDate(d);
 function startRename(row) {
   const s = sessionById(row.dataset.sid);
   if (!s) return;
@@ -313,14 +314,14 @@ function startRename(row) {
     // Enter swaps the input back out, which blurs it: one finish per rename
     // (finishRename's `done` flag absorbs the blur that its own teardown fires).
     if (e.key === 'Enter') { e.preventDefault(); finishRename(row, inp); }
-    if (e.key === 'Escape') { row.replaceChild(titleEl, inp); titleEl.textContent = s.title || 'Untitled'; }
+    if (e.key === 'Escape') { row.replaceChild(titleEl, inp); titleEl.textContent = s.title || T('session.untitled'); }
   });
   row.replaceChild(inp, titleEl); inp.focus(); inp.select();
 }
 async function finishRename(row, inp) {
   if (inp.dataset.done) return;
   inp.dataset.done = '1';
-  const newTitle = inp.value.trim() || 'Untitled';
+  const newTitle = inp.value.trim() || T('session.untitled');
   try {
     await fetch('/save', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: row.dataset.sid, title: newTitle, messages: [] }) });
@@ -380,7 +381,9 @@ function setAgentStatus(id, st) {
     }
   }
   if (a.eventsEl) {
-    const label = { done: '\u2714 finished', failed: '\u2718 failed', aborted: '\u25A0 stopped' }[st];
+    const label = {
+      done: T('agent.finished'), failed: T('agent.failed'), aborted: T('agent.stopped'),
+    }[st];
     if (label) a.eventsEl.insertAdjacentHTML('beforeend', '<div class="ev final-ev">' + label + '</div>');
   }
 }
@@ -419,11 +422,11 @@ function openAgentModal(id) {
   if (!a) return;
   const overlay = document.getElementById('agent-modal-overlay');
   overlay.innerHTML = '<div id="agent-modal">'
-    + '<div class="agent-modal-head"><h3>' + (a.tool === 'background' ? 'Bg Command' : (a.layer === 3 ? 'L3 Worker' : 'L2 Task Agent')) + ' \u00B7 ' + escapeHtml((a.goal || '').slice(0, 60)) + '</h3>'
+    + '<div class="agent-modal-head"><h3>' + (a.tool === 'background' ? T('agent.bgCommand') : (a.layer === 3 ? T('agent.l3Worker') : T('agent.l2TaskAgent'))) + ' \u00B7 ' + escapeHtml((a.goal || '').slice(0, 60)) + '</h3>'
     + '<button id="agent-modal-close">\u2715</button></div>'
-    + '<div class="agent-modal-taskspec"><b>Goal:</b> ' + escapeHtml(a.goal || '')
-    + '<br><b>Reply format:</b> ' + escapeHtml(a.replyFormat || '(free)')
-    + '<br><b>Status:</b> ' + escapeHtml(a.status || 'unknown') + '</div>'
+    + '<div class="agent-modal-taskspec"><b>' + T('agent.goal') + '</b> ' + escapeHtml(a.goal || '')
+    + '<br><b>' + T('agent.replyFormat') + '</b> ' + escapeHtml(a.replyFormat || T('agent.free'))
+    + '<br><b>' + T('agent.status') + '</b> ' + escapeHtml(a.status || T('agent.unknown')) + '</div>'
     + '<div class="agent-modal-body"></div></div>';
   const bodyEl = overlay.querySelector('.agent-modal-body');
   a.eventsEl = bodyEl;
@@ -468,7 +471,7 @@ async function send() {
   rawMessages.push({ role: 'user', content: text });
   sessionDirty = true;
   turn.userText = text;
-  input.value = ''; btn.disabled = true; setStatus('Thinking...');
+  input.value = ''; btn.disabled = true; setStatus(T('status.thinking'));
   _liveCount = 0; window.fungiMotion?.waveOn?.(status);
   renderTurnLive();
   await pumpStream('/chat', { message: text, sessionId: sid, side: MY_SIDE });
@@ -485,7 +488,7 @@ async function retryTurn() {
   turn = { sessionId: sid, entries: [] };
   sessionDirty = true;
   btn.disabled = true;
-  setStatus('Retrying...');
+  setStatus(T('status.retrying'));
   _liveCount = 0; window.fungiMotion?.waveOn?.(status);
   renderTurnLive();
   await pumpStream('/retry', { sessionId: sid });
@@ -506,7 +509,7 @@ async function resumeIfPending() {
     turn = { sessionId: currentSessionId, entries: [] };
     sessionDirty = true;
     btn.disabled = true;
-    setStatus('Background task finished - continuing...');
+    setStatus(T('status.resuming'));
     _liveCount = 0; window.fungiMotion?.waveOn?.(status);
     renderTurnLive();
     await pumpStream('/resume', { sessionId: currentSessionId });
@@ -522,7 +525,7 @@ function reattachIfRunning(sid) {
   processing = true;
   abortCtrl = new AbortController(); stopRequested = false;
   turn = { sessionId: sid, entries: [] };
-  btn.disabled = true; setStatus('Turn still running on the server...');
+  btn.disabled = true; setStatus(T('status.reattaching'));
   _liveCount = 0; window.fungiMotion?.waveOn?.(status);
   renderTurnLive();
   pumpStream('/events?sessionId=' + encodeURIComponent(sid), null, 'GET');
@@ -554,7 +557,7 @@ async function pumpStream(url, body, method = 'POST') {
     if (!resp.ok) {
       // No early return: skipping the tail would leave the send button
       // disabled forever and the next send dead (no stream, no recovery).
-      setStatus('Error: ' + resp.status); turn = null;
+      setStatus(T('status.http', { status: resp.status })); turn = null;
     } else {
       const reader = resp.body.getReader();
       const dec = new TextDecoder();
@@ -574,15 +577,15 @@ async function pumpStream(url, body, method = 'POST') {
       }
     }
   } catch (e) {
-    if (e.name === 'AbortError') setStatus('Aborted.');
-    else setStatus('Error: ' + e.message);
+    if (e.name === 'AbortError') setStatus(T('status.aborted'));
+    else setStatus(T('status.error', { msg: e.message }));
     turn = null;
     recoverAfterDrop(sid);
   }
   if (turn) {
     // Stream ended without a done event (server died mid-turn): the UI used
     // to stay stuck on "Writing..." with a phantom live turn.
-    setStatus('Connection lost. Press Alt+R to retry.');
+    setStatus(T('status.retryHint'));
     turn = null;
     recoverAfterDrop(sid);
   }
@@ -603,7 +606,7 @@ function handleTurnEvent(obj) {
       const last = t.entries[t.entries.length - 1];
       if (last && last.kind === 'text') last.content += obj.content;
       else t.entries.push({ kind: 'text', content: obj.content });
-      setStatus('Writing...');
+      setStatus(T('status.writing'));
       rateTok.feed();
       if (visible) updateLastText();
       break;
@@ -628,13 +631,13 @@ function handleTurnEvent(obj) {
     case 'tool':
       t.entries.push({ kind: 'tool', id: obj.content.id, name: obj.content.name, args: obj.content.args, result: '' });
       // A long tool used to leave a stale "Writing..." on the status bar.
-      if (visible) { setStatus('Running ' + (obj.content.name || 'tool') + '...'); renderTurnLive(); }
+      if (visible) { setStatus(T('status.runningTool', { name: obj.content.name || 'tool' })); renderTurnLive(); }
       break;
     case 'tool_result': {
       const rec = t.entries.find(x => x.kind === 'tool' && x.id === obj.content.id)
         || [...t.entries].reverse().find(x => x.kind === 'tool' && !x.result);
       if (rec) rec.result = obj.content.content;
-      if (visible) { setStatus('Thinking...'); const block = document.getElementById('tool-' + obj.content.id); if (block) FC.fillToolResult(block, obj.content.content); else renderTurnLive(); }
+      if (visible) { setStatus(T('status.thinking')); const block = document.getElementById('tool-' + obj.content.id); if (block) FC.fillToolResult(block, obj.content.content); else renderTurnLive(); }
       break;
     }
     case 'agent_spawn':
@@ -688,7 +691,7 @@ function handleTurnEvent(obj) {
       // to clear it: nothing else does, and a session that never wrote a word
       // (the transfer session: one row, no model — §53) left "Thinking..." on
       // screen for good.
-      setStatus(t.aborted ? 'Aborted.' : (failed ? 'Turn failed.' : ''));
+      setStatus(t.aborted ? T('status.aborted') : (failed ? T('status.turnFailed') : ''));
       if (viewing) reloadSessionFromServer();
       else loadSessions(); // the finished turn landed in a background session
       break;
@@ -702,7 +705,7 @@ function updateLastText() {
   const idx = t.entries.map(x => x.kind).lastIndexOf('text');
   if (idx < 0) return renderTurnLive();
   const el = document.getElementById('live-text-' + idx);
-  if (el) { const stick = isNearBottom(msgs); el.innerHTML = marked.parse(FC.stripSilent(t.entries[idx].content)); if (stick) S.stick(); }
+  if (el) { const stick = isNearBottom(msgs); el.innerHTML = marked.parse(FC.silentText(t.entries[idx].content)); if (stick) S.stick(); }
   else renderTurnLive();
 }
 
@@ -730,14 +733,15 @@ function renderTurnLive() {
     if (e.kind === 'reasoning') {
       const det = document.createElement('details');
       det.className = 'msg reasoning live-node'; det.id = 'live-details-' + i; det.open = !e.closed;
-      det.innerHTML = '<summary>Thinking\u2026</summary><div id="live-reasoning-' + i + '"></div>';
+      det.innerHTML = '<summary>' + T('transcript.thinking') + '</summary><div id="live-reasoning-' + i + '"></div>';
       det.querySelector('#live-reasoning-' + i).textContent = e.content;
       S.append(det);
     } else if (e.kind === 'text') {
-      const text = FC.stripSilent(e.content);
-      if (!text) return; // the abstention marker alone leaves no bubble
+      const text = FC.silentText(e.content);
+      if (!text) return;
       const ad = document.createElement('div');
-      ad.className = 'msg assistant live-node'; ad.id = 'live-text-' + i;
+      ad.className = 'msg assistant live-node' + (FC.isSilentOnly(e.content) ? ' silent' : '');
+      ad.id = 'live-text-' + i;
       ad.innerHTML = marked.parse(text);
       S.append(ad);
     } else if (e.kind === 'tool') {
@@ -778,7 +782,7 @@ input.addEventListener('keydown', e => {
       // First Esc: ask the server to stop the turn and keep the stream open —
       // the persisted partial reply comes back via done -> reload.
       stopRequested = true;
-      setStatus('Stopping...');
+      setStatus(T('status.stopping'));
       if (sid) fetch('/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId: sid }) }).catch(() => {});
       stopTimer = setTimeout(() => { if (abortCtrl) { abortCtrl.abort(); abortCtrl = null; } }, 15000);
@@ -787,7 +791,7 @@ input.addEventListener('keydown', e => {
       if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
       stopRequested = false;
       abortCtrl.abort(); abortCtrl = null;
-      setStatus('Aborted.');
+      setStatus(T('status.aborted'));
     }
   }
 });
@@ -812,7 +816,10 @@ document.getElementById('btn-browse').addEventListener('click', async () => {
    the picker keeps on itself. */
 const modelPicker = FC.mountModelPicker({
   note: t => { setStatus(t); },
-  labels: { switching: 'Switching to', ok: 'answers', bad: 'did not answer', served: 'served as' },
+  labels: {
+    switching: T('model.switching'), ok: T('model.answers'),
+    bad: T('model.failed'), served: T('model.servedAs'),
+  },
 });
 loadSessions().then(() => {
   // Reload keeps the current session: restore it and reattach if its turn
@@ -826,7 +833,11 @@ loadSessions().then(() => {
 const Asks = FC.initAsks({
   http: FC,
   getTurn: () => turn,
-  labels: { submit: 'Submit', required: 'Required', customPlaceholder: 'Or type your own...', answerPlaceholder: 'Your answer...', noAnswer: '\u23F3 No answer' },
+  labels: {
+    submit: T('ask.submit'), required: T('ask.required'),
+    customPlaceholder: T('ask.customPlaceholder'), answerPlaceholder: T('ask.answerPlaceholder'),
+    noAnswer: T('ask.noAnswer'),
+  },
 });
 const saveAskCardState = Asks.saveAskCardState;
 const buildActiveAskCard = Asks.buildActiveAskCard;
@@ -853,11 +864,12 @@ const PendingAsks = FC.initPendingAsks({
     },
   },
   labels: {
-    fromFallback: 'remote host',
-    consentPlaceholder: '自定义回复（可选，留空直接点允许/禁止）',
-    consentHint: '· 需要长期放行？在好友会话顶部把滑块拨到「允许」',
-    allow: '允许', deny: '禁止', consentSend: 'Send', submit: 'Submit', required: 'Required',
-    customPlaceholder: 'Or type your own...', answerPlaceholder: 'Your answer...',
+    fromFallback: T('consent.fromFallback'),
+    consentPlaceholder: T('consent.placeholderDesktop'),
+    consentHint: T('consent.hint'),
+    allow: T('consent.allow'), deny: T('consent.deny'), consentSend: T('consent.send'),
+    submit: T('ask.submit'), required: T('ask.required'),
+    customPlaceholder: T('ask.customPlaceholder'), answerPlaceholder: T('ask.answerPlaceholder'),
   },
 });
 const placeAskCards = PendingAsks.place, pollPendingAsks = PendingAsks.poll;
@@ -878,7 +890,7 @@ resumeIfPending();
         const model = document.getElementById('cfg-model').value.trim();
         if (!api_key) {
           const err = document.getElementById('cfg-err');
-          err.textContent = 'API key is required.'; err.style.display = 'block';
+          err.textContent = T('cfg.keyRequired'); err.style.display = 'block';
           return;
         }
         try {
@@ -1066,11 +1078,11 @@ function renderFriendChat(d) {
   events.forEach(row => {
     let node = null;
     if (row.kind === 'transfer')
-      node = p.add('friend-event file', '&#x1F4C4 ' + escapeHtml(row.text || 'file transfer'));
+      node = p.add('friend-event file', '&#x1F4C4 ' + escapeHtml(row.text || T('friend.transfer')));
     else if (row.kind === 'task')
-      node = p.add('friend-event task', '&#x1F4E5 delegated to ' + escapeHtml(row.dst || '?') + ': ' + escapeHtml((row.text || '').slice(0, 200)));
+      node = p.add('friend-event task', '&#x1F4E5 ' + escapeHtml(T('friend.delegatedTo', { host: row.dst || '?' })) + ' ' + escapeHtml((row.text || '').slice(0, 200)));
     else if (row.kind === 'result')
-      node = p.add('friend-event result', '&#x2714 ' + escapeHtml(row.src || '?') + ' replied: ' + escapeHtml((row.text || '').slice(0, 200)));
+      node = p.add('friend-event result', '&#x2714 ' + escapeHtml(T('friend.replied', { host: row.src || '?' })) + ' ' + escapeHtml((row.text || '').slice(0, 200)));
     if (node) {
       FC.markTs(node, row.ts);   // envelopes carry the hub's timestamp
       FC.insertByTs(p, node, row.ts);
@@ -1090,10 +1102,10 @@ function renderFriendChat(d) {
     const html = (subject && subject !== '(no subject)' && subject !== body
       ? '<strong>' + escapeHtml(subject) + '</strong><br>' : '') + marked.parse(body);
     const mine = !!m.mine;
-    const who = mine ? '我'
+    const who = mine ? T('friend.me')
       : (String(m.from || '').endsWith(':human')
-        ? '来自 ' + displayOf(m.peer) + ' 的用户'
-        : displayOf(m.peer) + ' 的 Agent');
+        ? T('friend.userFrom', { host: displayOf(m.peer) })
+        : T('friend.agentOf', { host: displayOf(m.peer) }));
     const bubble = p.add('user' + (mine ? ' friend-mine' : ' friend-peer'), html);
     const lab = document.createElement('div');
     lab.className = 'human-label';
@@ -1159,7 +1171,7 @@ document.getElementById('theme-switch').addEventListener('click', function () {
    session this page is showing (that is what stops the ring). Painted on
    creation AND on every reuse: rows are reconciled in place keyed by id, so a
    dot added once would otherwise never come off again. */
-const ALERT_LABEL = { ask: 'Agent 在等你回答', done: '回答完毕', error: '出错了' };
+const ALERT_LABEL = { ask: T('alert.ask'), done: T('alert.done'), error: T('alert.error') };
 
 function paintAlert(row, kind) {
   let dot = row.querySelector('.session-dot');
@@ -1169,7 +1181,7 @@ function paintAlert(row, kind) {
     dot.className = 'session-dot';
     row.querySelector('.session-row-meta').before(dot);
   }
-  dot.title = ALERT_LABEL[kind] || '有新消息';
+  dot.title = ALERT_LABEL[kind] || T('alert.new');
 }
 
 function applyAlerts(map) {
@@ -1233,7 +1245,7 @@ document.getElementById('friend-browse').addEventListener('click', async () => {
    says "已收到" once the file is on their disk. See FC.initTransfer. */
 async function sendFileToFriend(path) {
   try {
-    await Xfer.sendOne('发送文件给 ' + displayOf(friendView), friendView, path);
+    await Xfer.sendOne(T('xfer.sendToFriend', { name: displayOf(friendView) }), friendView, path);
   } catch (e) {
     // the modal already shows it; nothing else to say here
   }

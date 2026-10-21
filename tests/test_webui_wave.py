@@ -145,7 +145,12 @@ def test_the_wave_rides_through_a_whole_tool_turn(page):
     assert _wait(lambda: page.evaluate("() => !processing"), timeout_s=20), "the turn never ended"
 
     samples = page.evaluate("() => window.__samples")
-    running = [s for s in samples if s[0].startswith("Running ")]
+    # The status line is localized (default 中文): ask the page for this turn's
+    # wording instead of pinning one language here.
+    running_label = page.evaluate(
+        "() => window.FungiI18N.t('status.runningTool', { name: 'no-such-tool' })"
+    )
+    running = [s for s in samples if s[0] == running_label]
     assert running, f"the tool phase never rewrote the status line: {samples}"
     assert all(wave for _, wave in running), f"the wave was gone while a tool ran: {running}"
     assert page.evaluate("() => window.__gone") == [], (

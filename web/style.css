@@ -107,6 +107,8 @@ html,body{font-family:var(--font);font-size:var(--fs-md);line-height:1.6;color:v
 .msg{max-width:82%;padding:1rem 1.3rem;border-radius:var(--radius);line-height:1.65;animation:msgIn 0.35s var(--ease-out-expo);word-break:break-word}
 .msg.user{align-self:flex-end;background:linear-gradient(160deg,var(--accent),color-mix(in srgb,var(--accent) 82%,#000));color:var(--on-accent);border-bottom-right-radius:var(--radius-xs);box-shadow:0 2px 10px color-mix(in srgb,var(--accent) 28%,transparent)}
 .msg.assistant{align-self:flex-start;background:var(--surface);background-image:var(--sheen);border:1px solid var(--border-light);border-bottom-left-radius:var(--radius-xs);color:var(--text);box-shadow:var(--shadow-card),var(--hairline)}
+/* The agent's abstention line: a fact, not a message — muted, no bubble. */
+.msg.assistant.silent{align-self:center;background:none;border:none;box-shadow:none;color:var(--text2);font-style:italic;padding:0.25rem 0.5rem}
 .msg.tool{align-self:flex-start;background:var(--tool-bg);border:1px solid var(--tool-border);font-size:0.8rem;max-width:96%;box-shadow:0 2px 8px rgba(0,0,0,0.04);border-radius:var(--radius-sm)}
 .msg.tool .tool-label{color:var(--tool-accent);font-weight:600;font-size:0.78rem;letter-spacing:0.03em;margin-bottom:0.5rem;font-family:var(--mono);text-transform:uppercase}
 .msg.tool .tool-label code{font-size:0.72rem;background:rgba(0,0,0,0.03);padding:2px 8px;border-radius:4px;font-weight:400;color:var(--text2);text-transform:none}
@@ -310,7 +312,7 @@ html,body{font-family:var(--font);font-size:var(--fs-md);line-height:1.6;color:v
 #friend-bar.visible{display:flex}
 .friend-bar-label{font-size:0.76rem;color:var(--text2)}
 .consent-slider{position:relative;display:flex;align-items:center;width:170px;height:30px;background:var(--bg);border:1px solid var(--border);border-radius:15px;cursor:pointer;user-select:none;touch-action:none;transition:background var(--t-med),border-color var(--t-med);overflow:hidden}
-.consent-slider .consent-opt{flex:1;text-align:center;font-size:0.74rem;font-weight:600;color:var(--dim);z-index:2;transition:color var(--t-med);pointer-events:none}
+.consent-slider .consent-opt{flex:1;text-align:center;font-size:0.74rem;font-weight:600;color:var(--text2);z-index:2;transition:color var(--t-med);pointer-events:none}
 .consent-slider .consent-knob{position:absolute;top:3px;left:3px;width:calc(50% - 6px);height:calc(100% - 6px);background:var(--surface);border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,0.15);transition:transform var(--t-med) var(--ease-spring);z-index:1}
 .consent-slider[data-mode="allow"]{background:var(--ok-bg);border-color:var(--ok-border)}
 .consent-slider[data-mode="allow"] .consent-knob{transform:translateX(0);background:#22c55e}
@@ -338,8 +340,12 @@ html[data-theme="dark"] .theme-knob{transform:translateX(16px)}
 html[data-theme="dark"] .theme-sun{stroke:var(--dim)}
 html[data-theme="dark"] .theme-moon{stroke:var(--accent)}
 html:not([data-theme="dark"]) .theme-sun{stroke:var(--accent)}
-html[data-theme="dark"] .consent-slider[data-mode="allow"] .consent-opt[data-v="allow"]{color:#4ade80}
-html[data-theme="dark"] .consent-slider[data-mode="ask"] .consent-opt[data-v="ask"]{color:#fbbf24}
+/* Dark mode: the labels sit ON the colored knob, so a light label needs a
+   deeper knob — pale-on-bright (the old #fbbf24 on #f59e0b) was unreadable. */
+html[data-theme="dark"] .consent-slider[data-mode="allow"] .consent-knob{background:#15803d}
+html[data-theme="dark"] .consent-slider[data-mode="allow"] .consent-opt[data-v="allow"]{color:#f0fdf4}
+html[data-theme="dark"] .consent-slider[data-mode="ask"] .consent-knob{background:#b45309}
+html[data-theme="dark"] .consent-slider[data-mode="ask"] .consent-opt[data-v="ask"]{color:#fffbeb}
 /* cross-fade while switching: temporary class on <html>, removed after the fade */
 html.theme-anim, html.theme-anim *, html.theme-anim *::before, html.theme-anim *::after {
   transition: background-color 0.4s ease, color 0.4s ease, border-color 0.4s ease,

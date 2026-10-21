@@ -114,10 +114,10 @@ def test_server_ask_becomes_card_and_answer_envelope_flows(server_room):
     assert room.hub.asks.get(ask.id)["status"] == "answered"
 
 
-def test_comm_history_merge_drops_the_abstention_marker():
-    """`<<SILENT>>` is a delivery control token, and a browser renders the
-    leftover marker as `<>` (HTML eats the unknown tag). It must not reach the
-    stored transcript — and a row that carried real work keeps that work."""
+def test_comm_history_merge_keeps_a_bare_abstention_for_the_renderer():
+    """`<<SILENT>>` is control text, but a turn that said only the marker is a
+    fact the reader asked to see: the row is kept and the browser renders
+    「（Agent不说话）」 instead of the raw tag (`<>` would be HTML leftovers)."""
     stored = [{"role": "user", "content": "早", "ts": 1.0}]
     fresh = [
         {"role": "user", "content": "早"},
@@ -125,9 +125,9 @@ def test_comm_history_merge_drops_the_abstention_marker():
         {"role": "assistant", "content": "好 <<SILENT>>", "reasoning": "想好了"},
     ]
     merged = merge_comm_history(stored, fresh, ts=2.0)
-    assert [m["content"] for m in merged] == ["早", "好"]
+    assert [m["content"] for m in merged] == ["早", "<<SILENT>>", "好"]
     assert merged[0]["ts"] == 1.0  # the stored row keeps the stamp it had
-    assert "<<SILENT>>" not in json.dumps(merged)
+    assert json.dumps(merged).count("<<SILENT>>") == 1  # only the bare turn keeps it
 
 
 def test_comm_history_merge_keeps_a_reply_with_its_question(server_room):
@@ -197,17 +197,14 @@ def test_comm_history_merge_keeps_the_tool_rows_above_the_dialogue_they_turn_bel
 
 def test_comm_history_merge_keeps_rows_the_clone_forgot(server_room):
     """A clone rebuilt after its peer dropped off the roster comes back with an
-    empty history: the stored transcript must be carried forward, marker rows
-    and all stripped on both sides so the alignment still lines up."""
+    empty history: the stored transcript must be carried forward, and a bare
+    abstention row stays too — it is the renderer's silent line."""
     stored = [
         {"role": "user", "content": "早", "ts": 1.0},
         {"role": "assistant", "content": "<<SILENT>>", "ts": 1.5},
         {"role": "user", "content": "在吗", "ts": 2.0},
     ]
-    assert merge_comm_history(stored, [], ts=3.0) == [
-        {"role": "user", "content": "早", "ts": 1.0},
-        {"role": "user", "content": "在吗", "ts": 2.0},
-    ]
+    assert merge_comm_history(stored, [], ts=3.0) == stored
 
 
 def test_answered_card_verdict_persists_to_comm_transcript(server_room):

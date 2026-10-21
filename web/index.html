@@ -1,57 +1,57 @@
-<!DOCTYPE html><html lang="en"><head>
+<!DOCTYPE html><html lang="zh-CN"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Fungi</title>
 <script src="/vendor/marked.min.js"></script>
 <link rel="stylesheet" href="/style.css">
 </head><body>
-<div id="config-overlay"><div id="config-modal"><h2>Configure Fungi</h2><p>Set your API endpoint and key to get started.</p><label>Endpoint</label><input id="cfg-endpoint" placeholder="https://api.openai.com/v1/chat/completions"><label>API Key</label><input id="cfg-apikey" type="password" placeholder="sk-..."><label>Model</label><input id="cfg-model" placeholder="gpt-4o"><div class="cfg-err" id="cfg-err"></div><div class="cfg-actions"><button class="cfg-skip" id="cfg-skip">Skip</button><button class="cfg-save" id="cfg-save">Save</button></div></div></div>
+<div id="config-overlay"><div id="config-modal"><h2 data-i18n="cfg.title">配置 Fungi</h2><p data-i18n="cfg.intro">填好接口地址和密钥就能开始。</p><label data-i18n="cfg.endpoint">接口地址</label><input id="cfg-endpoint" placeholder="https://api.openai.com/v1/chat/completions"><label data-i18n="cfg.apiKey">API Key</label><input id="cfg-apikey" type="password" placeholder="sk-..."><label data-i18n="cfg.model">模型</label><input id="cfg-model" placeholder="gpt-4o"><div class="cfg-err" id="cfg-err"></div><div class="cfg-actions"><button class="cfg-skip" id="cfg-skip" data-i18n="cfg.skip">跳过</button><button class="cfg-save" id="cfg-save" data-i18n="cfg.save">保存</button></div></div></div>
 <div id="app-shell">
 <aside id="sidebar">
   <div class="sidebar-header">
     <div class="sidebar-header-row">
-      <input type="text" id="session-filter" placeholder="Filter..." autocomplete="off" spellcheck="false">
+      <input type="text" id="session-filter" data-i18n-placeholder="ui.filter" placeholder="筛选会话…" autocomplete="off" spellcheck="false">
     </div>
-    <button id="btn-new-session">+ New Session</button>
+    <button id="btn-new-session" data-i18n="ui.newSession">＋ 新建会话</button>
   </div>
-  <div id="session-list"><div id="session-list-empty">No sessions yet.<br>Click + New Session to start.</div></div>
+  <div id="session-list"><div id="session-list-empty" data-i18n-html="ui.sessionsEmpty">还没有会话。<br>点「＋ 新建会话」开始。</div></div>
   <div id="friends-section">
-    <div id="friends-header">Friends <span id="friends-count"></span></div>
+    <div id="friends-header"><span data-i18n="ui.friends">好友</span> <span id="friends-count"></span></div>
     <div id="friend-list"></div>
-    <div id="friends-empty">No other hosts in the room.</div>
+    <div id="friends-empty" data-i18n="ui.friendsEmpty">房间暂无其他主机。</div>
   </div>
 </aside>
 <div id="main-area">
   <div id="header">
-    <button id="hamburger-sidebar" title="Toggle sidebar">&#x2630;</button>
-    <span class="dot"></span><strong>Fungi</strong><span id="friend-title"></span><button type="button" id="model-select" title="当前模型：点开换一个，换完自动测一次调用"></button>
-    <span id="tok-rate" title="输出速率：每秒输出 token 数（流式 chunk ≈ 1 token，文字与思考都算）；停笔后停在最后一个数，新建对话才清空"></span>
-    <div id="theme-switch" class="theme-switch" title="切换深浅主题">
+    <button id="hamburger-sidebar" data-i18n-title="ui.toggleSidebar" title="展开/收起侧栏">&#x2630;</button>
+    <span class="dot"></span><strong>Fungi</strong><span id="friend-title"></span><button type="button" id="model-select" data-i18n-title="ui.modelTitle" title="当前模型：点开换一个，换完自动测一次调用"></button>
+    <span id="tok-rate" data-i18n-title="ui.rateTitle" title="输出速率：每秒输出 token 数（流式 chunk ≈ 1 token，文字与思考都算）；停笔后停在最后一个数，新建对话才清空"></span>
+    <div id="theme-switch" class="theme-switch" data-i18n-title="ui.themeTitle" title="切换深浅主题">
       <svg class="theme-ic theme-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
       <span class="theme-track"><span class="theme-knob"></span></span>
       <svg class="theme-ic theme-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
     </div>
   </div>
   <div id="friend-bar">
-    <span class="friend-bar-label">来自该好友的文件/权限请求</span>
+    <span class="friend-bar-label" data-i18n="ui.friendBarFiles">来自该好友的文件/权限请求</span>
     <div id="consent-slider" class="consent-slider" data-mode="ask">
-      <span class="consent-opt" data-v="allow">允许</span>
+      <span class="consent-opt" data-v="allow" data-i18n="consent.allow">允许</span>
       <span class="consent-knob"></span>
-      <span class="consent-opt" data-v="ask">询问</span>
+      <span class="consent-opt" data-v="ask" data-i18n="consent.ask">询问</span>
     </div>
   </div>
-  <div id="chat-wrap"><div id="messages"></div><button id="scroll-bottom" title="Scroll to bottom">&#x2193;</button></div>
+  <div id="chat-wrap"><div id="messages"></div><button id="scroll-bottom" data-i18n-title="ui.scrollBottom" title="回到底部">&#x2193;</button></div>
   <div id="asks-banner"></div>
-  <div id="agent-tray" title="Subagents"></div>
+  <div id="agent-tray" data-i18n-title="ui.subagents" title="子代理"></div>
   <div id="status"></div>
   <div id="input-area">
-    <textarea id="input" rows="1" placeholder="Ask anything... (Enter to send, Shift+Enter for newline)"></textarea>
-    <button id="btn-browse" title="Browse for file">&#x1F4C2;</button>
-    <button id="send">Send</button>
+    <textarea id="input" rows="1" data-i18n-placeholder="ui.inputPlaceholder" placeholder="输入消息…（Enter 发送，Shift+Enter 换行）"></textarea>
+    <button id="btn-browse" data-i18n-title="ui.browseFile" title="选择文件">&#x1F4C2;</button>
+    <button id="send" data-i18n="ui.send">发送</button>
   </div>
   <div id="friend-input-area" hidden>
-    <textarea id="friend-input" rows="1" placeholder="Message your friend... (Enter to send, Shift+Enter for newline)"></textarea>
-    <button id="friend-browse" title="Send a file">&#x1F4C2;</button>
-    <button id="friend-send">Send</button>
+    <textarea id="friend-input" rows="1" data-i18n-placeholder="ui.friendInputPlaceholder" placeholder="给好友发消息…（Enter 发送，Shift+Enter 换行）"></textarea>
+    <button id="friend-browse" data-i18n-title="ui.sendFile" title="发送文件">&#x1F4C2;</button>
+    <button id="friend-send" data-i18n="ui.send">发送</button>
   </div>
 </div>
 </div>
@@ -63,11 +63,13 @@
 <div id="xfer-overlay"><div id="xfer-modal" role="dialog" aria-modal="true" aria-labelledby="xfer-title">
   <h2 id="xfer-title"></h2>
   <div id="xfer-steps"></div>
-  <div class="xfer-actions"><button id="xfer-close">关闭</button></div>
+  <div class="xfer-actions"><button id="xfer-close" data-i18n="ui.close">关闭</button></div>
 </div></div>
 <div id="agent-modal-overlay"></div>
 <script src="/vendor/gsap.min.js"></script>
 <script src="/vendor/Flip.min.js"></script>
+<script src="/lang.js"></script>
+<script src="/i18n.js"></script>
 <script src="/motion.js"></script>
 <script src="/common.js"></script>
 <script src="/app.js"></script>

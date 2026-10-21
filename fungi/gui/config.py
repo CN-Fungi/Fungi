@@ -124,6 +124,18 @@ class ConfigPage(QWidget):
         title = SubtitleLabel("设置")
         root.addWidget(title)
 
+        # WebUI 语言（spec §74）：桌面与手机页面都按这里显示，默认中文。
+        # 即时写盘，页面下次加载/刷新生效——WebUI 自己没有语言开关。
+        self.lang_combo = ComboBox()
+        self.lang_combo.addItems(["中文", "English"])
+        self.lang_combo.setCurrentIndex(1 if config_mod.load_config().ui_lang == "en" else 0)
+        self.lang_combo.setFixedWidth(180)
+        self.lang_combo.currentIndexChanged.connect(self._pick_lang)
+        root.addWidget(_row("界面语言", self.lang_combo))
+        lang_hint = BodyLabel("WebUI（电脑与手机）按这里显示；改完刷新页面或重新打开即可。")
+        lang_hint.setWordWrap(True)
+        root.addWidget(lang_hint)
+
         self.key_edit = LineEdit()
         self.key_edit.setFixedWidth(360)
         self.key_edit.setPlaceholderText("API Key（留空 = 保持不变）")
@@ -908,6 +920,20 @@ class ConfigPage(QWidget):
                 duration=2500,
                 parent=self.window_ref,
             )
+
+    def _pick_lang(self, index: int) -> None:
+        """WebUI 语言：选中即写盘（spec §74）。页面下次加载时读 /lang.js。"""
+        cfg = config_mod.load_config()
+        cfg.ui_lang = "en" if index == 1 else "zh"
+        config_mod.save_config(cfg)
+        InfoBar.success(
+            "已保存",
+            "WebUI 将显示 English（刷新页面生效）"
+            if cfg.ui_lang == "en"
+            else "WebUI 将显示中文（刷新页面生效）",
+            duration=2500,
+            parent=self.window_ref,
+        )
 
     def _toggle_ring(self, checked: bool) -> None:
         """来信铃声开关：即时写盘（下一次响铃就按新设置来）。"""

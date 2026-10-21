@@ -1683,6 +1683,20 @@ def test_ring_switch_hides_the_tone_picker_and_the_choice_is_saved(window, monke
     assert preview.played == ["preview:" + gui.TONE_IDS[3]]
 
 
+def test_the_language_setting_writes_ui_lang_and_defaults_to_chinese(window):
+    """设置页的界面语言（spec §74）：默认中文，选中即写盘；WebUI 下次加载时读它。"""
+    from fungi.gui import config as config_page
+
+    page = window.cfg_page
+    page.lang_combo.setCurrentIndex(1)
+    data = json.loads(config_page.config_mod.CONFIG_PATH.read_text(encoding="utf-8"))
+    assert data["ui_lang"] == "en"
+
+    page.lang_combo.setCurrentIndex(0)
+    data = json.loads(config_page.config_mod.CONFIG_PATH.read_text(encoding="utf-8"))
+    assert "ui_lang" not in data, "中文是默认值，不必写进 config.json"
+
+
 def test_the_audition_button_plays_the_tone_that_is_already_selected(window, monkeypatch):
     """2026-09-11 用户报告：「选中的铃声也要可以试听（现在不行）」——换选项才响的旧行为
     没法听当前那一首。按钮不动下拉框，直接听它。"""

@@ -395,10 +395,11 @@ def test_a_legacy_ask_lands_before_the_transcript(page, rooms):
     assert tool_i > 0
 
 
-def test_a_stored_abstention_marker_never_renders(page, rooms):
-    """A transcript written before the marker was filtered at the store (or a
-    model that appends it after real words) must not put `<>` on screen: the
-    browser throws the unknown tag away and leaves the angle brackets."""
+def test_a_stored_abstention_marker_reads_as_silence(page, rooms):
+    """A bare marker is kept in the transcript (room._drop_silent) so the reader
+    sees that the agent chose not to speak — as 「（Agent不说话）」, never as the
+    raw tag (`<>` is what HTML leaves of an unknown element). Words around a
+    marker still win."""
     server, _client = rooms
     _seed_transcript(
         server,
@@ -415,7 +416,8 @@ def test_a_stored_abstention_marker_never_renders(page, rooms):
     rows = _probe(page)["rows"]
     assert not any("SILENT" in r["text"] for r in rows), rows
     assert not any("<>" in r["text"] for r in rows), rows
-    # …while the words around the marker survive.
+    # The bare marker gets its own line; the words around a marker survive.
+    assert any(r["text"].strip() == "（Agent不说话）" for r in rows), rows
     assert any(r["text"].strip() == "好" for r in rows), rows
 
 

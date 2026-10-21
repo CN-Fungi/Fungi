@@ -25,6 +25,7 @@ from fungi.agent import SYSTEM_PROMPT, Agent, public_messages
 from fungi.config import (
     PROJECT_ROOT,
     RESOURCE_ROOT,
+    UI_LANGS,
     load_config,
     remember_provider,
     save_config,
@@ -98,7 +99,18 @@ _TAPE_GRACE_S = 60.0  # how long a sealed (done) tape stays for late reattach
 
 
 _STATIC_ROUTES = frozenset(
-    ("/", "/m", "/app.js", "/common.js", "/style.css", "/motion.js", "/m.css", "/m.js")
+    (
+        "/",
+        "/m",
+        "/app.js",
+        "/common.js",
+        "/style.css",
+        "/motion.js",
+        "/m.css",
+        "/m.js",
+        "/i18n.js",
+        "/lang.js",
+    )
 )
 
 
@@ -846,8 +858,30 @@ class YesSirHandler(BaseHTTPRequestHandler):
             self._send_static("index.html")
         elif route == "/m":
             self._send_static("m.html")
-        elif route in ("/app.js", "/common.js", "/style.css", "/motion.js", "/m.css", "/m.js"):
+        elif route in (
+            "/app.js",
+            "/common.js",
+            "/style.css",
+            "/motion.js",
+            "/m.css",
+            "/m.js",
+            "/i18n.js",
+        ):
             self._send_static(route.lstrip("/"))
+        elif route == "/lang.js":
+            # The launcher's settings page owns the language (§74). Read on every
+            # request so a change takes effect on the next page load instead of
+            # needing the room restarted.
+            lang = load_config().ui_lang
+            if lang not in UI_LANGS:
+                lang = "zh"
+            body = f"window.FUNGI_LANG = {json.dumps(lang)};".encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/javascript; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
         elif (
             route.startswith("/vendor/") and "/" not in route[8:] and ".." not in route
         ):  # flat vendor dir; no traversal

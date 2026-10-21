@@ -8,10 +8,13 @@
 (function () {
   'use strict';
 
+  /* WebUI i18n (web/i18n.js, loaded before this file): Chinese by default. */
+  const T = window.FungiI18N.t;
+
   /* Build marker: bump per web/ change so any WebUI instance can self-identify
      (console + window.__FUNGI_WEB_VER) — stale cache vs new server is otherwise
      indistinguishable from the outside. */
-  window.__FUNGI_WEB_VER = 'web-card-open';
+  window.__FUNGI_WEB_VER = 'web-i18n';
   try { console.info('[fungi-web]', window.__FUNGI_WEB_VER); } catch (e) {}
   /* ---------- http ---------- */
   /* One fetch wrapper. Mobile inits a token prefix + 403 hook; desktop inits
@@ -42,17 +45,20 @@
     if (!d) return '';
     const diff = Date.now() - new Date(d).getTime();
     const m = Math.floor(diff / 60000);
-    if (m < 1) return 'now';
+    if (m < 1) return T('time.now');
     if (m < 60) return m + 'm';
     const h = Math.floor(m / 60);
     if (h < 24) return h + 'h';
     const days = Math.floor(h / 24);
     if (days < 7) return days + 'd';
-    return new Date(d).toLocaleDateString(locale || 'en-US', { month: 'short', day: 'numeric' });
+    return new Date(d).toLocaleDateString(
+      locale || (window.FungiI18N.lang === 'zh' ? 'zh-CN' : 'en-US'),
+      { month: 'short', day: 'numeric' }
+    );
   }
   function getSessionTitle(list, wrap, keep) {
     const u = (list || []).find(m => m.role === 'user');
-    if (!u) return 'Empty';
+    if (!u) return T('session.emptyTitle');
     const t = String(u.content).replace(/\s+/g, ' ').trim();
     return t.length > wrap ? t.slice(0, keep) + '...' : t;
   }
@@ -62,7 +68,7 @@
      keys + mousedown-outside close (Enter never confirms danger), mobile
      closes on backdrop tap. */
   let _confirmState = null;
-  let _confirmDefaults = { title: 'Are you sure?', confirmText: 'OK', cancelText: 'Cancel' };
+  let _confirmDefaults = { title: T('confirm.title'), confirmText: T('confirm.ok'), cancelText: T('confirm.cancel') };
 
   function showConfirm(opts) {
     const overlay = document.getElementById('confirm-overlay');
@@ -88,9 +94,9 @@
   function initConfirmModal(opts) {
     opts = opts || {};
     _confirmDefaults = {
-      title: opts.title || 'Are you sure?',
-      confirmText: opts.confirmText || 'OK',
-      cancelText: opts.cancelText || 'Cancel',
+      title: opts.title || T('confirm.title'),
+      confirmText: opts.confirmText || T('confirm.ok'),
+      cancelText: opts.cancelText || T('confirm.cancel'),
     };
     const overlay = document.getElementById('confirm-overlay');
     document.getElementById('confirm-ok').addEventListener('click', () => closeConfirm(true));
@@ -155,7 +161,7 @@
       box.innerHTML = '';
       steps = labels.map(label => {
         const s = row(label);
-        s.note.textContent = '等待…';
+        s.note.textContent = T('xfer.waiting');
         box.appendChild(s.el);
         return s;
       });
@@ -185,14 +191,14 @@
       steps.forEach((s, i) => {
         s.bar.style.width = '100%';
         s.el.classList.add('done');
-        if (i === steps.length - 1) s.note.textContent = text || '完成';
+        if (i === steps.length - 1) s.note.textContent = text || T('xfer.done');
       });
       autoClose = setTimeout(close, 900); // 完成后自动关闭
     }
     function fail(text, at) {
       const s = steps[at === undefined ? steps.length - 1 : at];
       if (s) {
-        s.note.textContent = text || '失败';
+        s.note.textContent = text || T('xfer.failed');
         s.el.classList.add('failed');
       }
     }
@@ -350,14 +356,14 @@
           .catch(() => ({ missing: [[0, total]] }));
 
       const repair = n => {
-        if (n >= PART_ROUNDS) return Promise.reject(new Error('上传未完成：还有分片没到'));
+        if (n >= PART_ROUNDS) return Promise.reject(new Error(T('xfer.uploadIncompleteParts')));
         return askMissing().then(d => {
           if (d.done && d.path) return d.path;
           // A session the host no longer knows (it restarted, or swept it as
           // stale) is not something to report: sending everything again
           // reopens it under the same id.
           const ranges = (d.missing || [[0, total]]).filter(g => g[1] > g[0]);
-          if (!ranges.length) throw new Error(d.error || '上传未完成');
+          if (!ranges.length) throw new Error(d.error || T('xfer.uploadIncomplete'));
           return round(ranges, n * 1000).then(() => repair(n + 1));
         });
       };
@@ -592,7 +598,7 @@
                 keepWindow(index);  // a whole window, written down for a page that comes back
                 return;
               }
-              throw new Error('中断在 ' + (lo + got[index]) + ' 字节');
+              throw new Error(T('xfer.interruptedAt', { at: lo + got[index] }));
             })
             .catch(err => {
               if (tries > 0) {
@@ -619,7 +625,7 @@
           if (reached !== total) {
             // Never hand over a file that is not whole: this is the §49 rule at
             // the last hop, and the only check the phone itself can make.
-            throw new Error('只收到 ' + reached + ' / ' + total + ' 字节');
+            throw new Error(T('xfer.partial', { got: reached, total: total }));
           }
           saveBlob(new Blob(pieces.flat(), { type: 'application/octet-stream' }), meta.name);
           // Delivered: the pieces are not worth disk any more, and the ledger
@@ -635,12 +641,12 @@
       return http.fetchJSON('/download?meta=1&path=' + encodeURIComponent(path))
         .then(r => r.json())
         .then(meta => {
-          if (!meta.ok) throw new Error(meta.error || '取不到这个文件');
+          if (!meta.ok) throw new Error(meta.error || T('xfer.cannotFetch'));
           const total = Number(meta.size) || 0;
           const count = Math.max(1, Math.min(pinned() || PULL_COUNT, Math.floor(total / PULL_MIN)));
           if (count < 2 || total > PULL_MEM_MAX) {
             saveViaBrowser(path);  // the browser's downloader: one connection, to disk
-            return '交给浏览器下载';
+            return 'browser';      // sentinel, not copy: the shell localizes the sentence
           }
           const step = Math.ceil(total / count);
           const windows = [];
@@ -682,7 +688,7 @@
               // on a 1 GB file (§49)
               markDone(upStep);
               if (j.delivery_total) progress(upStep + 1, j.delivered || 0, j.delivery_total);
-              else note(upStep + 1, '等待对方接收…');
+              else note(upStep + 1, T('xfer.waitingPeer'));
               setTimeout(pump, 1000);
               return;
             }
@@ -711,12 +717,12 @@
       if (cancelled) return;
       if (j.state === 'done') {
         markDone(last);
-        finish(j.saved ? '对方已收到：' + j.saved : '对方已收到');
+        finish(j.saved ? T('xfer.peerGotPath', { path: j.saved }) : T('xfer.peerGot'));
       } else if (j.state === 'error') {
-        fail(j.error || '对方没有收下', last);
+        fail(j.error || T('xfer.peerRefused'), last);
       } else {
         // still receiving when the modal stopped watching — never claim it landed
-        note(last, '对方仍在接收，结果会出现在会话里');
+        note(last, T('xfer.peerStillReceiving'));
       }
     }
 
@@ -728,8 +734,8 @@
           fail(e.message || String(e), 0);
           throw e;
         });
-      if (!open(title, ['① 上传到房间', '② 对方接收'])) return send();
-      note(0, '正在发送…');
+      if (!open(title, [T('xfer.stepUploadRoom'), T('xfer.stepPeerReceive')])) return send();
+      note(0, T('xfer.sending'));
       return send();
     }
     function sendFromPhone(title, host, file) {
@@ -738,15 +744,15 @@
           fail(e.message || String(e), 1);
           throw e;
         });
-      if (!open(title, ['① 上传到电脑', '② 上传到房间', '③ 对方接收'])) {
+      if (!open(title, [T('xfer.stepUploadPc'), T('xfer.stepUploadRoom2'), T('xfer.stepPeerReceive3')])) {
         return upload(file, null).then(path => send(path, null));
       }
-      note(0, '正在上传…');
+      note(0, T('xfer.uploading'));
       return upload(file, (done, total) => progress(0, done, total)).then(
         path => {
           progress(0, file.size, file.size);  // ① done, with the file's real bytes
           markDone(0);
-          note(1, '正在送往对方…');
+          note(1, T('xfer.sendingToPeer'));
           return send(path, (done, total) => progress(1, done, total));
         },
         e => {  // browser -> this host never made it
@@ -785,7 +791,7 @@
      data shapes on desktop vs mobile). */
   function attachSpawnClick(el, callId, lookup, title) {
     el.classList.add('spawn-block');
-    el.title = title || 'Click to view subagent details';
+    el.title = title || T('spawn.title');
     el.addEventListener('click', () => {
       const id = lookup(callId);
       if (id && typeof window.openAgentModal === 'function') window.openAgentModal(id);
@@ -1285,8 +1291,8 @@
     const form = document.createElement('form');
     form.className = 'report-feedback';
     form.innerHTML =
-      '<input type="text" placeholder="评价一下" />' +
-      '<button type="submit" aria-label="发送"></button>' +
+      '<input type="text" placeholder="' + escapeHtml(T('mail.placeholder')) + '" />' +
+      '<button type="submit" aria-label="' + escapeHtml(T('mail.send')) + '"></button>' +
       '<span class="fb-hint"></span>';
     const input = form.querySelector('input');
     const hint = form.querySelector('.fb-hint');
@@ -1294,7 +1300,7 @@
       ev.preventDefault();
       const text = input.value.trim();
       if (!text) { hint.textContent = ''; return; }   // 允许为空：没写就不发
-      hint.textContent = '发送中…';
+      hint.textContent = T('mail.sending');
       try {
         // postJSON hands back the Response (its callers so far just fire and
         // forget), so the body decides whether the note actually landed —
@@ -1303,13 +1309,13 @@
         const out = await res.json().catch(() => null);
         if (out && out.ok) {
           input.value = '';
-          hint.textContent = '已发给信使';
+          hint.textContent = T('mail.sent');
         } else {
-          const why = (out && out.error) || '发送失败';
-          hint.textContent = /no comm clone/.test(why) ? '信使还没就绪，稍后再试' : why;
+          const why = (out && out.error) || T('mail.failed');
+          hint.textContent = /no comm clone/.test(why) ? T('mail.notReady') : why;
         }
       } catch (e) {
-        hint.textContent = '发送失败';
+        hint.textContent = T('mail.failed');
       }
     });
     row.appendChild(form);
@@ -1325,6 +1331,17 @@
   function stripSilent(text) {
     const s = String(text == null ? '' : text);
     return s.includes(SILENT_MARKER) ? s.split(SILENT_MARKER).join('').trim() : s;
+  }
+  /* A reply that is nothing but the marker is the agent choosing not to speak
+     (user rule, 2026-10-21: show 「（Agent不说话）」 instead of an empty bubble).
+     Real words around the marker still win: the marker is only control text. */
+  function isSilentOnly(text) {
+    const s = String(text == null ? '' : text);
+    return s.includes(SILENT_MARKER) && !s.split(SILENT_MARKER).join('').trim();
+  }
+  function silentText(text) {
+    const s = stripSilent(text);
+    return s || (String(text == null ? '' : text).includes(SILENT_MARKER) ? T('transcript.silent') : '');
   }
 
   /* ---------- transcript rendering (both clients) ----------
@@ -1353,7 +1370,10 @@
     }
     return el;
   }
-  const WEEKDAYS = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
+  const WEEKDAYS = {
+    zh: ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'],
+    en: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'],
+  };
   /* When a message was sent, in words: 今天/昨天/前天 up close, the weekday
      inside the last seven days, 年月日 beyond that. 24h clock. Computed at
      paint time and re-painted with the row, so a "今天" that has since turned
@@ -1364,10 +1384,12 @@
     const sameDay = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
     const days = Math.round((sameDay(now) - sameDay(d)) / 86400000);
     let date;
-    if (days === 0) date = '今天';
-    else if (days === 1) date = '昨天';
-    else if (days === 2) date = '前天';
-    else if (days >= 0 && days < 7) date = WEEKDAYS[d.getDay()];
+    if (days === 0) date = T('time.today');
+    else if (days === 1) date = T('time.yesterday');
+    else if (days === 2) date = T('time.beforeYesterday');
+    else if (days >= 0 && days < 7) {
+      date = (WEEKDAYS[window.FungiI18N.lang] || WEEKDAYS.en)[d.getDay()];
+    }
     else date = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
     return date + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
   }
@@ -1516,10 +1538,10 @@
   function buildFileCard(file, opts) {
     const d = document.createElement('div');
     d.className = 'msg file-card' + (opts && opts.side ? opts.side : '');
-    const who = file.direction === 'phone' ? '手机上传' : '电脑发送';
+    const who = file.direction === 'phone' ? T('file.fromPhone') : T('file.fromPc');
     d.innerHTML =
       '<div class="fc-head"><span class="fc-icon">&#x1F4C1;</span>'
-      + '<span class="fc-name">' + escapeHtml(file.name || '文件') + '</span>'
+      + '<span class="fc-name">' + escapeHtml(file.name || T('file.file')) + '</span>'
       + '<span class="fc-size">' + humanBytes(file.size) + '</span></div>'
       + '<div class="fc-where">' + who + '</div>'
       + '<div class="fc-path"></div>';
@@ -1530,7 +1552,7 @@
     if (path && opts && opts.canPull) {
       const btn = document.createElement('button');
       btn.className = 'fc-pull';
-      btn.textContent = '下载到手机';
+      btn.textContent = T('file.pull');
       btn.addEventListener('click', e => {
         e.preventDefault();
         e.stopPropagation();
@@ -1541,7 +1563,7 @@
     if (path) {
       const show = document.createElement('button');
       show.className = 'fc-reveal';
-      show.textContent = '打开所在目录';
+      show.textContent = T('file.reveal');
       show.addEventListener('click', e => {
         e.preventDefault();
         e.stopPropagation();
@@ -1599,7 +1621,7 @@
           const bubble = markTs(p.add('user' + userSide + side, marked.parse(echo.text)), m.ts);
           const lab = document.createElement('div');
           lab.className = 'human-label';
-          lab.textContent = '来自 ' + echo.who + ' 的用户';
+          lab.textContent = T('transcript.fromUser', { who: echo.who });
           bubble.prepend(lab);
         }
         else if (c.startsWith('[background report]')) markTs(p.add('sys-note', escapeHtml(c)), m.ts);
@@ -1607,7 +1629,7 @@
           const bubble = markTs(p.add('user' + userSide + side, marked.parse(c)), m.ts);
           const lab = document.createElement('div');
           lab.className = 'human-label';
-          lab.textContent = '来自 ' + (m.sender_name || '?') + ' 的用户';
+          lab.textContent = T('transcript.fromUser', { who: m.sender_name || '?' });
           bubble.prepend(lab);
         }
         else markTs(p.add('user' + userSide + side, marked.parse(c)), m.ts);
@@ -1616,14 +1638,18 @@
         if (m.reasoning) {
           const det = document.createElement('details');
           det.className = 'msg reasoning' + agentSide;
-          det.innerHTML = '<summary>Thinking\u2026</summary>' + opts.reasoningHtml(m.reasoning);
+          det.innerHTML = '<summary>' + T('transcript.thinking') + '</summary>' + opts.reasoningHtml(m.reasoning);
           p.append(markTs(det, m.ts));
         }
-        const text = stripSilent(m.content);
+        const silent = isSilentOnly(m.content);
+        const text = silentText(m.content);
         if (text) {
           if (text.startsWith('(LLM error:') || text.startsWith('(Hit max tool rounds'))
             markTs(p.add('error' + agentSide, '&#x26A0; ' + escapeHtml(text)), m.ts);
-          else {
+          else if (silent) {
+            // The abstention line is not a report to answer: no feedback box.
+            markTs(p.add('assistant silent' + agentSide, escapeHtml(text)), m.ts);
+          } else {
             // Friend thread: our courier's turn text is a report to *us* — it
             // never went to the peer (comm._chat_end), so the stylesheet marks
             // it as one (a ::before label, so it stays out of the row's text),
@@ -1705,7 +1731,7 @@
         const det = document.createElement('details');
         det.className = 'msg reasoning' + agentSide;
         det.open = !r.closed;   // still streaming: open, exactly like the session view
-        det.innerHTML = '<summary>Thinking\u2026</summary>' + opts.reasoningHtml(r.text);
+        det.innerHTML = '<summary>' + T('transcript.thinking') + '</summary>' + opts.reasoningHtml(r.text);
         p.append(det);
       } else if (r.kind === 'tool') {
         const c = (r.ev && r.ev.content) || {};
@@ -1715,9 +1741,9 @@
         const t = String(liveEvText(r.ev) || '');
         p.add('friend-live' + agentSide, '<pre>' + escapeHtml(t.slice(0, 400)) + (t.length > 400 ? '...' : '') + '</pre>');
       } else if (r.kind === 'status') {
-        p.add('friend-event', '⏳ ' + escapeHtml(r.text || 'running…'));
+        p.add('friend-event', '⏳ ' + escapeHtml(r.text || T('live.running')));
       } else if (r.kind === 'error') {
-        p.add('friend-event', '⚠ ' + escapeHtml(r.text || 'error'));
+        p.add('friend-event', '⚠ ' + escapeHtml(r.text || T('live.error')));
       }
     }
   }
@@ -1845,10 +1871,10 @@
       const on = d.endpoint ? ' @ ' + hostOf(d.endpoint) : '';
       if (d.reachable) {
         const served =
-          d.detail && d.detail !== d.model ? ' (' + (L.served || 'served as') + ' ' + d.detail + ')' : '';
-        return '\u2713 ' + d.model + ' ' + (L.ok || 'answers') + served + on;
+          d.detail && d.detail !== d.model ? ' (' + (L.served || T('model.servedAs')) + ' ' + d.detail + ')' : '';
+        return '\u2713 ' + d.model + ' ' + (L.ok || T('model.answers')) + served + on;
       }
-      return '\u2717 ' + d.model + ' ' + (L.bad || 'failed') + ' \u2014 ' + (d.detail || '') + on;
+      return '\u2717 ' + d.model + ' ' + (L.bad || T('model.failed')) + ' \u2014 ' + (d.detail || '') + on;
     }
 
     function itemAt(i) {
@@ -1954,7 +1980,7 @@
       if (busy || !name) return null;
       busy = true;
       flash('busy', name);
-      note((L.switching || 'Switching to') + ' ' + name + '\u2026');
+      note((L.switching || T('model.switching')) + ' ' + name + '\u2026');
       try {
         const d = await (await postJSON('/model', { model: name })).json();
         setNames(d.models, d.model);
@@ -2019,7 +2045,7 @@
     buildToolCard, fillToolResult, attachSpawnClick,
     initAsks, initPendingAsks, initMailUnread, initSessionAlerts, tokenRate,
     mountModelPicker,
-    initPane, stripSilent, humanEcho,
+    initPane, stripSilent, silentText, isSilentOnly, humanEcho,
     markTs, insertByTs, askTextOfCall, linkifyPaths, buildFileCard, humanBytes,
     renderTranscript, renderLiveEvents, whenLabel,
   };
