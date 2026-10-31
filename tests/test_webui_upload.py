@@ -236,7 +236,9 @@ def test_four_windows_at_once_all_get_an_answer(upload_env):
 
     def window(i: int) -> None:
         lo = i * step
-        results.append(_send(_window(base, sid, "all at once.bin", lo, total, payload[lo:lo + step])))
+        results.append(
+            _send(_window(base, sid, "all at once.bin", lo, total, payload[lo : lo + step]))
+        )
 
     threads = [threading.Thread(target=window, args=(i,)) for i in range(4)]
     for t in threads:
