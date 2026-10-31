@@ -881,6 +881,15 @@ resumeIfPending();
 (async () => {
   try {
     const r = await fetch('/config-status');
+    /* 403 means this browser holds no token: the shell loads and nothing
+       inside does. That is not "not configured" — showing the config card
+       here sent the reader to fill in a wizard that could not change any of
+       it (BUG-08). Say what is wrong instead, and leave the card to the case
+       it was written for. */
+    if (r.status === 403) {
+      document.getElementById('auth-banner').hidden = false;
+      return;
+    }
     const d = await r.json();
     if (!d.configured) {
       document.getElementById('config-overlay').classList.add('show');

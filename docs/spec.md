@@ -3749,3 +3749,31 @@ token数得到。」
   全部 200、文件逐字节、收件箱只有终名文件。
 
 - 门禁：`ruff check fungi tests` 干净；`pytest tests -q` → **821 passed**（818 + 本轮 3 条）。
+
+## 77. 网页端两处「状态被读错」（答辩报告 BUG-08 / BUG-09）
+
+### 77.1 403 不是「未配置」（BUG-08）
+
+- **现象**：异机不带令牌打开网页端，`/config-status` 返回 403；壳子把「没拿到 `configured:true`」
+  当成「未配置」，弹出 Configure Fungi 配置卡片挡住主界面——而缺的是令牌，卡片里填什么都不会好。
+- **修法**：`web/app.js` 的配置门先判 `r.status === 403` → 显示 `#auth-banner`（「未授权：这个页面
+  需要令牌才能读取数据。请回到启动器「手机端」页，用带令牌的链接重新打开。」），配置卡片只在真正
+  未配置时弹。文案进 `web/i18n.js`（中英），样式用现成的 warn token（`#auth-banner`，暗色自动跟随）。
+- **验收**：`tests/test_webui_sessions.py::test_a_403_is_not_mistaken_for_an_unconfigured_shell`
+  （真 Chromium，把 `/config-status` 打回 403：配置卡片不出现、提示条出现）。修前红：同一用例下
+  `config-overlay` 带 `show`（`assert True is False`）。
+
+### 77.2 被 hub 除名后要重新注册（BUG-09）
+
+- **现象**：断网超过心跳超时，hub 的 `roster.reap()` 把主机从名册删掉；网络恢复后链路是通的
+  （日志「is answering again」），但每个点名该主机的路由都答 404 `unknown host`（`/api/mail`、
+  `/api/comm-log`），文件发送整条链路走不下去。
+- **根因**：`RoomClient` 只在启动时 `join()` 一次；心跳收到 `unknown host` 被当成普通 HubError
+  静默忽略，所以「网络恢复了、房间还认不出我」永远好不了。
+- **修法**：`fungi/room.py::_heartbeat_once` 捕获 `HubError`，消息含 `unknown host` 就立即
+  `client.join()` 重新注册（join 的回复形状与心跳相同，名册/对等体替换照旧）；其余错误照旧上报。
+- **验收**：`tests/test_room.py::test_a_reaped_host_registers_again_on_its_next_beat`
+  （把 `heartbeat_timeout` 置 0 触发一次真 reap：心跳先 404，下一次心跳后名册恢复、普通心跳照常）。
+  修前红：`HubError: /api/heartbeat: HTTP 404: unknown host` 直接从 `_heartbeat_once` 冒出。
+- 门禁：`ruff check fungi tests` 干净；`ruff format --check` 干净；`pytest tests -q` → **823 passed**
+  （821 + 本轮 2 条）。

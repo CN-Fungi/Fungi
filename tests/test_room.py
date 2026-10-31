@@ -12,6 +12,7 @@ from fungi.config import Config
 from fungi.consent_rules import ConsentRules
 from fungi.events import NullSink
 from fungi.hub.app import Hub
+from fungi.hub.client import HubError
 from fungi.protocol import Envelope
 from fungi.room import RoomClient, RoomRuntime, RoomServer, merge_comm_history
 
@@ -505,6 +506,28 @@ def test_client_roster_diff_spawns_comm_clone(client_room):
     room._heartbeat_once()
     assert "gamma" in room._peers()
     assert "gamma" in room._clones, "heartbeat diff never spawned comm clone"
+
+
+def test_a_reaped_host_registers_again_on_its_next_beat(client_room):
+    """BUG-09: a network cut longer than `heartbeat_timeout` gets the host
+    reaped, and from then on every route that names it answers "unknown host"
+    (mail, comm-log, transfer) while the room itself keeps answering — so
+    nothing else notices. One beat must register the host again; before, the
+    client logged a bare "is answering again" and every send kept failing."""
+    hub, room = client_room
+    assert hub.roster.known("beta")
+    timeout = hub.roster.heartbeat_timeout
+    hub.roster.heartbeat_timeout = 0  # what the reaper does after a long outage
+    try:
+        assert "beta" in hub.roster.reap()
+        with pytest.raises(HubError, match="unknown host"):
+            room.client.heartbeat()
+        room._heartbeat_once()  # the next beat: re-register, not a silent 404
+    finally:
+        hub.roster.heartbeat_timeout = timeout
+    assert hub.roster.known("beta")
+    beat = room.client.heartbeat()  # and the ordinary beat works from here on
+    assert "peers" in beat
 
 
 def test_client_runtime_answers_via_remote_transport(client_room):

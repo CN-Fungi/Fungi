@@ -45,6 +45,8 @@
       'cfg.model': '模型',
       'cfg.skip': '跳过',
       'cfg.save': '保存',
+      /* 403 不是「未配置」：页面能打开，但读不到任何数据（BUG-08） */
+      'auth.expired': '未授权：这个页面需要令牌才能读取数据。请回到启动器「手机端」页，用带令牌的链接重新打开。',
       'cfg.keyRequired': '请填写 API Key。',
 
       /* ---- desktop shell (index.html) ---- */
@@ -243,6 +245,8 @@
       'cfg.model': 'Model',
       'cfg.skip': 'Skip',
       'cfg.save': 'Save',
+      /* 403 is not "not configured": the shell loads, nothing inside does (BUG-08) */
+      'auth.expired': 'Not authorized: this page needs a token to read anything. Reopen it from the launcher\'s phone page (the link carries the token).',
       'cfg.keyRequired': 'API key is required.',
 
       'ui.filter': 'Filter...',

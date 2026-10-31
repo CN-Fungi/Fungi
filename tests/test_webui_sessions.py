@@ -271,3 +271,33 @@ def test_renaming_a_session_updates_the_list_not_only_the_file(page):
     )
     assert "改名要立刻生效" in served, "the save must have reached the server too"
     assert errors == [], "the rename must not throw on its way out (Enter then blur)"
+
+
+def test_a_403_is_not_mistaken_for_an_unconfigured_shell(page):
+    """BUG-08: a browser without the WebUI token gets 403 from /config-status.
+    The shell used to read that as "not configured" and opened the config
+    card — a wizard that cannot fix a missing token. The card stays shut and
+    the banner says what is actually wrong."""
+    page.route(
+        "**/config-status",
+        lambda route: route.fulfill(
+            status=403,
+            content_type="application/json",
+            body='{"error": "forbidden"}',
+        ),
+    )
+    page.reload()
+    page.wait_for_function("() => typeof loadSessions === 'function'")
+    page.wait_for_timeout(500)  # the gate is async: give it its turn
+    assert (
+        page.evaluate("() => document.getElementById('config-overlay').classList.contains('show')")
+        is False
+    ), "403 opened the configure card"
+    shown = page.evaluate(
+        """() => {
+          const b = document.getElementById('auth-banner');
+          return !!(b && !b.hidden && b.textContent.trim().length > 0);
+        }"""
+    )
+    assert shown is True, "no banner told the reader the page is unauthorized"
+    page.unroute("**/config-status")

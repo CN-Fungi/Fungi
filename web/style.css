@@ -252,6 +252,9 @@ html,body{font-family:var(--font);font-size:var(--fs-md);line-height:1.6;color:v
 /* ---- pending card asks (out-of-band consent / cross-host asks) ---- */
 #asks-banner{display:flex;flex-direction:column;gap:0.6rem;padding:0.8rem 1.5rem 0;flex-shrink:0}
 #asks-banner:empty{display:none}
+/* ---- unauthorized banner (BUG-08: a 403 is not "not configured") ---- */
+#auth-banner{margin:0.6rem 1.5rem 0;padding:0.55rem 0.9rem;border:1px solid var(--warn-border);background:var(--warn-bg);color:var(--text);border-radius:var(--radius-sm);font-size:var(--fs-sm);line-height:1.5;flex-shrink:0}
+#auth-banner[hidden]{display:none}
 .ask-from{font-size:0.72rem;font-family:var(--mono);color:var(--text2);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:0.3rem}
 .ask-consent-actions{display:flex;gap:0.5rem;margin-top:0.7rem;align-items:center}
 .ask-consent-actions input{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-xs);padding:0.5rem 0.75rem;font-size:0.82rem;outline:none}

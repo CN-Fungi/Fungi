@@ -1077,8 +1077,23 @@ class RoomClient(RoomBase):
                     self.sink.emit("error", f"heartbeat: {exc}")
 
     def _heartbeat_once(self) -> None:
-        """One beat: refresh peers (add/remove comm clones), replay pending asks."""
-        out = self.client.heartbeat()
+        """One beat: refresh peers (add/remove comm clones), replay pending asks.
+
+        A hub that forgot this host — its reaper drops a host that missed its
+        beats for `heartbeat_timeout`, which is exactly what a network cut
+        longer than the TTL does — answers `unknown host` to every route that
+        names it (mail, comm-log, transfer). The room itself keeps answering,
+        so the only repair is to register again: joining is that, and its reply
+        has the same shape as a beat (BUG-09: before this, the client logged a
+        bare "is answering again" and every send died on "unknown host").
+        """
+        try:
+            out = self.client.heartbeat()
+        except HubError as exc:
+            if "unknown host" not in str(exc):
+                raise
+            runlog.note("hub forgot host %r — rejoining", self.host)
+            out = self.client.join()
         self._peers_known = set(out.get("peers") or [])
         self._entries = list(out.get("roster") or [])
         with self._guard:
