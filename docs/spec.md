@@ -3705,3 +3705,47 @@ token数得到。」
 - `tests/test_webui_i18n.py`：真发一轮、模型只回标记 → 会话里出现「（Agent不说话）」。
 - 本机深浅色截图确认样式；英文配置下同一行显示 `(Agent stays silent)`。
 - 门禁：同 §74.4（本轮 `pytest tests -q` → **818 passed**）。
+
+## 76. 手机上传掉一个连接就整单死（答辩报告缺陷表 BUG-07，唯一未修的那条）
+
+### 76.1 复现：真浏览器、真服务器，掐掉一个窗口
+
+- 形状照着缺陷报告来：真 Chromium 开 `/m` 页、真实 WebUIServer、手机页把 ≥8 MiB 的文件切成
+  窗口（小图 < 8 MiB 走单请求整包，所以「图片一直好、视频总是坏」——判别维度是**体积**，不是
+  文件名也不是视频本身，报告里「与中文编码无关」的判断是对的）。路由层把第一个窗口 POST 掐掉
+  一次（connectionreset——手机 Wi-Fi 上的日常）。
+- 修前现象与报告一字不差：页面立刻失败「upload failed」、无成功回执，收件箱只剩
+  `弱网视频.mp4.<sid>.part`（字节全到齐 16 MiB，就是不改名）。
+- 顺带抓到同族第二处：压测 30 次窗口上传出现 2 次 500 与 3 个孤儿 part——两个窗口**同时**收满时
+  `land_upload` 双重改名，第二个在已改走的 part 上 `FileNotFoundError` → 该窗口 500 → 页面重试
+  开出僵尸会话，孤儿 part 要等 30 分钟 TTL 才被清。
+
+### 76.2 病根：网络级死亡不消耗重试预算
+
+- `web/common.js::sendWindow` 的重试只接「HTTP 非 200」；`xhr.onerror` 直接 reject、穿透
+  `Promise.all`——掉**一个**连接，整单失败，`repair()` 那套「问host 还缺哪几段」根本没机会跑。
+- 服务端 `land_upload` 的「查齐了没 → 改名」不是一个临界区，并发窗口可以同时走进来。
+
+### 76.3 修法
+
+1. `sendWindow` 改成 async 循环：网络级失败与 HTTP 错误**共用同一份预算**（PART_TRIES=3，退避
+   500/1000/1500 ms），掉线只重试那一个窗口，其余窗口的进度不受影响。
+2. `land_upload` 变成每会话一个临界区（session dict 自带 `lock`/`landed`）：先到者改名并记
+   `landed`，后来者拿同一路径回 `done`；`first` 标记保证 §53 传输会话只落一行。`stat`/`replace`
+   的 OSError 不再冒 500——Windows 上另一个窗口还开着 part 句柄时改名会 PermissionError，现在
+   回「还缺哪几段」等下一轮（每请求必有回答，§47 的老规矩）。
+
+### 76.4 验收（修前先红）
+
+- `tests/test_webui_transfer.py::test_a_window_whose_connection_dies_is_retried_and_lands`
+  （真 Chromium + 真房间）：掐掉第一个窗口 POST 一次 → 上传仍落地、逐字节一致、收件箱无 part。
+  修前还原 `web/common.js` 跑红：`{'ok': False, 'error': 'upload failed'}`——正是报告里的现象。
+  文件在页面里构造（`new File`）而不用 `set_input_files`：这个 playwright 版本上，经文件选择器
+  路径进来的请求被 route 暂停后不会派发给 handler，测试会挂死在 harness 上而不是量到线上行为。
+- `tests/test_webui_upload.py::test_landing_twice_answers_done_both_times`：同一会话连续两次
+  `land_upload`（两窗口同时收满的定格）。修前还原 `fungi/server.py` 跑红：
+  `FileNotFoundError: twice.bin.sess-land-twice.part`；修后两次都 `done` 且同一 path。
+- `tests/test_webui_upload.py::test_four_windows_at_once_all_get_an_answer`：4 窗并发齐发，
+  全部 200、文件逐字节、收件箱只有终名文件。
+
+- 门禁：`ruff check fungi tests` 干净；`pytest tests -q` → **821 passed**（818 + 本轮 3 条）。

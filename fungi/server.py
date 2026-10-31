@@ -360,6 +360,9 @@ class UploadParts:
                     "part": part,
                     "spans": spans,
                     "ts": time.time(),
+                    # landing is one critical section per upload (see land_upload)
+                    "lock": threading.Lock(),
+                    "landed": None,
                 }
         # Not this upload's part: the bytes of whatever used to be here are not
         # something this session may continue, so they go (§62, the same rule a
@@ -376,6 +379,9 @@ class UploadParts:
             "part": part,
             "spans": spans,
             "ts": time.time(),
+            # landing is one critical section per upload (see land_upload)
+            "lock": threading.Lock(),
+            "landed": None,
         }
 
     def get(self, sid: str) -> dict | None:
@@ -423,29 +429,7 @@ class UploadParts:
 UPLOADS = UploadParts()
 
 
-def land_upload(up: dict) -> dict:
-    """Put the part in place if it is whole; the §49 rule, one hop earlier.
-
-    The reply is the page's answer either way: `done` with the path it landed at,
-    or the byte ranges that are still missing, so a sender that cannot see this
-    disk re-sends exactly those instead of guessing.
-    """
-    total = int(up["total"])
-    spans = up["spans"]
-    part = up["part"]
-    if not spans.covers(0, total) or part.stat().st_size != total:
-        return {
-            "ok": True,
-            "done": False,
-            "received": min(total, spans.bytes),
-            "total": total,
-            "missing": spans.gaps(0, total),
-        }
-    # The name is chosen now, not when the upload started: a file that landed
-    # under this name while the bytes were in flight gets its own "-1" instead
-    # of being overwritten.
-    dest = _inbox_path(up["name"])
-    part.replace(dest)
+def _landed_reply(dest: Path, total: int, first: bool) -> dict:
     return {
         "ok": True,
         "done": True,
@@ -454,7 +438,63 @@ def land_upload(up: dict) -> dict:
         "size": total,
         "received": total,
         "total": total,
+        "first": first,  # only the window that renamed it writes the §53 row
     }
+
+
+def land_upload(up: dict) -> dict:
+    """Put the part in place if it is whole; the §49 rule, one hop earlier.
+
+    The reply is the page's answer either way: `done` with the path it landed at,
+    or the byte ranges that are still missing, so a sender that cannot see this
+    disk re-sends exactly those instead of guessing.
+
+    The check-and-rename is one critical section per upload: windows travel at
+    once, so two of them can complete the file in the same instant. Without the
+    lock the second renamed a part the first had already moved, raised, and its
+    window was answered 500 — the page then retried into a fresh session that
+    left an orphan part beside the file that had landed (seen in the BUG-07
+    repro). Now the second window is told the same truth as the first: `done`,
+    with the path.
+    """
+    total = int(up["total"])
+    spans = up["spans"]
+    part = up["part"]
+    with up["lock"]:
+        landed = up.get("landed")
+        if landed is not None:
+            return _landed_reply(landed, total, first=False)
+        try:
+            whole = part.stat().st_size == total
+        except OSError:
+            whole = False  # swept or not created: not landed, say what's missing
+        if not spans.covers(0, total) or not whole:
+            return {
+                "ok": True,
+                "done": False,
+                "received": min(total, spans.bytes),
+                "total": total,
+                "missing": spans.gaps(0, total),
+            }
+        # The name is chosen now, not when the upload started: a file that
+        # landed under this name while the bytes were in flight gets its own
+        # "-1" instead of being overwritten.
+        dest = _inbox_path(up["name"])
+        try:
+            part.replace(dest)
+        except OSError:
+            # Windows: another window's body is still open on the part. The
+            # bytes are counted; the rename waits for the next round — an
+            # answer, not an exception (§47: every request is answered).
+            return {
+                "ok": True,
+                "done": False,
+                "received": min(total, spans.bytes),
+                "total": total,
+                "missing": spans.gaps(0, total),
+            }
+        up["landed"] = dest
+        return _landed_reply(dest, total, first=True)
 
 
 RETRY_STRIP_PREFIXES = ("(LLM error:", "(Hit max tool rounds", "(Aborted")
@@ -1512,7 +1552,8 @@ class YesSirHandler(BaseHTTPRequestHandler):
         reply = land_upload(up)
         if reply["done"]:
             UPLOADS.drop(sid)  # the part has been renamed; the session is done
-            self._note_transfer(reply)
+            if reply.get("first"):  # one §53 row per landing, not one per window
+                self._note_transfer(reply)
         self._send_json(reply)
 
     def _note_transfer(self, landed: dict) -> None:

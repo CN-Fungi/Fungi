@@ -411,6 +411,63 @@ def test_mobile_upload_cuts_a_big_file_into_windows(mobile_page, rooms, tmp_path
     landed.unlink(missing_ok=True)
 
 
+def test_a_window_whose_connection_dies_is_retried_and_lands(
+    mobile_page, rooms, tmp_path, monkeypatch
+):
+    """BUG-07: a phone video that never landed while the images beside it did.
+
+    The windows travel at once, so a dropped connection takes exactly one of
+    them — and `xhr.onerror` used to reject straight through Promise.all: the
+    whole file failed with a bare "upload failed", no repair ran, and the inbox
+    was left holding only a `.part`. The network death now spends the same
+    retry budget as an error the host answered with, and the upload lands.
+
+    The file is built in the page (not `set_input_files`): a route paused on a
+    request that arrived through the file-chooser upload path is not dispatched
+    to the handler on this playwright build, and the test would hang on the
+    harness instead of measuring the wire.
+    """
+    _server, _client = rooms
+    inbox = tmp_path / "inbox"
+    monkeypatch.setattr(
+        webui_server,
+        "load_config",
+        lambda: Config(api_key="k", endpoint="e", model="m", inbox_dir=str(inbox)),
+    )
+    size = 12 * 1024 * 1024  # 3 windows at PART_MIN = 4 MiB
+
+    aborted = {"n": 0}
+
+    def die_once(route):
+        req = route.request
+        if req.method == "POST" and "sid=" in req.url and aborted["n"] < 1:
+            aborted["n"] += 1
+            route.abort("connectionreset")
+        else:
+            route.continue_()
+
+    mobile_page.route("**/upload*", die_once)
+    out = mobile_page.evaluate(
+        """async ([name, size]) => {
+          const buf = new Uint8Array(size);
+          for (let i = 0; i < size; i++) buf[i] = i & 0xff;
+          const f = new File([buf], name, { lastModified: 1700000000000 });
+          try { return { ok: true, path: await Xfer.upload(f, () => {}) }; }
+          catch (e) { return { ok: false, error: String(e && e.message || e) }; }
+        }""",
+        ["视频测试.bin", size],
+    )
+    assert out["ok"] is True, f"the upload failed after one dropped window: {out}"
+    assert aborted["n"] == 1, "the route never dropped a window; nothing was proven"
+    landed = inbox / "视频测试.bin"
+    assert landed.exists(), f"nothing landed at {out['path']}"
+    assert landed.read_bytes() == bytes(range(256)) * (size // 256), (
+        "the retried window did not reassemble"
+    )
+    assert [p.name for p in inbox.iterdir()] == ["视频测试.bin"], "a part file was left"
+    mobile_page.unroute("**/upload*")
+
+
 def test_the_phone_pulls_a_file_from_the_pc_in_windows(mobile_page, rooms, tmp_path):
     """The other direction (§52): the file is on the PC, the phone fetches it as
     ranges at once, and what the browser saves is byte for byte what was there."""

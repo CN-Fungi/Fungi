@@ -325,24 +325,37 @@
         for (const n of peak) done += n || 0;
         onProgress(Math.min(done, total), total);
       };
-      const sendWindow = (index, lo, hi, tries) =>
-        sendBody(
-          // the query goes INSIDE the path: the shell's prefix appends its own
-          // token with `?` or `&`, and a second `?` would swallow the window
-          url('/upload?sid=' + sid + '&offset=' + lo + '&size=' + total),
-          file.slice(lo, hi),
-          file.name,
-          n => { peak[index] = Math.max(peak[index] || 0, n); drawn(); }
-        ).then(r => {
-          if (r.status === 200) return r.body;
-          if (tries > 0) {
-            peak[index] = 0;  // this window starts over, so its count does too
-            return new Promise(res => setTimeout(res, tries * 500)).then(() =>
-              sendWindow(index, lo, hi, tries - 1)
+      /* One window, `tries`+1 attempts — and a window that dies at the NETWORK
+         level (the link blinked, the radio roamed, the socket was reset) gets
+         the same budget as one the host answered with an error. It did not
+         before: `xhr.onerror` rejected straight through Promise.all, so one
+         dropped connection failed the whole file with the bare "upload failed"
+         and none of the repair below ever ran — BUG-07, a phone video that
+         never landed while the small images beside it (one connection, one
+         body) always did. */
+      const sendWindow = async (index, lo, hi, tries) => {
+        for (let left = tries; ; left--) {
+          try {
+            const r = await sendBody(
+              // the query goes INSIDE the path: the shell's prefix appends its
+              // own token with `?` or `&`, and a second `?` would swallow the
+              // window
+              url('/upload?sid=' + sid + '&offset=' + lo + '&size=' + total),
+              file.slice(lo, hi),
+              file.name,
+              n => { peak[index] = Math.max(peak[index] || 0, n); drawn(); }
             );
+            if (r.status === 200) return r.body;
+            if (left <= 0) {
+              throw new Error(r.body.error || ('upload failed: HTTP ' + r.status));
+            }
+          } catch (e) {
+            if (left <= 0) throw e;
           }
-          throw new Error(r.body.error || ('upload failed: HTTP ' + r.status));
-        });
+          peak[index] = 0;  // this window starts over, so its count does too
+          await new Promise(res => setTimeout(res, (tries - left + 1) * 500));
+        }
+      };
 
       const round = (ranges, base) =>
         Promise.all(ranges.map(([lo, hi], i) => sendWindow(base + i, lo, hi, PART_TRIES)));

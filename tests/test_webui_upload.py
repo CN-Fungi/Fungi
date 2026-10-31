@@ -201,6 +201,55 @@ def test_a_window_sent_twice_is_not_counted_twice(upload_env):
     assert [p.name for p in inbox.iterdir()] == ["retry.bin"]
 
 
+def test_landing_twice_answers_done_both_times(upload_env):
+    """Two windows can finish the file in the same instant (they travel at
+    once): one renames the part, and the other used to raise on a part it could
+    no longer see — its window was answered 500, the page retried into a fresh
+    session, and an orphan part was left beside the file that had landed
+    (BUG-07's repro). Landing is one critical section now: the second window is
+    told `done` with the same path."""
+    _base, inbox = upload_env
+    sid = "sess-land-twice"
+    up = webui.UPLOADS.session(sid, "twice.bin", 8, inbox)
+    up["part"].write_bytes(b"12345678")
+    up["spans"].add(0, 8)
+    first = webui.land_upload(up)
+    second = webui.land_upload(up)  # the other window's view of the same moment
+    assert first["done"] is True and first["first"] is True, first
+    assert second["done"] is True and second["first"] is False, second
+    assert second["path"] == first["path"], (first, second)
+    assert Path(first["path"]).read_bytes() == b"12345678"
+    assert [p.name for p in inbox.iterdir()] == ["twice.bin"]
+    webui.UPLOADS.drop(sid)
+
+
+def test_four_windows_at_once_all_get_an_answer(upload_env):
+    """Windows travel at once (§51), so the last ones can finish together:
+    every window must get a real 200 — never a 500 from a part another window
+    had already renamed — and the inbox ends with the file and nothing else."""
+    base, inbox = upload_env
+    payload = bytes(range(256)) * (8 * 1024 * 1024 // 256)
+    total = len(payload)
+    sid = "sess-all-at-once"
+    step = total // 4
+    results: list = []
+
+    def window(i: int) -> None:
+        lo = i * step
+        results.append(_send(_window(base, sid, "all at once.bin", lo, total, payload[lo:lo + step])))
+
+    threads = [threading.Thread(target=window, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    assert len(results) == 4, results
+    assert all(out["ok"] is True for out in results), results
+    landed = inbox / "all at once.bin"
+    assert landed.exists() and landed.read_bytes() == payload
+    assert [p.name for p in inbox.iterdir()] == ["all at once.bin"], "a part file was left"
+
+
 def test_a_missing_window_never_reaches_the_real_name(upload_env):
     """The §49 rule, one hop earlier: what the phone is missing is a question
     the host answers, and until the answer is "nothing" there is no file."""
