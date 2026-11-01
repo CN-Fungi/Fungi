@@ -14,7 +14,7 @@
   /* Build marker: bump per web/ change so any WebUI instance can self-identify
      (console + window.__FUNGI_WEB_VER) — stale cache vs new server is otherwise
      indistinguishable from the outside. */
-  window.__FUNGI_WEB_VER = 'web-i18n';
+  window.__FUNGI_WEB_VER = 'web-bg-tool';
   try { console.info('[fungi-web]', window.__FUNGI_WEB_VER); } catch (e) {}
   /* ---------- http ---------- */
   /* One fetch wrapper. Mobile inits a token prefix + 403 hook; desktop inits
@@ -778,11 +778,45 @@
     return { open, close, finish, fail, progress, note, upload, download, sendToPeer, sendOne, sendFromPhone };
   }
 
+  /* ---------- live countdown ticker (§74) ----------
+     One 1s interval drives every running elapsed/total readout on screen —
+     the running tool card's "已执行 Xs" and the inquire card's "已执行 Xs / 总 Ys"
+     (the hidden 15-min ask wait that made users think it had hung). Elements
+     register a start epoch + optional total + a format fn; a card removed from
+     the DOM is pruned on the next tick, so re-renders never leak intervals. */
+  const _tickEls = new Set();
+  let _tickHandle = null;
+  function _tickNow() {
+    const now = Date.now();
+    for (const el of Array.from(_tickEls)) {
+      if (!el.isConnected) { _tickEls.delete(el); continue; }
+      const elapsed = Math.max(0, Math.floor((now - el._tickStart) / 1000));
+      el.textContent = el._tickFmt(elapsed, el._tickTotal || 0);
+    }
+    if (!_tickEls.size && _tickHandle) { clearInterval(_tickHandle); _tickHandle = null; }
+  }
+  function mountTimer(el, startedAt, totalSec, fmt) {
+    el._tickStart = startedAt || Date.now();
+    el._tickTotal = totalSec || 0;
+    el._tickFmt = fmt;
+    // Paint the first reading directly — do NOT run _tickNow() here: the card is
+    // not yet in the DOM (the caller appends it after buildToolCard returns), so
+    // a prune pass would drop it as disconnected and kill the interval. The 1s
+    // ticker finds it connected (the append is synchronous, same task).
+    el.textContent = fmt(0, el._tickTotal);
+    _tickEls.add(el);
+    if (!_tickHandle) _tickHandle = setInterval(_tickNow, 1000);
+  }
+
   /* ---------- tool card rendering ----------
-     spec: { id?, name, args?, result? } — id renders the #tool-<id> hook the
-     streaming tool_result patches via fillToolResult; result pre-fills the
-     output (live turn replay path). opts.argsMax: args snippet cap (80 desktop
-     / 60 mobile — trimmed content, both styles come from CSS). */
+     spec: { id?, name, args?, result?, startedAt?, timeout_s? } — id renders the
+     #tool-<id> hook the streaming tool_result patches via fillToolResult; result
+     pre-fills the output (live turn replay path). startedAt (epoch ms, set by the
+     shell when the tool event lands) mounts a live "已执行 Xs" readout on a still-
+     running card. timeout_s (bash only) turns that readout into "已执行 Xs / 总 Ys"
+     and adds a 后台执行 button so an impatient user can background the call (§74).
+     opts.argsMax: args snippet cap (80 desktop / 60 mobile). opts.onBackground:
+     shell callback(spec) wired to the 后台执行 button. */
   function buildToolCard(spec, opts) {
     const argsMax = (opts && opts.argsMax) || 80;
     const d = document.createElement('div');
@@ -791,10 +825,38 @@
     const args = spec.args || '';
     const argsHtml = args ? ' <code>' + escapeHtml(args.length > argsMax ? args.slice(0, argsMax) + '...' : args) + '</code>' : '';
     d.innerHTML = '<div class="tool-label">&#x1F527; ' + escapeHtml(spec.name || 'tool') + argsHtml + '</div><div class="tool-result">' + (spec.result ? '<pre>' + escapeHtml(spec.result) + '</pre>' : '') + '</div>';
+    const running = !spec.result && spec.startedAt;
+    if (running) {
+      const foot = document.createElement('div');
+      foot.className = 'tool-foot';
+      const tEl = document.createElement('span');
+      tEl.className = 'tool-timer';
+      const total = spec.timeout_s || 0;
+      foot.appendChild(tEl);
+      mountTimer(tEl, spec.startedAt, total,
+        (e, t) => t ? T('tool.elapsedTotal', { e, t }) : T('tool.elapsed', { e }));
+      // A bounded shell call is the one an impatient user waits on: offer to
+      // background it (reuses the bg tool) instead of watching the countdown.
+      if (total && opts && opts.onBackground) {
+        const bg = document.createElement('button');
+        bg.type = 'button';
+        bg.className = 'tool-bg';
+        bg.textContent = T('tool.background');
+        bg.addEventListener('click', () => { bg.disabled = true; opts.onBackground(spec); });
+        foot.appendChild(bg);
+      }
+      d.appendChild(foot);
+    }
     if (spec.result && opts && opts.fileLink) linkifyPaths(d, opts.fileLink);
     return d;
   }
   function fillToolResult(block, content, onPick) {
+    const foot = block.querySelector('.tool-foot');
+    if (foot) { // result landed: stop the ticker and drop the 后台执行 button
+      const timer = foot.querySelector('.tool-timer');
+      if (timer) _tickEls.delete(timer);
+      foot.remove();
+    }
     const out = block.querySelector('.tool-result');
     out.innerHTML = '<pre>' + escapeHtml(content) + '</pre>';
     linkifyPaths(out, onPick);  // tool output is where the paths show up (§52)

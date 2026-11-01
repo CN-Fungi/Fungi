@@ -110,7 +110,12 @@ def test_desktop_defaults_to_chinese(browser, room, zh):
     try:
         assert page.evaluate("document.documentElement.lang") == "zh-CN"
         assert page.inner_text("#btn-new-session") == "＋ 新建会话"
+        # Empty box = retry (2026-10-31); typing flips it back to send.
+        assert page.inner_text("#send") == "重试"
+        page.fill("#input", "x")
+        page.wait_for_timeout(100)
         assert page.inner_text("#send") == "发送"
+        page.fill("#input", "")
         assert page.inner_text('#consent-slider [data-v="ask"]') == "询问"
     finally:
         ctx.close()
@@ -123,6 +128,10 @@ def test_desktop_follows_the_launcher_setting_in_english(browser, room, english)
         assert page.evaluate("document.documentElement.lang") == "en"
         assert page.inner_text("#btn-new-session") == "+ New Session"
         assert page.get_attribute("#session-filter", "placeholder") == "Filter..."
+        # Empty box = retry (2026-10-31); typing flips it back to send.
+        assert page.inner_text("#send") == "Retry"
+        page.fill("#input", "x")
+        page.wait_for_timeout(100)
         assert page.inner_text("#send") == "Send"
         assert page.inner_text('#consent-slider [data-v="allow"]') == "Allow"
     finally:

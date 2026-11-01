@@ -8,10 +8,12 @@ const msgs = document.getElementById('messages'), input = document.getElementByI
 let processing = false, currentSessionId = null, allSessions = [], sessionDirty = false;
 let _liveCount = 0; // live-node count at last streaming render (motion: animate only fresh nodes)
 let rawMessages = [];
+let sessionHidden = false; // the open session's records are toggled hidden (card clicked again)
 
 function setCurrentSession(id) {
   currentSessionId = id;
   try { if (id) localStorage.setItem('fungi-session', id); else localStorage.removeItem('fungi-session'); } catch (e) {}
+  refreshSendButton(); // send vs retry depends on the session (shuttle always sends)
 }
 
 /* ---------- helpers ---------- */
@@ -111,9 +113,21 @@ async function closeCurrentSession() {
   loadSessions();
 }
 async function switchSession(id) {
+  const wasFriend = friendView !== null;
   leaveFriendView();
-  if (id === currentSessionId) return;
+  if (id === currentSessionId) {
+    // The open session's own card: alternate showing/hiding its records. The
+    // user's rule (2026-10-31) — click to open, click again to hide, click again
+    // to bring them back. (Was an early return + an unconditional pane wipe, so
+    // the records vanished with nothing to repaint them.)
+    if (wasFriend) { sessionHidden = false; await reloadSessionFromServer(); return; }
+    sessionHidden = !sessionHidden;
+    if (sessionHidden) S.clearMsgs();
+    else await reloadSessionFromServer();
+    return;
+  }
   await closeCurrentSession();
+  sessionHidden = false;
   sessionDirty = false;
   try {
     const r = await fetch('/session?id=' + encodeURIComponent(id));
@@ -140,6 +154,7 @@ function renderMessages(s) {
   // changed). The pane writers enforce this now; the early return keeps the
   // work from happening at all. 2026-09-10 real-machine finding.
   if (!pane.is('session')) return;
+  sessionHidden = false; // any repaint means the records are on screen
   _liveCount = 0; // full re-render: transcript replay is CSS-static, live nodes re-baseline
   // Full re-render must actually replace: renderTranscript only appends, so
   // without this clear every reload (done/ESC/retry) stacked a second copy of
@@ -453,10 +468,69 @@ let stopRequested = false; // first Esc: graceful stop via /stop; second Esc: ha
 let stopTimer = null;
 let turn = null; // active turn: {sessionId, buffer, reasoning, reasoningOpen, tools, asks, errors}
 
+/* The send button is three things in one: send, a visible stop while a turn
+   runs, and — when the box is empty — a retry of the last turn. The one
+   exception is the file-transfer assistant, whose key is always send (user rule,
+   2026-10-31). */
+function inShuttle() {
+  const s = (allSessions || []).find(x => x.id === currentSessionId);
+  return !!(s && s.shuttle);
+}
+function refreshSendButton() {
+  if (processing) return; // the busy (■) label is owned by setBusy
+  const retry = !input.value.trim() && !inShuttle();
+  btn.innerHTML = retry ? T('ui.retry') : T('ui.send');
+  btn.title = retry ? T('ui.retry') : T('ui.send');
+}
+function setBusy(busy, stopping) {
+  btn.classList.toggle('stopping', !!stopping);
+  if (busy) {
+    btn.innerHTML = '&#x25A0;';
+    btn.title = stopping ? T('ui.stopForce') : T('ui.stop');
+  } else {
+    refreshSendButton(); // back to send / retry for the current box + session
+  }
+  btn.disabled = false; // must stay clickable: it IS the stop button while busy
+}
+/* One stop path shared by the button and Esc: first press asks the server to
+   stop (stream stays open for the persisted partial), second press hard-cuts a
+   server stuck in a long tool call. */
+function requestStop() {
+  if (!abortCtrl || !turn) return;
+  const sid = turn.sessionId || currentSessionId;
+  if (!stopRequested) {
+    stopRequested = true;
+    setBusy(true, true);
+    setStatus(T('status.stopping'));
+    if (sid) fetch('/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: sid }) }).catch(() => {});
+    stopTimer = setTimeout(() => { if (abortCtrl) { abortCtrl.abort(); abortCtrl = null; } }, 15000);
+  } else {
+    if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
+    stopRequested = false;
+    abortCtrl.abort(); abortCtrl = null;
+    setStatus(T('status.aborted'));
+  }
+}
+
+/* 后台执行 (§74): background a long-running bash call the user won't wait for.
+   Parse the command off the tool card's raw args, tell the server to kill the
+   foreground call and re-dispatch it via the bg tool; the output returns later
+   as a [background report] re-activation (handled by the resume poll). */
+function backgroundTool(spec) {
+  let command = '', cwd = null;
+  try { const a = JSON.parse(spec.args || '{}'); command = a.command || ''; cwd = a.cwd || null; } catch (e) {}
+  if (!command) return;
+  const sid = (turn && turn.sessionId) || currentSessionId;
+  fetch('/background-tool', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: sid, command, cwd }) }).catch(() => {});
+}
+
 async function send() {
   const text = input.value.trim();
   if (!text || processing) return;
   processing = true;
+  sessionHidden = false; // a new message always brings the records back
   abortCtrl = new AbortController(); stopRequested = false;
   if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
   if (!currentSessionId) {
@@ -471,7 +545,7 @@ async function send() {
   rawMessages.push({ role: 'user', content: text });
   sessionDirty = true;
   turn.userText = text;
-  input.value = ''; btn.disabled = true; setStatus(T('status.thinking'));
+  input.value = ''; setBusy(true); setStatus(T('status.thinking'));
   _liveCount = 0; window.fungiMotion?.waveOn?.(status);
   renderTurnLive();
   await pumpStream('/chat', { message: text, sessionId: sid, side: MY_SIDE });
@@ -482,12 +556,13 @@ async function send() {
 async function retryTurn() {
   if (processing || !currentSessionId) return;
   processing = true;
+  sessionHidden = false;
   abortCtrl = new AbortController(); stopRequested = false;
   if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
   const sid = currentSessionId;
   turn = { sessionId: sid, entries: [] };
   sessionDirty = true;
-  btn.disabled = true;
+  setBusy(true);
   setStatus(T('status.retrying'));
   _liveCount = 0; window.fungiMotion?.waveOn?.(status);
   renderTurnLive();
@@ -508,7 +583,7 @@ async function resumeIfPending() {
     abortCtrl = new AbortController(); stopRequested = false;
     turn = { sessionId: currentSessionId, entries: [] };
     sessionDirty = true;
-    btn.disabled = true;
+    setBusy(true);
     setStatus(T('status.resuming'));
     _liveCount = 0; window.fungiMotion?.waveOn?.(status);
     renderTurnLive();
@@ -525,7 +600,7 @@ function reattachIfRunning(sid) {
   processing = true;
   abortCtrl = new AbortController(); stopRequested = false;
   turn = { sessionId: sid, entries: [] };
-  btn.disabled = true; setStatus(T('status.reattaching'));
+  setBusy(true); setStatus(T('status.reattaching'));
   _liveCount = 0; window.fungiMotion?.waveOn?.(status);
   renderTurnLive();
   pumpStream('/events?sessionId=' + encodeURIComponent(sid), null, 'GET');
@@ -589,7 +664,7 @@ async function pumpStream(url, body, method = 'POST') {
     turn = null;
     recoverAfterDrop(sid);
   }
-  processing = false; btn.disabled = false;
+  processing = false; setBusy(false);
   window.fungiMotion?.waveOff?.();
 }
 
@@ -629,7 +704,7 @@ function handleTurnEvent(obj) {
       break;
     }
     case 'tool':
-      t.entries.push({ kind: 'tool', id: obj.content.id, name: obj.content.name, args: obj.content.args, result: '' });
+      t.entries.push({ kind: 'tool', id: obj.content.id, name: obj.content.name, args: obj.content.args, result: '', startedAt: Date.now(), timeout_s: obj.content.timeout_s || 0 });
       // A long tool used to leave a stale "Writing..." on the status bar.
       if (visible) { setStatus(T('status.runningTool', { name: obj.content.name || 'tool' })); renderTurnLive(); }
       break;
@@ -745,7 +820,7 @@ function renderTurnLive() {
       ad.innerHTML = marked.parse(text);
       S.append(ad);
     } else if (e.kind === 'tool') {
-      const d = FC.buildToolCard({ id: e.id, name: e.name, args: e.args, result: e.result }, { argsMax: 80 });
+      const d = FC.buildToolCard({ id: e.id, name: e.name, args: e.args, result: e.result, startedAt: e.startedAt, timeout_s: e.timeout_s }, { argsMax: 80, onBackground: backgroundTool });
       d.classList.add('live-node');
       S.append(d);
       if (e.name === 'spawn' || e.name === 'background') FC.attachSpawnClick(d, e.id, callId => specByCall[callId] || archivedByCall[callId]);
@@ -776,26 +851,20 @@ function renderTurnLive() {
 }
 input.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
-  if (e.key === 'Escape' && abortCtrl && turn) {
-    const sid = turn.sessionId || currentSessionId;
-    if (!stopRequested) {
-      // First Esc: ask the server to stop the turn and keep the stream open —
-      // the persisted partial reply comes back via done -> reload.
-      stopRequested = true;
-      setStatus(T('status.stopping'));
-      if (sid) fetch('/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: sid }) }).catch(() => {});
-      stopTimer = setTimeout(() => { if (abortCtrl) { abortCtrl.abort(); abortCtrl = null; } }, 15000);
-    } else {
-      // Second Esc: server is stuck (e.g. long tool call) — disconnect hard.
-      if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
-      stopRequested = false;
-      abortCtrl.abort(); abortCtrl = null;
-      setStatus(T('status.aborted'));
-    }
-  }
+  if (e.key === 'Escape' && abortCtrl && turn) requestStop();
 });
-btn.addEventListener("click", send);
+// The button is stop while a turn runs, retry when the box is empty (except in
+// the file-transfer assistant), send otherwise.
+btn.addEventListener("click", () => {
+  if (processing && turn) { requestStop(); return; }
+  if (!input.value.trim()) {
+    if (!inShuttle()) retryTurn(); // empty + a normal session = retry the last turn
+    return;                        // shuttle: an empty press does nothing
+  }
+  send();
+});
+input.addEventListener('input', refreshSendButton);
+refreshSendButton(); // initial label (empty box = retry, unless a shuttle is open)
 document.addEventListener('keydown', e => {
   if (e.altKey && (e.key === 'r' || e.key === 'R')) {
     if (processing || !currentSessionId) return;
@@ -941,7 +1010,11 @@ function setView(host) {
 
 function leaveFriendView() {
   const wasViewing = friendView !== null;
-  setView(null);
+  // Only a REAL owner change wipes the pane. Calling setView(null) while the
+  // session already owns it used to erase the transcript with nothing to
+  // repaint it — clicking the open session card made its records vanish
+  // (2026-10-31 user report).
+  if (wasViewing) setView(null);
   lastFriendPayload = null;
   clearTimeout(friendLiveTimer);
   document.getElementById('input-area').style.display = '';

@@ -303,6 +303,17 @@ function setBusy(busy, stopping) {
   btn.disabled = false;
   btn.title = busy ? (stopping ? T('mobile.stopForce') : T('mobile.stop')) : (sendMode ? T('ui.send') : T('mobile.retry'));
 }
+/* 后台执行 (§74): background a long bash call the user won't wait for — kill the
+   foreground call and re-dispatch via the bg tool; output returns later as a
+   [background report] re-activation. Mobile mirrors the desktop contract. */
+function backgroundTool(spec) {
+  let command = '', cwd = null;
+  try { const a = JSON.parse(spec.args || '{}'); command = a.command || ''; cwd = a.cwd || null; } catch (e) {}
+  if (!command) return;
+  const sid = (turn && turn.sessionId) || currentSessionId;
+  fetch(api('/background-tool'), { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: sid, command, cwd }) }).catch(() => {});
+}
 async function send() {
   if (processing && turn) { // running: button = stop (graceful, then hard)
     const sid = turn.sessionId || currentSessionId;
@@ -489,7 +500,7 @@ function handleTurnEvent(obj) {
       break;
     }
     case 'tool':
-      t.entries.push({ kind: 'tool', id: obj.content.id, name: obj.content.name, args: obj.content.args, result: '' });
+      t.entries.push({ kind: 'tool', id: obj.content.id, name: obj.content.name, args: obj.content.args, result: '', startedAt: Date.now(), timeout_s: obj.content.timeout_s || 0 });
       // A long tool used to leave a stale "Writing..." on the status bar.
       if (visible) { status.textContent = T('mobile.runningTool', { name: obj.content.name || 'tool' }); renderTurnLive(); }
       break;
@@ -607,7 +618,7 @@ function renderTurnLive() {
       FC.linkifyPaths(ad, pullFromPc);
       S.append(ad);
     } else if (e.kind === 'tool') {
-      const d = FC.buildToolCard({ id: e.id, name: e.name, args: e.args, result: e.result }, { argsMax: 60 });
+      const d = FC.buildToolCard({ id: e.id, name: e.name, args: e.args, result: e.result, startedAt: e.startedAt, timeout_s: e.timeout_s }, { argsMax: 60, onBackground: backgroundTool });
       d.classList.add('live-node');
       S.append(d);
       if (e.name === 'spawn' || e.name === 'background') FC.attachSpawnClick(d, e.id, callId => specByCall[callId] || archivedByCall[callId], T('spawn.title'));
@@ -698,7 +709,7 @@ function setView(host) {
 
 function leaveFriendView() {
   const wasViewing = friendView !== null;
-  setView(null);
+  if (wasViewing) setView(null); // only a real owner change should wipe the pane
   lastFriendPayload = null;
   clearTimeout(friendLiveTimer);
   document.getElementById('input-area').style.display = '';
