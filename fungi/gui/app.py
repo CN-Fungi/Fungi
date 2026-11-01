@@ -244,11 +244,27 @@ class FungiGui(FluentWindow):
         super().closeEvent(event)
 
 
-def _singleton_taken(key: str = "FungiGuiSingleton") -> bool:
-    """True when another process already holds the GUI singleton slot."""
+# The QSharedMemory that holds the GUI's singleton slot. It MUST stay referenced
+# for the process lifetime: a local that goes out of scope is destroyed, Qt
+# detaches, and the OS frees the segment — which silently released the slot, so
+# a second launcher could open a second window (2026-10-31 user report).
+_singleton_seg: QSharedMemory | None = None
 
+
+def _singleton_taken(key: str = "FungiGuiSingleton") -> bool:
+    """True when another process already holds the GUI singleton slot.
+
+    On a fresh claim we keep the segment in `_singleton_seg` so it stays
+    attached; otherwise the slot would be freed the moment we return.
+    """
+    global _singleton_seg  # noqa: PLW0603 (module-level lifetime holder)
     shared = QSharedMemory(key)
-    return shared.attach() or not shared.create(1)
+    if shared.attach():
+        return True
+    if shared.create(1):
+        _singleton_seg = shared  # hold it: destroy+detach would free the slot
+        return False
+    return True
 
 
 def _activate_running_instance() -> bool:
