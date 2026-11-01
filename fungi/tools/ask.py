@@ -165,11 +165,14 @@ def blocking_ask(
     """
     ask_id = uuid.uuid4().hex[:6]
     _pending.register(ask_id)
-    sink.emit("ask", {"id": ask_id, "questions": questions})
+    limit = ASK_TIMEOUT_S if timeout_s is None else timeout_s
+    # timeout_s rides the event so the card can show a live "已执行 Xs / 总 Ys"
+    # countdown — the hidden 15-minute wait made users think it had hung (§74).
+    sink.emit("ask", {"id": ask_id, "questions": questions, "timeout_s": limit})
     answered = False
     value = None
     aborted = False
-    deadline = time.monotonic() + (ASK_TIMEOUT_S if timeout_s is None else timeout_s)
+    deadline = time.monotonic() + limit
     try:
         # Slice the wait so a stop request wakes the tool within ~1s;
         # heartbeat pings keep the NDJSON stream alive while blocked.

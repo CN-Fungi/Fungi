@@ -1,5 +1,8 @@
 """Tests for the agent turn loop, driven by scripted (Fake) LLM completions."""
 
+import threading
+import time
+
 import fungi.agent as fungi_agent
 from fungi.agent import Agent, BoundTool, wrap_reasoning_events
 from fungi.config import Config
@@ -387,3 +390,45 @@ def test_public_messages_stamps_the_moment_a_row_lands():
     stamped = messages[1]["ts"]
     fungi_agent.public_messages(messages)
     assert messages[1]["ts"] == stamped
+
+
+def test_backgrounding_a_tool_stops_only_that_call_not_the_turn():
+    """后台执行 (2026-10-31 user report): the running bash is stopped, the agent is
+    told it was backgrounded, and the turn CONTINUES — it is not an abort."""
+    seen: dict = {}
+
+    class BgLLM:
+        calls = 0
+
+        def __call__(self, messages, _defs):
+            BgLLM.calls += 1
+            if BgLLM.calls == 1:
+                return LLMResult(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "c1",
+                            "function": {
+                                "name": "bash",
+                                "arguments": '{"command": "ping -n 30 127.0.0.1 > nul"}',
+                            },
+                        }
+                    ],
+                )
+            seen["tool"] = [m for m in messages if m.get("role") == "tool"][-1]["content"]
+            return LLMResult(content="continued")
+
+    agent = Agent(Config(api_key="k"), FnSink(lambda _t, _c: None), llm=BgLLM())
+    ev = threading.Event()
+    agent.tool_abort_event = ev
+    threading.Timer(0.6, ev.set).start()  # the user clicks 后台执行 mid-command
+
+    messages = [{"role": "user", "content": "go"}]
+    t0 = time.monotonic()
+    agent.run(messages)
+
+    assert time.monotonic() - t0 < 10, "the long command was not stopped"
+    assert "BACKGROUNDED" in seen["tool"], seen["tool"]
+    assert not ev.is_set(), "the narrow abort is cleared so the next tool runs"
+    assert messages[-1]["role"] == "assistant" and messages[-1]["content"] == "continued"
+    assert not any("(Aborted)" in str(m.get("content")) for m in messages)

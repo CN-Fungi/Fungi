@@ -239,6 +239,11 @@ class Agent:
         self._llm = llm
         self.model = model
         self.should_abort = should_abort
+        # A SECOND, narrower abort: stops only the tool currently running (the
+        # 后台执行 button on a bash card), WITHOUT ending the turn — the loop's
+        # own self._aborted() never looks at it, so after the tool returns the
+        # agent carries on with the rest of its work (2026-10-31).
+        self.tool_abort_event: threading.Event | None = None
 
     @property
     def tool_defs(self) -> list[dict]:
@@ -274,6 +279,10 @@ class Agent:
     def _aborted(self) -> bool:
         return self.should_abort is not None and self.should_abort()
 
+    def _tool_stopped(self) -> bool:
+        """Only the running tool was stopped (后台执行), not the whole turn."""
+        return self.tool_abort_event is not None and self.tool_abort_event.is_set()
+
     def _dispatch(self, name: str, args: dict, call_id: str | None = None) -> str:
         bound = self.extra_tools.get(name)
         if bound is not None:
@@ -287,7 +296,7 @@ class Agent:
             # ImageRead (str subclass) must survive: str() would flatten it and
             # the loop would lose the pixels a bound tool attached (screen shots).
             return result if isinstance(result, str) else str(result)
-        return tools.dispatch(name, args, should_abort=self._aborted)
+        return tools.dispatch(name, args, should_abort=lambda: self._aborted() or self._tool_stopped())
 
     def _run_tool_call(self, tc: dict, messages: list[dict]) -> None:
         name = tc["function"]["name"]
@@ -299,7 +308,14 @@ class Agent:
         args, parse_error = parse_tool_args(raw_args)
         private = name in PRIVATE_TOOLS
         if not private:
-            self.sink.emit("tool", {"name": name, "args": raw_args, "id": tc["id"]})
+            payload = {"name": name, "args": raw_args, "id": tc["id"]}
+            if name == "bash":
+                # A bounded tool: tell the card its ceiling so it can show a live
+                # "已执行 Xs / 总 Ys" countdown instead of a silent hang (§74).
+                from fungi.tools.shell import BASH_TIMEOUT  # noqa: PLC0415
+
+                payload["timeout_s"] = BASH_TIMEOUT
+            self.sink.emit("tool", payload)
         if parse_error is not None:
             # Never dispatch with silently-emptied args: the tool's
             # "Required arguments" message would hide the real failure.
@@ -310,6 +326,19 @@ class Agent:
             )
         else:
             output = self._dispatch(name, args, call_id=tc["id"])
+            if self._tool_stopped():
+                # 后台执行: the user moved this bash call to the background. It is
+                # NOT a stop — the bg tool is running it out-of-band and its output
+                # arrives later as a [background report]. Tell the agent plainly so
+                # it continues the turn instead of treating this as an abort.
+                if str(output).startswith("ERROR: cancelled by user"):
+                    output = (
+                        "BACKGROUNDED: the user moved this command to the background at"
+                        " their request. It keeps running out-of-band; its output will"
+                        " arrive later as a [background report] new turn. Do NOT re-run"
+                        " it — continue with anything else the task needs, or end your turn."
+                    )
+                self.tool_abort_event.clear()  # only this one call was backgrounded
         if not private:
             self.sink.emit("tool_result", {"content": _truncate(output), "id": tc["id"]})
         messages.append(

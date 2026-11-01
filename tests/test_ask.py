@@ -90,7 +90,8 @@ def test_confirm_returns_answer():
     assert tool_msgs[0]["content"] == "USER: 是"
 
     ask_content = next(c for t, c in events if t == "ask")
-    assert set(ask_content) == {"id", "questions"}
+    assert set(ask_content) == {"id", "questions", "timeout_s"}
+    assert ask_content["timeout_s"] == ask_mod.ASK_TIMEOUT_S  # card renders a countdown
     (q,) = ask_content["questions"]
     assert q["question"] == "继续吗?"
     assert q["options"] == [{"label": "是"}, {"label": "否"}]

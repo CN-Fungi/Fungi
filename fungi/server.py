@@ -31,7 +31,7 @@ from fungi.config import (
     save_config,
     switch_model,
 )
-from fungi.events import Sink
+from fungi.events import NullSink, Sink
 from fungi.hub.app import RangeNotSatisfiableError, range_window, safe_name
 from fungi.llm import probe_model
 from fungi.openfile import open_with_default, reveal_in_folder
@@ -608,6 +608,9 @@ class WebUIRuntime:
         # background subagents; a new turn must start with a clean one.
         bg_abort = threading.Event()
         _BG_ABORTS[sid] = bg_abort
+        # Narrow abort for 后台执行: stops only the running tool, never the turn.
+        tool_bg = threading.Event()
+        _BG_TOOL_ABORTS[sid] = tool_bg
 
         def _abort() -> bool:
             return bool(should_abort and should_abort()) or bg_abort.is_set()
@@ -618,7 +621,42 @@ class WebUIRuntime:
             should_abort=_abort,
             spawn_done=lambda rec: _PENDING_SPAWNS.setdefault(sid, []).append(rec),
         )
-        return layer.build_orchestrator(sink)
+        agent = layer.build_orchestrator(sink)
+        agent.tool_abort_event = tool_bg
+        return agent
+
+    def dispatch_background(self, sid: str, command: str, cwd: str | None = None) -> dict:
+        """Run a shell command in the background for an impatient user (§74).
+
+        The user is watching a long `bash` card count toward BASH_TIMEOUT and
+        clicks 后台执行: stop ONLY that running call (a narrow per-tool abort, so
+        the turn continues and the agent is told the command was backgrounded),
+        and re-dispatch the SAME command through the background tool. The output
+        lands later as a `[background report]` re-activation (via _PENDING_SPAWNS
+        -> /resume). We deliberately do NOT reuse /stop here — that ends the turn
+        AND clears _PENDING_SPAWNS, swallowing the very report we are about to
+        earn. A throwaway TriLayer mirrors build_agent: its own subagents dict is
+        not persisted, but the report injects fine when no stored record matches.
+        """
+        command = (command or "").strip()
+        if not command:
+            return {"ok": False, "error": "need a command"}
+        bg_abort = _BG_ABORTS.setdefault(sid, threading.Event())
+
+        def _abort() -> bool:
+            return bg_abort.is_set()
+
+        layer = TriLayer(
+            load_config(),
+            NullSink(),  # this dispatch has no live stream; the report rides /resume
+            should_abort=_abort,
+            spawn_done=lambda rec: _PENDING_SPAWNS.setdefault(sid, []).append(rec),
+        )
+        out = layer.bound_background(1).fn({"command": command, "cwd": cwd})
+        ok = not str(out).startswith("ERROR:")
+        if not ok:
+            runlog.problem("background-tool %s", out)
+        return {"ok": ok, "result": str(out)}
 
     def route_answer(self, ask_id: str, value: str | list[str]) -> bool:
         """Resolve an /answer submission. Default: in-process inquire only."""
@@ -684,6 +722,10 @@ _PENDING_SPAWNS: dict[str, list[dict]] = {}
 # Per-turn background aborts: /stop pops+sets the session's event so
 # already-dispatched background subagents die with the turn.
 _BG_ABORTS: dict[str, threading.Event] = {}
+# Per-turn NARROW abort: 后台执行 sets this to stop ONLY the running tool (the
+# bash card) while the agent keeps going. Distinct from _ACTIVE_TURNS (which
+# ends the turn) — the agent loop never reads it.
+_BG_TOOL_ABORTS: dict[str, threading.Event] = {}
 
 # Tombstones for sessions deleted while a turn was still running: the turn's
 # exit-path save must not resurrect the file the user just deleted.
@@ -1058,6 +1100,19 @@ class YesSirHandler(BaseHTTPRequestHandler):
             if bg is not None:
                 bg.set()  # kill background subagents of already-ended turns too
             self._send_json({"ok": bool(events) or bg is not None})
+        elif url.path == "/background-tool":
+            # 后台执行 (§74): an impatient user backgrounds a long bash call. Stop
+            # ONLY that running call (the narrow tool abort) — the turn keeps
+            # going and the agent is told the command was backgrounded — then
+            # re-dispatch the same command via the background tool. Its output
+            # returns later through /spawn-pending -> /resume.
+            data = self._read_body()
+            sid = str(data.get("sessionId") or "")
+            with _TURNS_LOCK:
+                tool_ev = _BG_TOOL_ABORTS.get(sid)
+            if tool_ev is not None:
+                tool_ev.set()
+            self._send_json(self.runtime.dispatch_background(sid, data.get("command"), data.get("cwd")))
         elif url.path == "/resume":
             self._handle_resume()
         elif url.path == "/answer":

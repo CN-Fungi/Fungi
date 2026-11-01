@@ -40,7 +40,14 @@ from .hub.client import HubClient, HubError
 from .hub.relay import Inbox
 from .landing import inbox_root
 from .protocol import Envelope, clean_display, parse_addr, valid_host_name
-from .server import _BG_ABORTS, _PENDING_SPAWNS, WebUIRuntime, clear_alerts, make_webui_server
+from .server import (
+    _BG_ABORTS,
+    _BG_TOOL_ABORTS,
+    _PENDING_SPAWNS,
+    WebUIRuntime,
+    clear_alerts,
+    make_webui_server,
+)
 from .session import SESSIONS_DIR, SessionStore
 from .tools.ask import make_ask_tool, resolve_ask
 from .trilayer import TriLayer
@@ -1172,6 +1179,8 @@ class RoomRuntime(WebUIRuntime):
         # background subagents; a new turn starts with a clean one.
         bg_abort = threading.Event()
         _BG_ABORTS[sid] = bg_abort
+        tool_bg = threading.Event()  # 后台执行: stop only the running tool
+        _BG_TOOL_ABORTS[sid] = tool_bg
 
         def _abort() -> bool:
             return bool(should_abort and should_abort()) or bg_abort.is_set()
@@ -1219,13 +1228,15 @@ class RoomRuntime(WebUIRuntime):
             # GhostWorld character control (spec §43): arming here is what makes
             # the switch take effect on this turn instead of after a restart.
             ensure_ghostworld_watch(self.room)
-        return trilayer.build_clone_agent(
+        agent = trilayer.build_clone_agent(
             sink,
             system_prompt=prompt,
             extra_tools=tools,
             tool_names=clone.tool_names,
             model=clone.model,
         )
+        agent.tool_abort_event = tool_bg
+        return agent
 
     # ── answers ──
     def route_answer(self, ask_id: str, value) -> bool:
