@@ -14,7 +14,7 @@
   /* Build marker: bump per web/ change so any WebUI instance can self-identify
      (console + window.__FUNGI_WEB_VER) — stale cache vs new server is otherwise
      indistinguishable from the outside. */
-  window.__FUNGI_WEB_VER = 'web-bg-tool';
+  window.__FUNGI_WEB_VER = 'web-local-send';
   try { console.info('[fungi-web]', window.__FUNGI_WEB_VER); } catch (e) {}
   /* ---------- http ---------- */
   /* One fetch wrapper. Mobile inits a token prefix + 403 hook; desktop inits
@@ -681,7 +681,7 @@
        the upload (the chat can refresh, the picker returns) while the modal
        keeps watching for the peer's verdict. Awaiting the peer here would hang
        the caller until the other human clicks — or forever (§49). */
-    function sendToPeer(host, path, upStep, onProgress) {
+    function sendToPeer(host, path, upStep, onProgress, peerLocal) {
       const job = 'j-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
       // the job id on the element: the one handle onto the server-side record,
       // for a console and for the browser tests to read back
@@ -700,6 +700,14 @@
               // progress for it — without it this step looked dead for minutes
               // on a 1 GB file (§49)
               markDone(upStep);
+              if (peerLocal) {
+                // The receiver is this same machine (the GUI only sends here
+                // after marking the peer a local one): no verdict is crossing
+                // anything, so the modal closes on the upload instead of
+                // waiting on a 「② 对方接收」 step that would never come (§79).
+                finish();
+                return;
+              }
               if (j.delivery_total) progress(upStep + 1, j.delivered || 0, j.delivery_total);
               else note(upStep + 1, T('xfer.waitingPeer'));
               setTimeout(pump, 1000);
@@ -724,9 +732,12 @@
     }
 
     /* The verdict is the only ending the sender may claim: "对方已收到" needs
-       the landing, and a failure has to stay on screen with its reason. */
+       the landing, and a failure has to stay on screen with its reason.
+       `last` is the last step this modal actually drew: a same-machine send
+       opens only its upload step, so a verdict that does arrive lands there —
+       never on a step that was never drawn (§79). */
     function settle(upStep, j) {
-      const last = upStep + 1;
+      const last = Math.min(upStep + 1, steps.length - 1);
       if (cancelled) return;
       if (j.state === 'done') {
         markDone(last);
@@ -740,14 +751,22 @@
     }
 
     /* the two flows the shells use */
-    function sendOne(title, host, path) {
-      // a refused upload fails on ITS step, with the server's own words
+    function sendOne(title, host, path, peerLocal) {
+      // A refused upload fails on ITS step, with the server's own words.
+      // peerLocal: the receiver is this same machine (the page learned it from
+      // the friend payload's `local_peer`, set by the GUI's self-join mark), so
+      // there is no 「② 对方接收」 step to draw and no verdict to wait for —
+      // the one bar the modal has closes on the upload (§79).
       const send = () =>
-        sendToPeer(host, path, 0, (done, total) => progress(0, done, total)).catch(e => {
-          fail(e.message || String(e), 0);
-          throw e;
-        });
-      if (!open(title, [T('xfer.stepUploadRoom'), T('xfer.stepPeerReceive')])) return send();
+        sendToPeer(host, path, 0, (done, total) => progress(0, done, total), peerLocal).catch(
+          e => {
+            fail(e.message || String(e), 0);
+            throw e;
+          }
+        );
+      const labels = [T('xfer.stepUploadRoom')];
+      if (!peerLocal) labels.push(T('xfer.stepPeerReceive'));
+      if (!open(title, labels)) return send();
       note(0, T('xfer.sending'));
       return send();
     }
@@ -1613,15 +1632,34 @@
   function buildFileCard(file, opts) {
     const d = document.createElement('div');
     d.className = 'msg file-card' + (opts && opts.side ? opts.side : '');
-    const who = file.direction === 'phone' ? T('file.fromPhone') : T('file.fromPc');
+    // The shuttle names the two ends by device (phone/PC); the friend view
+    // names them by host ("我" vs the peer) — opts.who overrides the label.
+    const who = (opts && opts.who)
+      || (file.direction === 'phone' ? T('file.fromPhone') : T('file.fromPc'));
     d.innerHTML =
       '<div class="fc-head"><span class="fc-icon">&#x1F4C1;</span>'
       + '<span class="fc-name">' + escapeHtml(file.name || T('file.file')) + '</span>'
       + '<span class="fc-size">' + humanBytes(file.size) + '</span></div>'
-      + '<div class="fc-where">' + who + '</div>'
-      + '<div class="fc-path"></div>';
-    d.querySelector('.fc-path').textContent = file.path || '';
+      + '<div class="fc-where"></div>';
+    // textContent all the way down: who/reason can carry a peer's nickname and
+    // a human-typed reason — user-chosen text, never innerHTML.
+    d.querySelector('.fc-where').textContent = who;
+    if (file.reason) {
+      const line = document.createElement('div');
+      line.className = 'fc-where';
+      line.textContent = file.reason;
+      d.appendChild(line);
+    }
     const path = file.path || '';
+    // No path, no path line: a friend-view transfer names a file on the OTHER
+    // machine — there is no local path to show (and the actions below stay
+    // off, they were always gated on one). The shuttle's rows always carry one.
+    if (path) {
+      const pe = document.createElement('div');
+      pe.className = 'fc-path';
+      pe.textContent = path;
+      d.appendChild(pe);
+    }
     const acts = document.createElement('div');
     acts.className = 'fc-actions';
     if (path && opts && opts.canPull) {

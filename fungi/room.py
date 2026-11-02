@@ -317,6 +317,13 @@ class RoomBase:
         # Unread mail from the last mailbox poll (see _mail_watch_loop): the GUI
         # rings on it. One poller, two consumers — the GUI never asks the hub.
         self.last_unread = 0
+        # Wire names of the OTHER rooms this GUI process runs (marked by
+        # gui.join._finish_join when it joins a room hosted on this same
+        # machine). A file sent to one of them has its receiver on this disk,
+        # so the send modal skips the 「② 对方接收」 step — there is no peer
+        # verdict on another machine to wait for. GUI-marked only: pytest
+        # plays two machines with two same-process rooms and never marks.
+        self.local_peers: set[str] = set()
         # Send-file jobs the WebUI's modal polls (see fungi/xfer.py).
         self.xfer_jobs = TransferJobs()
         self._direct_transfers: dict[str, tuple] = {}
@@ -782,6 +789,11 @@ class RoomBase:
                     "from": self.local_addr,
                     "from_human": True,
                     "sender_name": sender_name,
+                    # where the sender picked the file from on this disk: the
+                    # card's 「打开所在目录」 points straight back at it, with
+                    # no receive needed — readers show it only while a file
+                    # with that path exists on THEIR disk (§79)
+                    "path": str(path),
                     # the modal's own id, echoed back by the receiver's verdict
                     # (§49): the page waits for the landing, not for the upload
                     "job": job or "",
@@ -1138,6 +1150,53 @@ class RoomClient(RoomBase):
             self.client.leave()
 
 
+def _local_landing(inbox_dir: str, row: dict) -> str | None:
+    """Where a transfer row's bytes sit on THIS machine, if they do (§79).
+
+    The probe IS the card's honest gate: a receiver's copy lands in
+    `inbox/<sender>/<name>`, so a file sent to a machine elsewhere is nowhere
+    under the sender's name on this disk and its card stays without a path
+    line — while a send between two wires on this disk finds its copy. The
+    row's byte count must match: a same-named leftover must never wear this
+    transfer's path. Collisions are landed as `stem-N` (both landing loops
+    number the same way), so when the plain name is somebody else's file the
+    numbered siblings are walked for the size that fits.
+    """
+    file = row.get("file")
+    if not isinstance(file, dict) or file.get("path"):
+        return None
+    name = str(file.get("name") or "")
+    if not name:
+        return None
+    try:
+        sender, _role, _peer = parse_addr(str(row.get("src") or ""))
+    except Exception:  # a malformed row never reaches the disk
+        return None
+    if not valid_host_name(sender):
+        return None
+    dest = inbox_root(inbox_dir) / sender / safe_name(name)
+    size = file.get("size")
+    wanted = size if isinstance(size, int) else None
+
+    def fits(candidate: Path) -> bool:
+        try:
+            return wanted is None or candidate.stat().st_size == wanted
+        except OSError:
+            return False
+
+    try:
+        if dest.is_file() and fits(dest):
+            return str(dest)
+        stem, suffix = dest.stem, dest.suffix
+        for n in range(1, 51):
+            sibling = dest.with_name(f"{stem}-{n}{suffix}")
+            if sibling.is_file() and fits(sibling):
+                return str(sibling)
+    except OSError:
+        return None
+    return None
+
+
 class RoomRuntime(WebUIRuntime):
     """WebUI wired to the local clone: per-host sessions, local toolset,
     card answers routed back out as answer envelopes."""
@@ -1390,10 +1449,31 @@ class RoomRuntime(WebUIRuntime):
         else:
             out["events"] = self.room.client.comm_log(host)  # client role: hub API
             mails = self.room.client.mail()["mails"]
+        # A transfer row earns its path line — and with it the card's
+        # 「打开所在目录」 button — only for a file THIS disk really holds
+        # (§79): the sender's picked copy first (ours whenever we sent it, so
+        # a 「我发送的」 card opens its folder with no receive needed), else the
+        # copy that landed in this inbox. The row travels to both machines, so
+        # another machine's path gets stripped right here — existence is the
+        # honest gate on both sources.
+        for row in out["events"]:
+            if row.get("kind") != "transfer":
+                continue
+            file = row.get("file")
+            if not isinstance(file, dict):
+                continue  # a row from before structured fields (§78)
+            original = Path(str(file.get("path") or ""))
+            if file.get("path") and original.is_absolute() and original.is_file():
+                continue  # the copy the sender picked from: still right here
+            file.pop("path", None)  # another machine's path, or gone since
+            landed = _local_landing(self.room.cfg.inbox_dir, row)
+            if landed:
+                file["path"] = landed
         out["mails"] = sorted(
             (m for m in mails if m.get("peer") == host), key=lambda m: float(m.get("ts") or 0.0)
         )
         out["live"] = self.room.live_tape(host)  # in-flight turn events, if any
+        out["local_peer"] = host in self.room.local_peers  # send modal: same machine?
         return out
 
     def comm_send(self, data: dict) -> dict:

@@ -15,13 +15,17 @@ a browser stays green.
 
 import contextlib
 import datetime
+import json
 import time
 
 import pytest
 
 from fungi.config import Config
 from fungi.events import NullSink
+from fungi.hub.app import safe_name
+from fungi.landing import inbox_root
 from fungi.llm import LLMResult
+from fungi.protocol import Envelope
 from fungi.room import RoomClient, RoomServer
 from fungi.server import WEBUI_TOKEN
 
@@ -841,3 +845,189 @@ def test_the_mobile_friend_view_offers_feedback_too(mobile_page, rooms):
     box.locator("input").fill("记错了，是 17:15")
     box.locator("button").click()
     mobile_page.wait_for_function("() => msgs.textContent.includes('[评价] 记错了')")
+
+
+# ── transfer cards in the friend thread (§78) ──
+
+
+def _seed_transfer(room, src, dst, name, size, reason, sender="", path=""):
+    """A delivered transfer envelope mirrored into the pair's comm-log — the
+    same record the hub writes on delivery (recorded directly so the peer's
+    clone is never woken by a bogus transfer id). `path` is the sender's own
+    picked copy, when the send carried one (§79)."""
+    body = {
+        "id": "t-" + name,
+        "name": name,
+        "size": size,
+        "reason": reason,
+        "from_human": True,
+        "sender_name": sender,
+    }
+    if path:
+        body["path"] = path
+    room.hub.commlog.record(
+        Envelope(src=src, dst=dst, type="transfer", body=body)
+    )
+
+
+def _seed_legacy_transfer_row(room, text):
+    """A row from before structured fields existed: the page must keep reading
+    it as the old text line (the JSONL on disk has rows from both eras)."""
+    path = room.hub.commlog.root / "alpha__beta.jsonl"
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {"ts": T0, "src": "alpha:comm-beta", "dst": "beta:comm-alpha",
+                 "kind": "transfer", "text": text},
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+
+
+CARD_PROBE = """
+(name) => {
+  const cards = Array.from(document.querySelectorAll('#messages .file-card'));
+  const c = cards.find(el => el.querySelector('.fc-name').textContent === name);
+  if (!c) return null;
+  return {
+    cls: c.className,
+    where: Array.from(c.querySelectorAll('.fc-where')).map(e => e.textContent),
+    size: (c.querySelector('.fc-size') || {}).textContent || '',
+    hasPath: !!c.querySelector('.fc-path'),
+    path: (c.querySelector('.fc-path') || {}).textContent || '',
+    actions: Array.from(c.querySelectorAll('.fc-actions button')).map(b => b.textContent),
+    openable: c.classList.contains('fc-openable'),
+  };
+}
+"""
+
+
+def _card(page, name):
+    return page.evaluate(CARD_PROBE, name)
+
+
+def _seed_all_transfers(server):
+    _seed_transfer(
+        server, "alpha:comm-beta", "beta:comm-alpha",
+        name="报告 v2.pdf", size=2048, reason="你要的那份", sender="Alpha",
+    )
+    _seed_transfer(
+        server, "beta:comm-alpha", "alpha:comm-beta",
+        name="photo.png", size=1048576, reason="路上拍的", sender="Bob",
+    )
+    _seed_legacy_transfer_row(server, "[file] old.bin (9 bytes) — legacy reason")
+
+
+def test_a_friend_transfer_wears_the_shuttle_card(page, rooms):
+    """2026-11-01 用户点名：好友会话里的文件传输也用卡片显示（参照文件传输助手）。
+    Same card builder as the shuttle's rows: name, size, who sent it, the
+    reason. No path line and no actions — the file lives on the OTHER machine,
+    there is no local path to reveal or open."""
+    server, _client = rooms
+    _seed_all_transfers(server)
+    _open_friend(page)
+    # module-scoped rooms share one comm-log across tests: wait by NAME, never
+    # by count — an earlier test's rows are still on the tape.
+    page.wait_for_function(
+        """() => Array.from(document.querySelectorAll('#messages .file-card .fc-name'))"""
+        """.some(n => n.textContent === 'photo.png')"""
+    )
+
+    mine = _card(page, "报告 v2.pdf")
+    assert mine is not None, "our transfer never became a card"
+    assert "mine" in mine["cls"], mine  # 本机发的 → 右侧
+    assert mine["where"][0] == "我发送的", mine
+    assert mine["where"][1] == "你要的那份", mine  # 理由作为第二行跟着卡片
+    assert mine["size"] == "2.0 KB", mine
+    assert mine["hasPath"] is False and mine["actions"] == [], mine
+    assert mine["openable"] is False, mine
+
+    peer = _card(page, "photo.png")
+    assert peer is not None, "the peer's transfer never became a card"
+    assert "peer" in peer["cls"], peer  # 对面发的 → 左侧
+    assert peer["where"] == ["Bob 发来的", "路上拍的"], peer
+    assert peer["size"] == "1.0 MB", peer
+    assert peer["hasPath"] is False and peer["actions"] == [], peer
+
+    # A row from before structured fields still reads as the old text line.
+    assert page.evaluate(
+        "() => Array.from(document.querySelectorAll('#messages .friend-event.file'))"
+        ".some(n => n.textContent.includes('old.bin'))"
+    ) is True, "the legacy text-only row lost its line"
+
+
+def test_the_mobile_friend_view_wears_the_same_card(mobile_page, rooms):
+    """手机端同一套卡片（m.js 与 app.js 同一 builder）：分侧、标签、无动作。"""
+    server, _client = rooms
+    _seed_all_transfers(server)
+    mobile_page.evaluate("async () => { await openFriendChat('beta'); }")
+    # shared comm-log (module-scoped rooms): wait by name, not by count.
+    mobile_page.wait_for_function(
+        """() => Array.from(document.querySelectorAll('#messages .file-card .fc-name'))"""
+        """.some(n => n.textContent === 'photo.png')"""
+    )
+
+    peer = _card(mobile_page, "photo.png")
+    assert peer is not None and "peer" in peer["cls"], peer
+    assert peer["where"] == ["Bob 发来的", "路上拍的"], peer
+    assert peer["actions"] == [] and peer["openable"] is False, peer
+
+    mine = _card(mobile_page, "报告 v2.pdf")
+    assert mine is not None and "mine" in mine["cls"], mine
+    assert mine["where"][0] == "我发送的", mine
+
+
+def test_a_landed_transfer_offers_to_open_its_folder(page, rooms, tmp_path):
+    """2026-11-02 用户点名（图里红圈的按钮）：好友卡补 path 行 +「打开所在目录」。
+    Two honest sources (§79): a copy landed under the sender's inbox folder at
+    the size the row names, OR — for a send this machine made — the very file
+    the sender picked from disk, still sitting there. A file living on the
+    other machine gets neither: there would be nothing here to open."""
+    server, _client = rooms
+    picked = tmp_path / "picked-by-me.txt"
+    picked.write_bytes(b"pick")
+    picked_name = "我挑的文件.txt"
+    _seed_transfer(
+        server, "alpha:comm-beta", "beta:comm-alpha",
+        name=picked_name, size=4, reason="从磁盘上挑的", sender="Alpha",
+        path=str(picked),
+    )
+    landed_name = "本机落盘-回执.txt"
+    _seed_transfer(
+        server, "alpha:comm-beta", "beta:comm-alpha",
+        name=landed_name, size=512, reason="自测落盘", sender="Alpha",
+    )
+    away_name = "远端那份.txt"
+    _seed_transfer(
+        server, "beta:comm-alpha", "alpha:comm-beta",
+        name=away_name, size=777, reason="在对面机器上", sender="Bob",
+    )
+    landed = inbox_root(server.cfg.inbox_dir) / "alpha" / safe_name(landed_name)
+    landed.parent.mkdir(parents=True, exist_ok=True)
+    landed.write_bytes(b"x" * 512)
+    try:
+        _open_friend(page)
+        # shared comm-log (module-scoped rooms): wait by name, not by count.
+        page.wait_for_function(
+            """(name) => Array.from(document.querySelectorAll('#messages .file-card .fc-name'))"""
+            """.some(n => n.textContent === name)""",
+            arg=landed_name,
+        )
+        got = _card(page, landed_name)
+        assert got is not None, "the landed transfer never became a card"
+        assert got["hasPath"] is True and got["path"] == str(landed), got
+        assert got["actions"] == ["打开所在目录"], got
+        assert got["openable"] is False, got  # 点卡即开是另一档事，这轮不加
+
+        away = _card(page, away_name)
+        assert away is not None, "the remote transfer never became a card"
+        assert away["hasPath"] is False and away["actions"] == [], away
+
+        # 发送时挑的原文件还在本机：不用等接收，路径行和按钮直接指它
+        got_picked = _card(page, picked_name)
+        assert got_picked is not None, "the picked-file transfer never became a card"
+        assert got_picked["hasPath"] is True and got_picked["path"] == str(picked), got_picked
+        assert got_picked["actions"] == ["打开所在目录"], got_picked
+    finally:
+        landed.unlink(missing_ok=True)  # repo inbox: this test's copy only

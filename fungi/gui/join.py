@@ -288,8 +288,13 @@ class JoinPage(QWidget):
     def _leave(self) -> None:
         if self.room is None:
             return
+        gone = self.room.host  # the wire the other rooms must stop calling local
         self.room.stop()  # sends leave to the hub
         self.room = None
+        # Symmetric with _finish_join's mark: a stale "local" wire must never
+        # skip steps for somebody else who joins with that name later (§79).
+        for other in self.window_ref.rooms():
+            other.local_peers.discard(gone)
         self._joined_ip = ""
         self._joined_token = ""
         self.leave_btn.setVisible(False)
@@ -324,6 +329,15 @@ class JoinPage(QWidget):
         self.window_ref.update_tray()
         self._joined_ip = ip  # what Enter compares the fields against
         self._joined_token = token
+        if net.is_self_ip(ip):
+            # Joined a room hosted on THIS machine: every room this process
+            # runs is the same disk, so they mark each other — a file sent
+            # between them then skips the modal's 「② 对方接收」 step (§79).
+            # GUI-gated on purpose: pytest plays two machines with same-process
+            # rooms and never passes through here.
+            rooms = self.window_ref.rooms()
+            for room in rooms:
+                room.local_peers |= {other.host for other in rooms if other is not room}
         self.settings.setValue("last_ip", ip)
         self.settings.setValue("last_token", token)
         self.settings.setValue("last_nick", nick)

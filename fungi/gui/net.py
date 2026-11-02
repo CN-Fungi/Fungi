@@ -26,6 +26,25 @@ def lan_ip() -> str:
         return "127.0.0.1"
 
 
+def is_self_ip(ip: str) -> bool:
+    """True when `ip` addresses THIS machine.
+
+    Discovery scans this machine's own LAN address like any neighbor's, so
+    "join the room you are hosting" arrives here as just another IP — this is
+    what tells the GUI the two rooms it now runs are two wires on ONE disk
+    (they then mark each other local; see gui.join._finish_join).
+    """
+    cand = str(ip or "").strip()
+    if not cand:
+        return False
+    if cand in {"127.0.0.1", "::1", "localhost", lan_ip()}:
+        return True
+    try:
+        return any(info[4][0] == cand for info in socket.getaddrinfo(socket.gethostname(), None))
+    except OSError:
+        return False
+
+
 def default_host_name() -> str:
     return socket.gethostname().split(".")[0]
 

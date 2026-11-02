@@ -3777,3 +3777,83 @@ token数得到。」
   修前红：`HubError: /api/heartbeat: HTTP 404: unknown host` 直接从 `_heartbeat_once` 冒出。
 - 门禁：`ruff check fungi tests` 干净；`ruff format --check` 干净；`pytest tests -q` → **823 passed**
   （821 + 本轮 2 条）。
+## 78. 好友会话里的文件传输也用卡片显示（2026-11-01 用户点名，参照文件传输助手）
+
+- **现象**：文件传输助手（§53/§56）里每次传输是一张卡片（名字、大小、谁发的、路径、动作），
+  而好友会话视图里同一笔传输只是一行 `📄 [file] name (size bytes) — reason` 纯文本。
+- **根因**：好友视图的传输行来自 hub 的 comm-log（`fungi/hub/commlog.py`），那里只把
+  envelope body 压成一行 `text`；前端 `renderFriendChat`（app.js / m.js 两份）拿到的只有这句话，
+  想画卡片也没有字段可用。
+- **修法（三层同一套卡片）**：
+  - `commlog.py::record`：transfer 行新增结构化 `file` 字段
+    `{name, size, reason, from_human, sender}`（sender=sender_name，人类直发时是对方昵称）；
+    `text` 原样保留——老 JSONL 行没有 `file`，页面照旧按文本行渲染（磁带上两种行并存）。
+  - `common.js::buildFileCard`：新增 `opts.who` 覆盖「手机上传/电脑发送」标签（好友视图按主机
+    分「我发送的 / {host} 发来的」）；`file.reason` 作为第二行小字；**无 path 就不画路径行**
+    （好友视图里的文件在对方机器上，没有本地路径可指，§73 的点开/打开目录也因此不出现——
+    动作本来就以 path 为门）。who/reason 一律 `textContent` 落笔，不进 innerHTML。
+  - `app.js` / `m.js` 的 `renderFriendChat`：`row.kind === 'transfer'` 且 `row.file` 在 →
+    用 `FC.buildFileCard` 画卡；分侧规则：comm-log 是这对主机共用的磁带，
+    `row.src` 的主机名不是对方 = 本机发的 → `mine`（贴右），否则 `peer`（贴左，§59 同款侧类）。
+    卡片是 detached builder，先 `p.append` 再交给 `insertByTs` 排位。
+- **顺手**：`web/common.js` build marker → `web-friend-card`；i18n 新增
+  `file.sentByMe` / `file.sentByPeer`（中英各两条）。
+- **验收**：`tests/test_friends_files.py::test_comm_log_transfer_rows_carry_structured_file_fields`
+  （envelope → 行字段）；`tests/test_webui_friend.py::test_a_friend_transfer_wears_the_shuttle_card`
+  与 `::test_the_mobile_friend_view_wears_the_same_card`（真浏览器：两端分侧、标签、理由行、
+  无路径无动作、老文本行兜底都在）。传输助手自身的卡片回归 `tests/test_webui_open.py` +
+  `tests/test_webui_sessions.py` 8 passed。
+- 门禁：`ruff check fungi tests` 干净；`pytest tests -q` → **827 passed**（824 + 本轮 3 条）。
+
+## 79. 好友卡补「打开所在目录」，自己发给自己取消第二根进度条（2026-11-02 用户点名）
+
+两问各一刀，其余不动（用户原话：「快速开始，最小化修改……别的多余的都不要做」）。
+
+- **问一（图里红圈的按钮）**：§78 的好友传输卡只有名字/大小/谁发的/理由，没有路径行，也没有
+  穿梭件卡上那颗「打开所在目录」。卡片动作本来以 `file.path` 为门（§73），而 comm-log 的
+  `file` 字段里根本没有 path——文件只存在于收方机器的 `inbox/<发送方>/`，行里却无从知道。
+  - **修法（服务端补路径，存在性即诚实门）**：`fungi/room.py` 新增 `_local_landing(inbox_dir, row)`，
+    `RoomRuntime.comm_log` 给每条 transfer 行探测本机落盘
+    `inbox/<src主机>/<safe_name(name)>`（先 exact，落盘时编号的 `stem-1..50` 兜底），
+    **文件存在且字节数与行里的 size 相符才写进 `file.path`**：发给远端的文件不在本机
+    `inbox/<本机wire>/` 下，行拿不到假路径；同名旧文件字节数不符也不许冒名顶替。
+  - **前端零改动**：`buildFileCard` 的路径行与 reveal 按钮本来就只看 `file.path`（§78 已把
+    path 门立好）。点卡即开 `.fc-openable`、手机「下载到手机」仍然不出现——这轮没点名，不给。
+  - **路径行的两级来源（同日追问「为啥没看见打开目录」后补上）**：`comm_send_human`
+    把发送时挑文件的原始绝对路径记进 envelope（`body.path`），`commlog.record` 落成
+    `file.path`；读的一方（`RoomRuntime.comm_log`）**两级都以「本机存在」为门**——
+    先看原件：原路径的文件还在（=「我发送的」那张卡）→ 直接指它，不用等接收；原件不在
+    （那是对端机器的路径，或文件已删）→ 剥掉，再找 `inbox/<src>/` 的落盘副本
+    （存在 + size 相符那条规则）；两级都空 → 卡片保持无路径无动作。**别的机器的路径
+    绝不外泄到对方页面**：行两边共读，但页面只见 comm_log 过滤后的 payload。
+- **问二（自己发给自己）**：发文件弹窗固定两步（桌面「① 上传到房间 / ② 对方接收」，§49 判决步）。
+  自己加入自己的房间（同进程两间房）时收发都在这块盘上，第二步等的判决要么不来、要么失败——
+  用户看到的就是「文件上传成功但是接收失败」的那第二根进度条。
+  - **检测（GUI 门控，pytest 不沾）**：`gui/net.py` 新增 `is_self_ip`（127.0.0.1 / ::1 /
+    lan_ip / hostname 解析）；`gui/join.py::_finish_join` 发现加入的是本机房间时，给本进程
+    所有房间互标 `RoomBase.local_peers`（对方的 wire 名）；`join._leave` 与 `host._leave`
+    对称摘标，防换房/更名后残留。**只走 GUI 分支**：pytest 用同进程两间房演两台机器、
+    从不经过这里，现有全部 consent / 判决测试天然成为「未标记 → 照旧两步、照出卡」的负例回归网。
+  - **弹窗**：`comm-log` payload 新增 `local_peer`；`web/common.js::sendOne/sendToPeer` 收
+    `peerLocal`，为真时只画「① 上传到房间」一根 bar，`state === 'sent'` 即 `finish()` 自己
+    关掉，不等判决；`settle` 的最后一步下标改 `min(upStep + 1, steps.length - 1)`，判决迟到
+    也只落在画出来的那根上。`app.js` 把 `local_peer` 存成 `friendIsLocal[host]` 传给
+    `sendOne`；手机端 `sendFromPhone` 不读它（手机端没有「自己加自己」这回事，三步原样）。
+  - **边界**：`local_peers` 只由 GUI 自己加自己时写、离开即摘，页面没有改写入口；它只省
+    弹窗那根 bar——**收方的 consent 卡照出、答案照走 §49、文件照样落地，没有任何自动放行**。
+- **顺手**：`web/common.js` build marker → `web-local-send`。
+- **验收**（本轮 7 条）：
+  - `tests/test_friend_send.py::test_local_landing_only_points_at_a_copy_this_disk_holds`
+    （无文件→无路径 / 字节数不符→无路径 / exact 命中 / stem-1 命中 / 已带 path 的行不动 /
+    坏地址的行不落盘）；
+  - `tests/test_room.py::test_a_sent_files_original_path_pays_for_the_button`（两级来源：原件在→指原件；
+    别的机器的路径→剥掉不外泄；落盘副本→第二来源；原件删了→不再指）；
+  - `tests/test_gui.py` 三条：`test_is_self_ip_says_yes_only_to_this_machine`、
+    `test_joining_our_own_room_marks_both_rooms_local`、
+    `test_leaving_unmarks_the_other_rooms_local_peers`；
+  - 真浏览器两条：`tests/test_webui_friend.py::test_a_landed_transfer_offers_to_open_its_folder`
+    （落盘行有路径行 +「打开所在目录」，挑文件的原件行不等接收也有，对端行仍无路径无动作）、
+    `tests/test_webui_transfer.py::test_a_send_to_ourselves_cancels_the_second_progress_bar`
+    （整场弹窗只有「① 上传到房间」并自己关掉；收方卡片仍照出、被回答、文件逐字节落地）。
+- 门禁：`ruff check fungi tests` 干净；`PYTHONIOENCODING=utf-8 python -m pytest tests -q` →
+  **834 passed**（827 + 本轮 7 条）。

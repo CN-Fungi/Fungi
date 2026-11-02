@@ -40,9 +40,13 @@ def window(qapp):
 
 
 class FakeRoom:
-    def __init__(self):
+    def __init__(self, host: str = "fake"):
         self.stopped = False
         self.webui_calls = 0
+        self.host = host
+        # gui.join's self-join mark reads and writes this on every live room
+        # (and _leave discards from it) — see spec §79.
+        self.local_peers: set[str] = set()
 
     def stop(self):
         self.stopped = True
@@ -839,6 +843,57 @@ def test_join_page_uses_typed_ip(window, monkeypatch):
         if joined:
             break
     assert joined == [("pc-alpha", "🌸花酱", "http://192.168.1.20:8902", "tok")]
+
+
+def test_is_self_ip_says_yes_only_to_this_machine(monkeypatch):
+    assert gui.net.is_self_ip("127.0.0.1")
+    assert gui.net.is_self_ip("::1")
+    monkeypatch.setattr(gui.net, "lan_ip", lambda: "192.168.0.104")
+    assert gui.net.is_self_ip("192.168.0.104")  # discovery scans our own address too
+    assert not gui.net.is_self_ip("8.8.8.8")
+    assert not gui.net.is_self_ip("")
+
+
+def test_joining_our_own_room_marks_both_rooms_local(window, monkeypatch):
+    """自己加入自己（同进程两间房，spec §79）：互标 local_peers —— 发文件的弹窗
+    就此知道对端在这块盘上，省掉「② 对方接收」那一步。"""
+    host_room = FakeRoom("pc-host")
+    window.host_page.room = host_room
+
+    def fake_client(host, display, url, token):
+        return FakeRoom(host)
+
+    monkeypatch.setattr(gui.net, "probe_room_port", lambda *a, **k: gui.GUI_PORT + 3)
+    monkeypatch.setattr(gui.net, "start_client_room", fake_client)
+    page = window.join_page
+    page.ip_edit.setText("127.0.0.1")  # the loopback IS this machine
+    page.token_edit.setText("tok")
+    page.nick_edit.setText("")
+    page.name_edit.setText("pc-join")
+    page._join()
+    for _ in range(200):
+        QApplication.processEvents()
+        if page.room is not None:
+            break
+    assert page.room is not None
+    assert page.room.local_peers == {"pc-host"}
+    assert host_room.local_peers == {"pc-join"}
+
+
+def test_leaving_unmarks_the_other_rooms_local_peers(window):
+    """离开房间后对称摘标（§79）：残留的 wire 不得再被当成本机对待。"""
+    host_room = FakeRoom("pc-host")
+    join_room = FakeRoom("pc-join")
+    window.host_page.room = host_room
+    host_room.local_peers.add("pc-join")
+    page = window.join_page
+    page.room = join_room
+    page.leave_btn.setVisible(True)
+    page._leave()
+    assert join_room.stopped and page.room is None
+    assert host_room.local_peers == set()
+    window.host_page.room = None
+    window.update_tray()  # no rooms left: hide the tray _leave armed
 
 
 def test_local_subnet_hosts_covers_self(monkeypatch):

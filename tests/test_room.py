@@ -13,6 +13,7 @@ from fungi.consent_rules import ConsentRules
 from fungi.events import NullSink
 from fungi.hub.app import Hub
 from fungi.hub.client import HubError
+from fungi.landing import inbox_root
 from fungi.protocol import Envelope
 from fungi.room import RoomClient, RoomRuntime, RoomServer, merge_comm_history
 
@@ -673,6 +674,77 @@ def test_chat_turn_with_cumulative_history_does_not_duplicate(server_room):
     after = [m["ts"] for m in msgs if m["role"] != "system"]
     assert after[: len(before)] == before
     assert after[-1] >= after[0]  # and the timeline stays ordered
+
+
+def test_a_sent_files_original_path_pays_for_the_button(server_room, tmp_path):
+    """§79 路径行的两级来源：发送时挑的原文件还在本机 → 卡片直接指它
+    （「我发送的」不等接收就有「打开所在目录」）；原路径是别的机器的 → 本机
+    没有就剥掉，改找 inbox 落盘副本；两头都没有 → 保持无路径无按钮。"""
+    room = server_room
+    original = tmp_path / "picked.jpg"
+    original.write_bytes(b"jpeg")
+    rec = room.hub.commlog.record
+    rec(
+        Envelope(
+            src="alpha:comm-beta",
+            dst="beta:comm-alpha",
+            type="transfer",
+            body={
+                "id": "t1",
+                "name": "picked.jpg",
+                "size": 4,
+                "reason": "r",
+                "from_human": True,
+                "sender_name": "Alpha",
+                "path": str(original),
+            },
+        )
+    )
+    rec(
+        Envelope(
+            src="alpha:comm-beta",
+            dst="beta:comm-alpha",
+            type="transfer",
+            body={
+                "id": "t2",
+                "name": "elsewhere.jpg",
+                "size": 4,
+                "reason": "r",
+                "from_human": True,
+                "sender_name": "Alpha",
+                "path": "C:/no-such-machine/elsewhere.jpg",
+            },
+        )
+    )
+    rec(
+        Envelope(
+            src="alpha:comm-beta",
+            dst="beta:comm-alpha",
+            type="transfer",
+            body={"id": "t3", "name": "plain.bin", "size": 4, "reason": "r",
+                  "from_human": True, "sender_name": "Alpha"},
+        )
+    )
+
+    def files() -> dict:
+        d = room.webui_runtime().comm_log("beta")
+        return {r["file"]["name"]: r["file"] for r in d["events"] if r.get("file")}
+
+    got = files()
+    assert got["picked.jpg"].get("path") == str(original)  # 原件还在：直接指它
+    assert "path" not in got["elsewhere.jpg"]  # 别的机器上的路径：绝不外泄
+    assert "path" not in got["plain.bin"]  # 没记过路径：没有就是没有
+
+    # 原件之外的第二来源：这份字节落进了本机 inbox
+    landing = Path(inbox_root(room.cfg.inbox_dir)) / "alpha" / "elsewhere.jpg"
+    landing.parent.mkdir(parents=True, exist_ok=True)
+    landing.write_bytes(b"jpeg")
+    try:
+        assert files()["elsewhere.jpg"].get("path") == str(landing)
+        original.unlink()  # 原件没了：不再指它，也不瞎猜
+        assert "path" not in files()["picked.jpg"]
+    finally:
+        landing.unlink(missing_ok=True)
 
 
 def test_comm_log_http_route_returns_full_payload(server_room):

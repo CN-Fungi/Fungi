@@ -1072,3 +1072,47 @@ def test_a_reloaded_phone_page_finishes_the_pull_it_started(mobile_page, rooms, 
         })"""
     )
     assert left == [], left
+
+
+def test_a_send_to_ourselves_cancels_the_second_progress_bar(page, rooms, tmp_path):
+    """2026-11-02 用户点名：自己发给自己时取消第二个进度条（§79）。
+    The GUI marks a peer local when it joins a room hosted on this machine;
+    the page then draws ONE step — 「① 上传到房间」 — and closes it the moment
+    the bytes are in the room. No 「② 对方接收」 bar ever appears, and nothing
+    waits for a verdict only the receiving page's card click could produce."""
+    server, client = rooms
+    server.local_peers.add("beta")
+    client.local_peers.add("alpha")
+    src = tmp_path / "self-send.txt"
+    src.write_text("自发自收\n" * 500, encoding="utf-8")
+    try:
+        assert _wait(lambda: server._clones.get("beta") is not None), "comm clone never appeared"
+        page.evaluate("() => openFriendChat('beta')")
+        page.wait_for_function("() => !!friendIsLocal['beta']")  # payload carried the mark
+        page.evaluate(XFER_WATCH)
+        page.evaluate("async (p) => { await sendFileToFriend(p); }", str(src))
+        # closes on its own — no verdict is coming to close it
+        assert _wait(lambda: _log(page) and "show" not in _log(page)[-1]["cls"], timeout_s=15), (
+            f"the single-step modal never closed by itself: {_log(page)}"
+        )
+        drawn = [s for snap in _log(page) for s in snap["steps"]]
+        assert drawn, "the modal drew no step at all"
+        assert all(s["lab"] == "① 上传到房间" for s in drawn), drawn
+        assert [s["cls"] for s in _log(page)[-1]["steps"]] == ["xf-step done"], _log(page)[-1]
+        # 省掉的是弹窗那根 bar，不是接收本身：收方卡片照出、答案照走 §49、
+        # 文件照样逐字节落地（shared rooms：不留没人答的卡给后面的测试）
+        assert _wait(lambda: client.webui_runtime().pending_asks()), "the receiver never got asked"
+        card = client.webui_runtime().pending_asks()[0]
+        assert client.webui_runtime().route_answer(card["id"], "yes") is True
+        job_id = page.evaluate("() => document.getElementById('xfer-overlay').dataset.job")
+        assert _wait(lambda: server.xfer_jobs.get(job_id).get("state") == "done"), (
+            server.xfer_jobs.get(job_id)
+        )
+        landed = Path(server.xfer_jobs.get(job_id).get("saved") or "")
+        try:
+            assert landed.read_bytes() == src.read_bytes()
+        finally:
+            landed.unlink(missing_ok=True)
+    finally:
+        server.local_peers.discard("beta")
+        client.local_peers.discard("alpha")

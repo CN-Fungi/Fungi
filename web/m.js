@@ -831,8 +831,21 @@ function renderFriendChat(d) {
   FC.renderTranscript(p, messages, d.asks || [], opts);
   events.forEach(row => {
     let node = null;
-    if (row.kind === 'transfer')
-      node = p.add('friend-event', '&#x1F4C4 ' + escapeHtml(row.text || T('friend.transfer')));
+    if (row.kind === 'transfer') {
+      if (row.file) {
+        // 与文件传输助手同一张卡片（§78）；结构化字段之前的老行保留文本行。
+        // 分侧：comm-log 是这对主机共用的磁带，源主机不是对方 = 本机发的。
+        const mine = String(row.src || '').split(':')[0] !== friendView;
+        node = FC.buildFileCard(row.file, {
+          side: mine ? ' mine' : ' peer',
+          who: mine ? T('file.sentByMe')
+            : T('file.sentByPeer', { host: row.file.sender || displayOf(friendView) }),
+        });
+        p.append(node); // detached builder — attach before insertByTs reorders
+      } else {
+        node = p.add('friend-event', '&#x1F4C4 ' + escapeHtml(row.text || T('friend.transfer')));
+      }
+    }
     else if (row.kind === 'task')
       node = p.add('friend-event', '&#x1F4E5 ' + escapeHtml(T('friend.delegatedTo', { host: row.dst || '?' })) + ' ' + escapeHtml((row.text || '').slice(0, 200)));
     else if (row.kind === 'result')

@@ -66,6 +66,7 @@ def _room(tmp_path):
     room._live_tapes = {}
     room._live_lock = threading.Lock()
     room._direct_transfers = {}
+    room.local_peers = set()
     room.xfer_jobs = room_mod.TransferJobs()
     room.rules = _Rules()
     return room
@@ -110,6 +111,7 @@ def test_comm_send_human_transfer_stages_and_sends(tmp_path):
     assert env.body["id"] == "t9"
     assert env.body["from_human"] is True
     assert env.body["from"] == "alice:local"
+    assert env.body["path"] == str(src)  # 卡片「打开所在目录」指回挑文件的地方（§79）
 
 
 def test_comm_send_human_without_clone_fails(tmp_path):
@@ -117,6 +119,43 @@ def test_comm_send_human_without_clone_fails(tmp_path):
     room._clones = {}
     assert "error" in room.comm_send_human("ghost", text="hi")
     assert "error" in room.comm_send_human("bob", file_path=str(tmp_path / "nope.txt"))
+
+
+def test_local_landing_only_points_at_a_copy_this_disk_holds(tmp_path):
+    """§79：好友卡的路径行与「打开所在目录」按钮只在本机真有这份字节时出现。
+    存在性 + 行里记的字节数就是诚实门——同名旧文件不许冒名顶替，落盘时的
+    stem-N 碰撞编号要认得出来，已带 path 的行（穿梭件自己的行）原样不动。"""
+    inbox = tmp_path / "inbox"
+    row = {
+        "kind": "transfer",
+        "src": "alpha:comm-beta",
+        "file": {"name": "报告 v2.pdf", "size": 400},
+    }
+    # 盘上什么都没有：这份字节在对端机器的 inbox，本机无路径可给
+    assert room_mod._local_landing(str(inbox), row) is None
+    dest = inbox / "alpha" / "报告 v2.pdf"
+    dest.parent.mkdir(parents=True)
+    # 同名但字节数不符：那是别的文件，不许挂到这条记录上
+    dest.write_bytes(b"old")
+    assert room_mod._local_landing(str(inbox), row) is None
+    # 字节对上的那份就是它
+    dest.write_bytes(b"x" * 400)
+    assert room_mod._local_landing(str(inbox), row) == str(dest)
+    # 落盘时编号出来的 stem-1 也能找到
+    sibling = dest.with_name("报告 v2-1.pdf")
+    sibling.write_bytes(b"abc")
+    short = {
+        "kind": "transfer",
+        "src": "alpha:comm-beta",
+        "file": {"name": "报告 v2.pdf", "size": 3},
+    }
+    assert room_mod._local_landing(str(inbox), short) == str(sibling)
+    # 已带 path 的行不动（shuttle 行自己带真路径）
+    short["file"]["path"] = "/somewhere/else.pdf"
+    assert room_mod._local_landing(str(inbox), short) is None
+    # 坏地址的行永远到不了磁盘
+    bad = {"kind": "transfer", "file": {"name": "a.bin", "size": 1}}
+    assert room_mod._local_landing(str(inbox), bad) is None
 
 
 def test_direct_download_lands_in_repo_root_even_from_foreign_cwd(tmp_path, monkeypatch):

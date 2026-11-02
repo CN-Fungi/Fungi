@@ -53,6 +53,22 @@ class CommLog:
                 f"[file] {env.body.get('name')} ({env.body.get('size')} bytes) — "
                 f"{env.body.get('reason') or 'no reason given'}"
             )
+            # Structured fields so the friend view can draw the transfer as the
+            # shuttle's file card (§78). `text` stays: it feeds logs and any row
+            # written before this existed falls back to it on the page.
+            row["file"] = {
+                "name": _clip(env.body.get("name")),
+                "size": env.body.get("size"),
+                "reason": _clip(env.body.get("reason")),
+                "from_human": bool(env.body.get("from_human")),
+                "sender": _clip(env.body.get("sender_name")),
+            }
+            # The sender's own picked path rides along when it was sent with
+            # one (human direct send, §79); a reader shows it only while a
+            # file with that path exists on ITS disk — the row travels to
+            # both machines, the path belongs to the sender's.
+            if env.body.get("path"):
+                row["file"]["path"] = _clip(env.body.get("path"))
         try:
             self.root.mkdir(parents=True, exist_ok=True)
             path = self.root / (pair_name(env.src, env.dst) + ".jsonl")

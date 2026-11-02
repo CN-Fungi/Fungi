@@ -72,6 +72,40 @@ def test_peers_endpoint_excludes_self(room):
     assert out["peers"] == [{"name": "beta", "display": ""}]  # display records, not bare names
 
 
+def test_comm_log_transfer_rows_carry_structured_file_fields(room):
+    """A transfer row is what the friend view draws its card from (§78): the
+    envelope's name/size/reason/sender must survive as fields, and `text` stays
+    for anything that reads the sentence."""
+    _hub, clients = _joined_room(room)
+    env = Envelope(
+        src="alpha:comm-beta",
+        dst="beta:comm-alpha",
+        type="transfer",
+        body={
+            "id": "t1",
+            "name": "报告 v2.pdf",
+            "size": 2048,
+            "reason": "你要的那份",
+            "from_human": True,
+            "sender_name": "Alpha君",
+            "path": r"C:\Users\me\Desktop\报告 v2.pdf",
+        },
+    )
+    clients["alpha"].send(env)
+    (row,) = room[0].commlog.read("alpha", "beta")
+    assert row["kind"] == "transfer"
+    assert row["file"] == {
+        "name": "报告 v2.pdf",
+        "size": 2048,
+        "reason": "你要的那份",
+        "from_human": True,
+        "sender": "Alpha君",
+        # 记下发件时挑的原路径：读的一方只在本机真有这个文件时才画出来（§79）
+        "path": r"C:\Users\me\Desktop\报告 v2.pdf",
+    }
+    assert row["text"].startswith("[file] 报告 v2.pdf (2048 bytes)")
+
+
 # ── the turn's text is a report to this host's user, not a message ──
 
 

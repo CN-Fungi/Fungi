@@ -992,6 +992,8 @@ resumeIfPending();
 let friendView = null; // host name while viewing a friend conversation (wire identity)
 let allPeers = []; // [{name, display}] — display is the nickname, "" falls back to name
 let lastFriendPayload = null; // rendered /comm-log JSON: skip no-change repaints
+const friendIsLocal = {}; // host -> peer lives on THIS machine (payload's local_peer);
+                          // a send there skips the modal's 「② 对方接收」 step (§79)
 
 function peerName(p) { return typeof p === 'string' ? p : (p && p.name) || ''; }
 function peerDisplay(p) { return typeof p === 'string' ? p : ((p && p.display) || peerName(p)); }
@@ -1121,6 +1123,7 @@ async function refreshFriendChat() {
     if (!r.ok) return;
     const d = await r.json();
     if (friendView !== host) return; // raced a switch away: never paint here
+    friendIsLocal[host] = !!d.local_peer; // fresh before every send decision
     const payload = JSON.stringify(d);
     if (payload === lastFriendPayload) return; // unchanged: no flicker
     lastFriendPayload = payload;
@@ -1159,8 +1162,23 @@ function renderFriendChat(d) {
   var fileNodes = [];
   events.forEach(row => {
     let node = null;
-    if (row.kind === 'transfer')
-      node = p.add('friend-event file', '&#x1F4C4 ' + escapeHtml(row.text || T('friend.transfer')));
+    if (row.kind === 'transfer') {
+      if (row.file) {
+        // A transfer wears the same card as the shuttle's rows (§78); rows
+        // logged before the structured fields existed keep the text line.
+        // Which side: the comm-log is the pair's shared tape, so a row whose
+        // source host is not the peer was sent by THIS host.
+        const mine = String(row.src || '').split(':')[0] !== friendView;
+        node = FC.buildFileCard(row.file, {
+          side: mine ? ' mine' : ' peer',
+          who: mine ? T('file.sentByMe')
+            : T('file.sentByPeer', { host: row.file.sender || displayOf(friendView) }),
+        });
+        p.append(node); // detached builder — attach before insertByTs reorders
+      } else {
+        node = p.add('friend-event file', '&#x1F4C4 ' + escapeHtml(row.text || T('friend.transfer')));
+      }
+    }
     else if (row.kind === 'task')
       node = p.add('friend-event task', '&#x1F4E5 ' + escapeHtml(T('friend.delegatedTo', { host: row.dst || '?' })) + ' ' + escapeHtml((row.text || '').slice(0, 200)));
     else if (row.kind === 'result')
@@ -1327,7 +1345,12 @@ document.getElementById('friend-browse').addEventListener('click', async () => {
    says "已收到" once the file is on their disk. See FC.initTransfer. */
 async function sendFileToFriend(path) {
   try {
-    await Xfer.sendOne(T('xfer.sendToFriend', { name: displayOf(friendView) }), friendView, path);
+    await Xfer.sendOne(
+      T('xfer.sendToFriend', { name: displayOf(friendView) }),
+      friendView,
+      path,
+      !!friendIsLocal[friendView] // sending to ourselves: no peer-receive bar (§79)
+    );
   } catch (e) {
     // the modal already shows it; nothing else to say here
   }

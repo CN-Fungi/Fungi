@@ -255,8 +255,13 @@ class HostPage(QWidget):
     def _leave(self) -> None:
         if self.room is None:
             return
+        gone = self.room.host  # the wire the other rooms must stop calling local
         self.room.stop()
         self.room = None
+        # Symmetric with join._finish_join's self-join mark (§79): a wire left
+        # behind must not keep earning same-machine treatment later.
+        for other in self.window_ref.rooms():
+            other.local_peers.discard(gone)
         self._set_started(False)
         self.window_ref.update_tray()
         self.ip_edit.clear()
